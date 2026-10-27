@@ -1,0 +1,8 @@
+/target
+/spikes/*/target
+/spikes/out/
+# Cargo.lock IS committed (this workspace ships binaries, not a library)
+node_modules/
+dist/
+.DS_Store
+*.log

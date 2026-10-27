@@ -1,0 +1,32 @@
+# cargo-deny config — license hygiene gate (see ROADMAP.md / plan "Licensing
+# & open-source posture"). Run with: cargo deny check licenses
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "CC0-1.0",
+    "Unlicense",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+]
+# GPL-*/AGPL-* are implicitly denied by not being in `allow`.
+# LGPL-* is deliberately left out of `allow` too: the one accepted exception
+# (ffmpeg) is invoked as a subprocess, not a Cargo dependency, so it never
+# appears here. If an LGPL crate ever shows up in this list it means
+# something is being *linked*, not shelled out to — that must be a
+# conscious decision (see the plan's HEIC spike note on libheif-rs), not a
+# transitive surprise. Handle it by adding an explicit, commented exception
+# here, not by widening `allow` blindly.
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -1,0 +1,14 @@
+[package]
+name = "photodedup-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+image = { workspace = true }
+rayon = { workspace = true }
+blake3 = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
