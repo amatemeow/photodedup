@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/cli",
+    # crates/server joins once M2 starts (loopback HTTP + SSE)
+    # src-tauri joins once M4 starts (native shell)
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/REPLACE_ME/photodedup"
+
+[workspace.dependencies]
+rayon = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+# default-features off: the `image` crate's defaults pull in the AVIF
+# *encoder* (ravif/rav1e), which we never use (HEIC/video decode go through
+# the bundled ffmpeg sidecar per /SPIKES.md; AVIF *decode* is a roadmap item
+# via `rav1d`, a clean BSD-2 dependency, not ravif/rav1e) -- and rav1e
+# transitively pulls in `libfuzzer-sys`, NCSA-licensed, caught by
+# `cargo deny check licenses`. Enable only the codecs actually in use.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
