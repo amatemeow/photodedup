@@ -1,0 +1,14 @@
+ffmpeg and ffprobe, as shipped with photodedup
+==============================================
+
+Version:  9.0.2
+Source:   https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz
+SHA-256:  8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
+Licence:  GNU LGPL v2.1 or later (see LICENSES/LGPL-2.1-or-later.txt).
+          Built WITHOUT --enable-gpl and WITHOUT --enable-nonfree.
+Built by: scripts/build-sidecar.sh
+Configure: --prefix=<build directory> --disable-gpl --disable-nonfree --disable-version3 --disable-autodetect --disable-network --disable-doc --disable-ffplay --enable-static --disable-shared --enable-pic
+
+photodedup runs these as separate programs (it never links against them),
+and you can replace them: set PHOTODEDUP_FFMPEG / PHOTODEDUP_FFPROBE to your
+own build, or put one beside the app.

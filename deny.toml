@@ -13,6 +13,9 @@ allow = [
     "Zlib",
     "MPL-2.0",
     "Unicode-3.0",
+    # More permissive than plain Apache-2.0 (it adds an exception for LLVM's
+    # runtime-library use); pulled in by the desktop shell's dependency tree.
+    "Apache-2.0 WITH LLVM-exception",
 ]
 # GPL-*/AGPL-* are implicitly denied by not being in `allow`.
 # LGPL-* is deliberately left out of `allow` too: the one accepted exception
@@ -30,3 +33,10 @@ multiple-versions = "warn"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+
+[advisories]
+# Reviewed exceptions, each with the reason. Nothing is ignored by default.
+ignore = [
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is flagged unmaintained (not vulnerable). It is a compile-time macro crate reached only through the Linux GTK bindings (gtk-rs 0.18, via Tauri's windowing layer); it is not part of the shipped program and not used on macOS or Windows. Revisit when Tauri moves to newer GTK bindings." },
+]
+

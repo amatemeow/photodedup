@@ -792,18 +792,27 @@ mod tests {
         fs::write(outside.path().join("neighbour.jpg"), b"next door").unwrap();
         let before = fs::read_dir(outside.path()).unwrap().count();
 
+        // What is in the shared temp folder (the root's parent) before we start.
+        let parent_names = |p: &Path| -> std::collections::BTreeSet<String> {
+            fs::read_dir(p).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()
+        };
         let fx = fixture(&[("k.jpg", BIG), ("d.jpg", SMALL)], &[&["k.jpg", "d.jpg"]], &[]);
+        let parent = fx.root.parent().unwrap().to_path_buf();
+        let known = parent_names(&parent);
+
         fx.decide("d.jpg", false);
         let id = execute(&fx.store, &fx.scan).unwrap().batch_id.unwrap();
         undo(&fx.store, &id).unwrap();
 
-        // the temp dir's parent (shared /tmp) gained nothing of ours either
-        let parent_entries: Vec<_> = fs::read_dir(fx.root.parent().unwrap())
-            .unwrap()
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().contains("photodedup"))
+        // Whatever appeared beside the root *during this test* and looks like ours.
+        // (Not "anything named photodedup": other programs may leave such things
+        // in a shared temp folder, and parallel tests make their own temp dirs.)
+        let added: Vec<String> = parent_names(&parent)
+            .difference(&known)
+            .filter(|n| n.to_lowercase().contains("photodedup"))
+            .cloned()
             .collect();
-        assert!(parent_entries.is_empty(), "no stray files beside the root: {parent_entries:?}");
+        assert!(added.is_empty(), "stray files beside the root: {added:?}");
         assert_eq!(fs::read_dir(outside.path()).unwrap().count(), before);
         drop(fx.tmp);
     }

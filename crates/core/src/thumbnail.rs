@@ -115,7 +115,7 @@ mod tests {
         if !dir.exists() {
             return;
         }
-        let bytes = image_thumbnail(&dir.join("IMG_3684.HEIC"), "ffmpeg", 256, None).unwrap();
+        let bytes = image_thumbnail(&dir.join("IMG_3684.HEIC"), &crate::tools::ffmpeg(), 256, None).unwrap();
         assert!(bytes.starts_with(&[0xFF, 0xD8]));
         let decoded = image::load_from_memory(&bytes).unwrap();
         let (w, h) = decoded.dimensions();

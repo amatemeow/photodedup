@@ -277,7 +277,7 @@ mod tests {
     #[ignore = "requires the personal ~/photo-dedup reference dataset + ffprobe on PATH"]
     fn oneplus_video_extracts_vendor_model_via_ffprobe() {
         let Some(dir) = dataset_dir() else { return };
-        let meta = extract_video(&dir.join("VID20261020154635.mp4"), "ffprobe", Some(SchedulingHint::Utility)).unwrap();
+        let meta = extract_video(&dir.join("VID20261020154635.mp4"), &crate::tools::ffprobe(), Some(SchedulingHint::Utility)).unwrap();
         assert_eq!(meta.model.as_deref(), Some("OnePlus 15"));
         assert!(meta.datetime_original.is_some());
     }
@@ -292,7 +292,7 @@ mod tests {
             .map(|e| e.path())
             .find(|p| p.extension().map(|e| e.eq_ignore_ascii_case("mov")).unwrap_or(false));
         let Some(mov) = mov else { return };
-        let meta = extract_video(&mov, "ffprobe", Some(SchedulingHint::Utility)).unwrap();
+        let meta = extract_video(&mov, &crate::tools::ffprobe(), Some(SchedulingHint::Utility)).unwrap();
         assert_eq!(meta.make.as_deref(), Some("Apple"));
         assert!(meta.datetime_original.is_some(), "Apple's +0900 creationdate must parse");
         // Make + model + time is what makes a clip an intact camera original.

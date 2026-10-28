@@ -8,3 +8,11 @@ dist/
 *.log
 # CLI scan output (local test runs) -- never meant to be tracked
 .photodedup-scan.sqlite3*
+# the desktop shell is its own workspace
+/src-tauri/target
+/src-tauri/gen
+/sidecar/ffmpeg-*
+/sidecar/ffprobe-*
+
+# generated at release time by scripts/third-party-licenses.sh
+/THIRD-PARTY-LICENSES.md

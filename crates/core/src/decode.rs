@@ -59,7 +59,7 @@ mod tests {
         if !dir.exists() {
             return;
         }
-        let img = decode_image(&dir.join("IMG_3684.HEIC"), "ffmpeg", Some(SchedulingHint::Utility))
+        let img = decode_image(&dir.join("IMG_3684.HEIC"), &crate::tools::ffmpeg(), Some(SchedulingHint::Utility))
             .expect("decode failed");
         assert_eq!((img.width(), img.height()), (4032, 3024));
     }
