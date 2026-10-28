@@ -12,7 +12,7 @@ use crate::keeper::{pick_keeper, score as keeper_score};
 use crate::metadata::{extract_image, extract_video};
 use crate::model::{FileId, FileRecord, MediaClassSerde};
 use crate::provenance::{evaluate, Origin, Provenance};
-use crate::resolve::{detect_burst_runs, resolve_t1_edges, resolve_t1b_edges, BurstRun};
+use crate::resolve::{detect_burst_runs, resolve_t1_edges, resolve_t1b_edges, split_runs_by_similarity, BurstRun, BURST_VISUAL_MAX_DIST};
 use crate::scan::scan;
 use crate::throttle::{build_pool, lower_process_priority, ScanIntensity};
 use crate::video_match::{find_video_matches, VideoCandidate, VideoMatch};
@@ -361,7 +361,10 @@ fn run_inner(root: &Path, opts: &PipelineOptions, on_progress: &(dyn Fn(Progress
             Some((id, a.camera_model.clone()?, a.capture_time?))
         })
         .collect();
-    let burst_runs = detect_burst_runs(&burst_input);
+    // Time alone over-groups (see `BURST_VISUAL_MAX_DIST`): keep only the
+    // frames that also look like the same shot.
+    let frame_hashes: HashMap<FileId, Hash256> = analyzed.iter().filter_map(|(&id, a)| a.phash.map(|h| (id, h))).collect();
+    let burst_runs = split_runs_by_similarity(detect_burst_runs(&burst_input), &frame_hashes, BURST_VISUAL_MAX_DIST);
 
     let review_pairs: Vec<PairClassification> = pair_classifications
         .into_iter()

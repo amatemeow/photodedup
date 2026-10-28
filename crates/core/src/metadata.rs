@@ -159,8 +159,13 @@ pub fn extract_video(path: &Path, ffprobe_bin: &str, hint: Option<SchedulingHint
     ])
     .is_some();
 
-    let datetime_original = tag_str(&["com.apple.quicktime.creationdate", "creation_time"])
-        .and_then(|s| parse_video_timestamp(&s));
+    // First tag that is both present AND parseable: taking the first
+    // present one alone left iPhone clips without a timestamp whenever
+    // `creationdate` had a format we couldn't read, even though
+    // `creation_time` beside it was fine.
+    let datetime_original = ["com.apple.quicktime.creationdate", "creation_time"]
+        .iter()
+        .find_map(|k| tag_str(&[k]).and_then(|s| parse_video_timestamp(&s)));
 
     // dimensions from the first video stream
     let (width, height) = json
@@ -206,6 +211,9 @@ fn parse_video_timestamp(s: &str) -> Option<NaiveDateTime> {
     chrono::DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.naive_utc())
         .ok()
+        // Apple writes the offset without a colon (`+0900`), which RFC 3339
+        // parsing rejects.
+        .or_else(|| chrono::DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f%z").map(|dt| dt.naive_utc()).ok())
         .or_else(|| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f").ok())
 }
 
@@ -219,6 +227,18 @@ mod tests {
             .join("photo-dedup")
             .join("originals");
         dir.exists().then_some(dir)
+    }
+
+    #[test]
+    fn video_timestamps_parse_in_every_form_the_cameras_write() {
+        let utc = |s| parse_video_timestamp(s).map(|t| t.to_string());
+        // RFC 3339 with Z (OnePlus, and iPhone's `creation_time`).
+        assert_eq!(utc("2026-10-14T23:31:38.000000Z").as_deref(), Some("2026-10-14 23:31:38"));
+        // Apple's `creationdate`: offset with no colon. Same instant as above.
+        assert_eq!(utc("2026-10-15T08:31:38+0900").as_deref(), Some("2026-10-14 23:31:38"));
+        // No offset at all: taken as written.
+        assert_eq!(utc("2026-10-15T08:31:38").as_deref(), Some("2026-10-15 08:31:38"));
+        assert_eq!(utc("not a date"), None);
     }
 
     #[test]
@@ -274,5 +294,9 @@ mod tests {
         let Some(mov) = mov else { return };
         let meta = extract_video(&mov, "ffprobe", Some(SchedulingHint::Utility)).unwrap();
         assert_eq!(meta.make.as_deref(), Some("Apple"));
+        assert!(meta.datetime_original.is_some(), "Apple's +0900 creationdate must parse");
+        // Make + model + time is what makes a clip an intact camera original.
+        let p = crate::provenance::evaluate(&meta, "IMG_0001.MOV");
+        assert_eq!(p.origin, crate::provenance::Origin::CameraOriginal);
     }
 }

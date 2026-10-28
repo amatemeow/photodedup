@@ -288,13 +288,14 @@ as a choice.
 
 - **Review split into the MVP's categories** (tabs, each with its own
   count and one-line explanation): *Exact duplicates* (T0 clusters),
-  *True duplicates* (T1/T1b clusters, video matches included), *Burst
+  *True duplicates* (T1/T1b clusters, video matches included), *Quick
   sequences*, *Same-device review* (browse only) and *Orphan videos*
   (browse only). The first three are decided; the last two never offer a
   way to mark anything. Checked against the reference dataset: 2 / 180 /
-  368 runs over 1332 frames, 126 same-device pairs (the known 126-vs-125
+  269 sequences over 902 frames (was 368 time-only runs over 1332, the
+  MVP's number; see below), 126 same-device pairs (the known 126-vs-125
   difference), 2 orphan videos.
-  - **Bursts** suggest only the sharpest frame (as the MVP defaulted), any
+  - **Quick sequences** suggest only the sharpest frame (as the MVP defaulted), any
     number of frames can be kept, and the detail view has *Keep all* and
     *Keep suggested only*. A frame that is also a duplicate group's
     suggested keeper is suggested-kept in the burst too, so thinning a
@@ -312,13 +313,58 @@ as a choice.
   - **Video matching reports progress** (`videos {done,total}`, counted in
     derived videos finished) and checks for cancellation per video. The
     bar was previously empty for the whole video phase.
-  - **Known engine gap, not fixed here:** 8 genuine iPhone Air clips
-    (`IMG_*.MOV`, with Apple make/model, GPS and creation time) are
-    classified `unknown` origin at 0.12 confidence, because video
-    provenance doesn't treat the QuickTime `com.apple.quicktime.make` /
-    `model` tags as camera evidence. Consequences: they are never
-    compared, and a messenger copy of an iPhone video could never be
-    matched to its original. Fixing it changes video classification, so it
-    needs re-checking against the video parity numbers (6 matches, 2
-    orphans) first.
+  - **Engine gap, now fixed: iPhone videos were classified `unknown`.**
+    Apple writes `com.apple.quicktime.creationdate` with the offset
+    lacking a colon (`+0900`), which RFC 3339 parsing rejects, and the
+    code took the first tag *present* rather than the first that *parsed*,
+    so `creation_time` beside it was never tried. With no timestamp, make
+    + model + time ("intact camera identity") never held, and 8 genuine
+    iPhone Air clips fell to `unknown` at 0.12 confidence: never compared,
+    and unmatchable as originals. Both are fixed (`metadata.rs`), with a
+    unit test over every timestamp form and the real-file test now
+    asserting an iPhone clip classifies as a camera original.
+    **Parity baseline after the fix, unchanged:** 2 exact, 180 true
+    duplicates, 6 video matches (4 high-confidence), 2 orphan videos, 126
+    same-device pairs. The "source not identified" section of the Orphan
+    videos tab is now empty on this dataset (it stays, for videos whose
+    metadata really is missing). A full scan took 250 s in that run, but
+    other ffmpeg work was running at the same time, so treat it as an
+    upper bound, not a measurement.
+
+- **"Burst" runs are now split by what the photos look like, and renamed
+  "Quick sequences".** Two problems, both raised from real use:
+  - *They aren't camera bursts.* A run is just photos from one camera
+    within `BURST_GAP_SECONDS` (3 s) of each other, and on this dataset
+    they were taken by hand in quick succession, not in the camera's burst
+    mode. The tab is renamed and its text says how sequences are found.
+    The internal names (`burst_runs`, `Tab = 'burst'`) are unchanged.
+  - *A run mixed unrelated shots* (a portrait, a full-body shot, a
+    different pose), so "keep the sharpest of the run" was misleading. A
+    quarter of consecutive frames inside time-only runs were at
+    chance-level difference (110+ of 256 bits). Each run is now split into
+    groups of frames that look alike (`split_runs_by_similarity`, single
+    linkage at pHash distance <= `BURST_VISUAL_MAX_DIST` = 80, regrouping
+    by look rather than adjacency, so portrait / full-body / portrait
+    becomes two groups). Groups need two or more frames; a frame left
+    alone is simply kept, as is a frame with no hash.
+  - **The threshold is a judgment call, not a derived number.** Distances
+    inside runs form a continuum (0 to 150) with no natural gap, so it was
+    chosen by looking at contact sheets of real runs: at 80 a nine-frame
+    run of one pose stayed whole, a full-body shot and a waist-up portrait
+    on the same stairs separated, and a wide shot plus five different
+    portrait poses fragmented (intended: different poses are different
+    groups); at 60 same-pose runs over-split, and past 90 it nears the
+    100-134 range of unrelated photos. Over-splitting is the cheap error
+    (a frame is kept), under-splitting is the misleading one. pHash is
+    coarse for "same shot, subject moved", so some near-identical frames
+    after a small reframe will still separate. A sturdier similarity
+    measure (local features, or embeddings) would help; that is a larger
+    piece of work and isn't planned yet.
+  - **Parity baseline changed on purpose:** burst runs were 368 runs over
+    1332 files (exact match with the MVP, time-only); they are now **269
+    sequences over 902 frames**. Every sequence still has a sharpest-frame
+    suggestion. Tests pin the splitting rules (look-alike
+    stays together, different shot splits, alternating shots regroup, a
+    lone or hash-less frame is dropped, the threshold is inclusive, a
+    slowly changing sequence chains).
 

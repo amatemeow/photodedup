@@ -7,6 +7,7 @@
 //! burst-run detection by time+camera sequence.
 
 use crate::classify::{PairClassification, Tier, BURST_GAP_SECONDS};
+use crate::hash::Hash256;
 use crate::model::FileId;
 use crate::provenance::Origin;
 use chrono::NaiveDateTime;
@@ -85,6 +86,75 @@ pub fn resolve_t1b_edges(
     edges
 }
 
+/// Two frames of a time-run belong to the same sequence only if their
+/// perceptual hashes differ by at most this many of 256 bits.
+///
+/// Why this exists: a run found by timestamps alone is just "photos taken
+/// within `BURST_GAP_SECONDS` of each other", and on the reference
+/// dataset a quarter of the consecutive frames inside such runs were at
+/// chance-level difference (110+ bits: unrelated shots). Thinning "the
+/// sharpest of the run" across a portrait, a full-body shot and a
+/// different pose would be misleading, so each run is split into groups
+/// of frames that look like the same shot.
+///
+/// Calibrated by eye on contact sheets of real runs, not derived: there is
+/// no natural gap in the distances (they form a continuum from 0 to 150).
+/// At 80 a nine-frame run of one pose stayed whole, a full-body shot and a
+/// waist-up portrait on the same stairs split apart, and a wide shot plus
+/// five different portrait poses fragmented (as intended: different poses
+/// are different groups). At 60 same-pose runs over-split; past 90 the
+/// threshold nears the 100-134 range of unrelated photos. Erring toward
+/// over-splitting is the cheap direction: a frame left alone is simply
+/// kept.
+pub const BURST_VISUAL_MAX_DIST: u32 = 80;
+
+/// Refines time-based runs into groups that also look alike. Single-linkage
+/// within each run (a frame joins a group if it is within `max_dist` of any
+/// member), so a slowly changing pose stays together while a different
+/// subject or framing does not. Groups keep time order and need two or more
+/// frames; a frame with no hash cannot be compared, so it is left out (and
+/// therefore never offered for removal).
+pub fn split_runs_by_similarity(runs: Vec<BurstRun>, hashes: &HashMap<FileId, Hash256>, max_dist: u32) -> Vec<BurstRun> {
+    let mut out = Vec::new();
+    for run in runs {
+        let frames: Vec<(FileId, Hash256)> = run.files.iter().filter_map(|&f| hashes.get(&f).map(|&h| (f, h))).collect();
+
+        let mut parent: Vec<usize> = (0..frames.len()).collect();
+        fn find(parent: &mut [usize], mut x: usize) -> usize {
+            while parent[x] != x {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            x
+        }
+        for i in 0..frames.len() {
+            for j in i + 1..frames.len() {
+                if frames[i].1.distance(&frames[j].1) <= max_dist {
+                    let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                    parent[ri] = rj;
+                }
+            }
+        }
+
+        // Groups in order of their first frame; members already in time order.
+        let mut groups: Vec<Vec<FileId>> = Vec::new();
+        let mut group_of_root: HashMap<usize, usize> = HashMap::new();
+        for i in 0..frames.len() {
+            let root = find(&mut parent, i);
+            let g = *group_of_root.entry(root).or_insert_with(|| {
+                groups.push(Vec::new());
+                groups.len() - 1
+            });
+            groups[g].push(frames[i].0);
+        }
+        out.extend(groups.into_iter().filter(|g| g.len() >= 2).map(|files| BurstRun {
+            camera_model: run.camera_model.clone(),
+            files,
+        }));
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 pub struct BurstRun {
     pub camera_model: String,
@@ -131,6 +201,69 @@ pub fn detect_burst_runs(images: &[(FileId, String, NaiveDateTime)]) -> Vec<Burs
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hash that is exactly `bits` bits away from `h(0)`.
+    fn h(bits: u32) -> Hash256 {
+        let ones = |n: u32| if n == 0 { 0 } else { u128::MAX >> (128 - n) };
+        Hash256(ones(bits.min(128)), ones(bits.saturating_sub(128)))
+    }
+    fn run(files: &[FileId]) -> BurstRun {
+        BurstRun { camera_model: "Cam".into(), files: files.to_vec() }
+    }
+    fn split(files: &[(FileId, Option<u32>)]) -> Vec<Vec<FileId>> {
+        let hashes: HashMap<FileId, Hash256> = files.iter().filter_map(|&(id, b)| b.map(|b| (id, h(b)))).collect();
+        let ids: Vec<FileId> = files.iter().map(|f| f.0).collect();
+        split_runs_by_similarity(vec![run(&ids)], &hashes, BURST_VISUAL_MAX_DIST).into_iter().map(|r| r.files).collect()
+    }
+
+    #[test]
+    fn frames_that_look_alike_stay_one_group() {
+        assert_eq!(split(&[(1, Some(0)), (2, Some(10)), (3, Some(20))]), vec![vec![1, 2, 3]]);
+    }
+
+    #[test]
+    fn a_different_shot_inside_the_run_splits_it_in_two() {
+        // 1,2 are one shot; 3,4 are another, far from both (the "full-body
+        // then portrait" case). Distances are all from the 0 hash, so
+        // 1-3 differ by 120 bits.
+        let got = split(&[(1, Some(0)), (2, Some(5)), (3, Some(120)), (4, Some(125))]);
+        assert_eq!(got, vec![vec![1, 2], vec![3, 4]]);
+    }
+
+    #[test]
+    fn alternating_shots_regroup_by_look_not_by_adjacency() {
+        // portrait, full-body, portrait, full-body: two groups of two,
+        // even though no two neighbours match.
+        let got = split(&[(1, Some(0)), (2, Some(120)), (3, Some(4)), (4, Some(124))]);
+        assert_eq!(got, vec![vec![1, 3], vec![2, 4]]);
+    }
+
+    #[test]
+    fn a_lone_frame_is_not_a_group_and_is_dropped() {
+        assert_eq!(split(&[(1, Some(0)), (2, Some(5)), (3, Some(200))]), vec![vec![1, 2]]);
+        assert!(split(&[(1, Some(0)), (2, Some(200))]).is_empty());
+    }
+
+    #[test]
+    fn a_frame_with_no_hash_is_never_grouped() {
+        assert_eq!(split(&[(1, Some(0)), (2, None), (3, Some(5))]), vec![vec![1, 3]]);
+    }
+
+    #[test]
+    fn a_slowly_changing_sequence_chains_into_one_group() {
+        // Each step is within the threshold, though the ends are not.
+        let got = split(&[(1, Some(0)), (2, Some(60)), (3, Some(120))]);
+        assert_eq!(got, vec![vec![1, 2, 3]]);
+        let end_to_end = h(0).distance(&h(120));
+        assert!(end_to_end > BURST_VISUAL_MAX_DIST);
+    }
+
+    #[test]
+    fn the_threshold_is_inclusive() {
+        let at = BURST_VISUAL_MAX_DIST;
+        assert_eq!(split(&[(1, Some(0)), (2, Some(at))]), vec![vec![1, 2]]);
+        assert!(split(&[(1, Some(0)), (2, Some(at + 1))]).is_empty());
+    }
     use crate::classify::classify_pair;
     use crate::classify::ClassifyInput;
 
