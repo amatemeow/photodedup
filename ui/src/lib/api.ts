@@ -25,7 +25,7 @@ function loadToken(): string {
 
 const token = loadToken();
 
-export type Phase = 'scanning' | 'analyzing' | 'exact_duplicates' | 'matching' | 'videos' | 'clustering';
+export type Phase = 'scanning' | 'analyzing' | 'analyzing_videos' | 'exact_duplicates' | 'matching' | 'videos' | 'clustering';
 
 export type JobStatus =
   | ({ state: 'running'; phase: Phase } & { done?: number; total?: number })

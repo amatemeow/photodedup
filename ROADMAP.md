@@ -175,9 +175,10 @@ as a choice.
     then every change, and closes right after the terminal event.
     `GET /api/jobs/{id}` returns the same status as a snapshot, for a UI
     that reconnects or reloads (`EventSource` can't replay what it
-    missed). Status is `running` + phase (`scanning`, `analyzing
-    {done,total}`, `exact_duplicates`, `matching`, `videos`,
-    `videos {done,total}`, `clustering`), `done {scan_id}`, `cancelled`, or `failed {message}`.
+    missed). Status is `running` + phase (`scanning`, `analyzing {done,total}`
+    for photos, `analyzing_videos {done,total}`, `exact_duplicates`,
+    `matching`, `videos {done,total}` for matching, `clustering`),
+    `done {scan_id}`, `cancelled`, or `failed {message}`.
     Progress rides a `tokio::sync::watch` channel, which keeps only the
     latest value, so a per-file callback can't flood a slow client.
   - `POST /api/jobs/{id}/cancel` sets a flag the pipeline polls
@@ -416,4 +417,12 @@ as a choice.
     `creationdate` offset); not done.
   - Cards and the detail header show the date. The sort choice and the
     "include videos" checkbox are both candidates for the Options tab.
+  - **Photos and videos are separate phases with separate counts.** The
+    scan screen used to say "N of M photos and videos", which was wrong
+    however it was worded: they aren't processed together (photos first,
+    then each video's metadata, then video matching) and they cost very
+    differently. The engine now reports `analyzing` for photos only, then
+    `analyzing_videos`, then `videos` (matching); the screen says "N of M
+    photos" or "N of M videos" accordingly, and when videos are excluded
+    neither video phase is announced.
 

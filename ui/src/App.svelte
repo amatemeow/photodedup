@@ -12,6 +12,7 @@
   const phaseLabel: Record<Phase, string> = {
     scanning: 'Finding files',
     analyzing: 'Reading and fingerprinting photos',
+    analyzing_videos: 'Reading video details',
     exact_duplicates: 'Checking for exact copies',
     matching: 'Looking for similar photos',
     videos: 'Matching videos against their originals',
@@ -110,19 +111,15 @@
 
   // A determinate bar wherever the engine reports a count (photos, then
   // videos); an indeterminate one for the short phases without one.
-  const percent = (s: JobStatus) =>
-    s.state === 'running' && (s.phase === 'analyzing' || s.phase === 'videos') && s.total
-      ? Math.round(((s.done ?? 0) / s.total) * 100)
-      : null;
+  const hasCount = (s: JobStatus) =>
+    s.state === 'running' && (s.phase === 'analyzing' || s.phase === 'analyzing_videos' || s.phase === 'videos') && !!s.total;
 
+  const percent = (s: JobStatus) => (hasCount(s) && s.state === 'running' ? Math.round(((s.done ?? 0) / s.total!) * 100) : null);
+
+  // Photos and videos are separate phases with separate counts, so each
+  // says what it counts.
   const detail = (s: JobStatus) =>
-    s.state !== 'running' || !s.total
-      ? ''
-      : s.phase === 'analyzing'
-        ? `${s.done} of ${s.total} photos and videos`
-        : s.phase === 'videos'
-          ? `${s.done} of ${s.total} videos`
-          : '';
+    !hasCount(s) || s.state !== 'running' ? '' : `${s.done} of ${s.total} ${s.phase === 'analyzing' ? 'photos' : 'videos'}`;
 </script>
 
 {#if view.kind === 'review'}
