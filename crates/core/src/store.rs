@@ -10,6 +10,7 @@ use crate::model::{FileId, MediaClassSerde};
 use crate::pipeline::{Analyzed, PipelineResult};
 use crate::provenance::{Evidence, Origin};
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub struct Store {
@@ -189,7 +190,7 @@ impl Store {
 
         tx.execute(
             "INSERT INTO scans (root_path, started_at) VALUES (?1, ?2)",
-            params![root.to_string_lossy(), now],
+            params![canonical_root_string(root), now],
         )?;
         let scan_id = tx.last_insert_rowid();
 
@@ -296,6 +297,43 @@ impl Store {
                 },
             )
             .optional()
+    }
+
+    /// The most recent scan of `root`, if one exists -- the lookup behind
+    /// "resume where I left off": opening the app on a folder it
+    /// recognizes should load that scan (and its decisions) instead of
+    /// re-running the pipeline. Matches on the same canonicalized path
+    /// `save_scan` stores, so a trailing slash or a path reached through a
+    /// symlink still finds the same scan.
+    pub fn find_latest_scan_for_root(&self, root: &Path) -> rusqlite::Result<Option<ScanMeta>> {
+        let root_str = canonical_root_string(root);
+        self.conn
+            .query_row(
+                "SELECT id, root_path, started_at FROM scans WHERE root_path = ?1 ORDER BY id DESC LIMIT 1",
+                params![root_str],
+                |row| {
+                    Ok(ScanMeta {
+                        id: row.get(0)?,
+                        root_path: row.get(1)?,
+                        started_at: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    /// All of one scan's recorded decisions at once, keyed by relative
+    /// path -- what a reopened UI needs to restore "which files did I
+    /// already mark keep/quarantine" in one round trip, rather than
+    /// asking `get_decision` once per file.
+    pub fn load_decisions(&self, scan_id: i64) -> rusqlite::Result<HashMap<String, bool>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT relative_path, keep FROM decisions WHERE scan_id = ?1")?;
+        let rows = stmt.query_map(params![scan_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0))
+        })?;
+        rows.collect()
     }
 
     pub fn get_file(&self, file_id: i64) -> rusqlite::Result<Option<StoredFile>> {
@@ -536,6 +574,17 @@ fn origin_str(o: Origin) -> &'static str {
     }
 }
 
+/// Canonicalizes a root path for storage/lookup -- so a trailing slash, a
+/// `..` component, or a path reached through a symlink still matches the
+/// same stored scan on a later lookup (`find_latest_scan_for_root`). Falls
+/// back to the path as given if canonicalization fails (e.g. the folder
+/// no longer exists at lookup time) rather than erroring -- this is a
+/// best-effort normalization, not something that should ever block a
+/// scan from completing.
+fn canonical_root_string(root: &Path) -> String {
+    std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()).to_string_lossy().to_string()
+}
+
 fn tier_str(t: Tier) -> &'static str {
     match t {
         Tier::T1 => "T1",
@@ -757,5 +806,68 @@ mod tests {
         // as None, not an error or a default-filled struct.
         let b_id = files.iter().find(|f| f.relative_path == "b.jpg").unwrap().id;
         assert!(store.load_analysis(b_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn find_latest_scan_for_root_finds_the_most_recent_one() {
+        // A real temp dir, not the fixed "/tmp/fake-root" sample_result
+        // uses elsewhere -- canonicalization needs a path that actually
+        // exists to do anything, and this test's whole point is that the
+        // lookup works through canonicalization.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (_, result) = sample_result();
+        let mut store = Store::open_in_memory().unwrap();
+
+        assert!(store.find_latest_scan_for_root(tmp.path()).unwrap().is_none());
+
+        let scan1 = store.save_scan(tmp.path(), &result).unwrap();
+        let found = store.find_latest_scan_for_root(tmp.path()).unwrap().unwrap();
+        assert_eq!(found.id, scan1);
+
+        // Re-scanning the same root -- the lookup must follow to the
+        // newest scan, not stay pinned to the first one found.
+        let scan2 = store.save_scan(tmp.path(), &result).unwrap();
+        assert_ne!(scan1, scan2);
+        let found = store.find_latest_scan_for_root(tmp.path()).unwrap().unwrap();
+        assert_eq!(found.id, scan2);
+    }
+
+    #[test]
+    fn find_latest_scan_matches_through_a_trailing_slash() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (_, result) = sample_result();
+        let mut store = Store::open_in_memory().unwrap();
+        let scan_id = store.save_scan(tmp.path(), &result).unwrap();
+
+        let mut with_slash = tmp.path().to_path_buf();
+        with_slash.push(""); // appends a trailing separator
+        let found = store.find_latest_scan_for_root(&with_slash).unwrap().unwrap();
+        assert_eq!(found.id, scan_id);
+    }
+
+    #[test]
+    fn load_decisions_returns_everything_recorded_for_one_scan() {
+        let (root, result) = sample_result();
+        let mut store = Store::open_in_memory().unwrap();
+        let scan_id = store.save_scan(&root, &result).unwrap();
+
+        store.record_decision(scan_id, "a.jpg", true).unwrap();
+        store.record_decision(scan_id, "b.jpg", false).unwrap();
+
+        let decisions = store.load_decisions(scan_id).unwrap();
+        assert_eq!(decisions.len(), 2);
+        assert_eq!(decisions.get("a.jpg"), Some(&true));
+        assert_eq!(decisions.get("b.jpg"), Some(&false));
+    }
+
+    #[test]
+    fn decisions_do_not_leak_across_different_scan_ids() {
+        let (root, result) = sample_result();
+        let mut store = Store::open_in_memory().unwrap();
+        let scan1 = store.save_scan(&root, &result).unwrap();
+        let scan2 = store.save_scan(&root, &result).unwrap();
+
+        store.record_decision(scan1, "a.jpg", true).unwrap();
+        assert!(store.load_decisions(scan2).unwrap().is_empty());
     }
 }
