@@ -1,0 +1,20 @@
+[package]
+name = "photodedup-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+photodedup-core = { path = "../core" }
+axum = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
