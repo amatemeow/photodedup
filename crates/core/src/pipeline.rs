@@ -72,15 +72,20 @@ pub struct Cluster {
 }
 
 /// Coarse progress of a running pipeline, reported through the callback
-/// given to `run_with_progress`. Only `Analyzing` carries a count -- it's
-/// the one phase that dominates wall-clock time on a real library (decode
-/// + hash per file); every other phase is short enough, or has no natural
-/// unit, that "which phase" is all a progress display can usefully say.
+/// given to `run_with_progress`. Only the analyzing and video phases carry
+/// a count -- analyzing photos is what dominates wall-clock time on a real
+/// library (decode + hash per file); every other phase is short enough, or
+/// has no natural unit, that "which phase" is all a progress display can
+/// usefully say.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum Progress {
     Scanning,
+    /// Photos read and fingerprinted so far (everything that isn't a
+    /// video). Photos go first; videos are a separate phase below.
     Analyzing { done: usize, total: usize },
+    /// Video metadata read so far (an ffprobe each: cheap next to a photo).
+    AnalyzingVideos { done: usize, total: usize },
     ExactDuplicates,
     Matching,
     /// Derived videos matched so far -- few units, each slow (a run of
@@ -119,7 +124,7 @@ pub fn run(root: &Path, opts: &PipelineOptions) -> PipelineResult {
 
 /// Like `run`, reporting coarse progress through `on_progress`. The
 /// callback is invoked from worker threads (once per analyzed file during
-/// `Analyzing`), so it must be cheap and non-blocking -- a consumer that
+/// analyzing phases), so it must be cheap and non-blocking -- a consumer that
 /// wants to rate-limit should keep only the latest value, not queue.
 pub fn run_with_progress(root: &Path, opts: &PipelineOptions, on_progress: &(dyn Fn(Progress) + Sync)) -> PipelineResult {
     run_cancellable(root, opts, on_progress, &AtomicBool::new(false)).expect("never cancelled")
@@ -127,7 +132,7 @@ pub fn run_with_progress(root: &Path, opts: &PipelineOptions, on_progress: &(dyn
 
 /// Like `run_with_progress`, but stops early and returns `None` once
 /// `cancel` is set. Cancellation is cooperative: it's checked per file
-/// during `Analyzing`, per derived video during video matching, and
+/// while analyzing, per derived video during video matching, and
 /// between the later phases. The exact-hash pass has no internal
 /// checkpoints, so a cancel that lands inside it takes effect when that
 /// pass ends.
@@ -155,23 +160,41 @@ fn run_inner(root: &Path, opts: &PipelineOptions, on_progress: &(dyn Fn(Progress
     // siblings (RAW/XMP/etc.) ride along with their primary's decision.
     let primary_ids: Vec<FileId> = scan_report.sibling_sets.iter().map(|s| s.primary).collect();
 
-    let total = primary_ids.len();
-    let done = AtomicUsize::new(0);
-    on_progress(Progress::Analyzing { done: 0, total });
-    let analyzed: HashMap<FileId, Analyzed> = primary_ids
-        .par_iter()
-        .filter_map(|&id| {
-            if cancelled() {
-                return None;
-            }
-            let rec = file_by_id[&id];
-            let a = analyze_one(rec, opts).map(|a| (id, a));
-            on_progress(Progress::Analyzing { done: done.fetch_add(1, Ordering::Relaxed) + 1, total });
-            a
-        })
-        .collect();
-    if cancelled() {
-        return None;
+    // Photos first, then videos, each with its own count: a single combined
+    // count ("N of M photos and videos") would be wrong both ways, since
+    // the two kinds are not processed together and cost very differently.
+    let (video_ids, photo_ids): (Vec<FileId>, Vec<FileId>) = primary_ids
+        .iter()
+        .copied()
+        .partition(|id| file_by_id[id].media_class == MediaClassSerde::Video);
+
+    let mut analyzed: HashMap<FileId, Analyzed> = HashMap::new();
+    for (ids, are_videos) in [(&photo_ids, false), (&video_ids, true)] {
+        if ids.is_empty() {
+            continue;
+        }
+        let total = ids.len();
+        let done = AtomicUsize::new(0);
+        let report = |done: usize| {
+            on_progress(if are_videos { Progress::AnalyzingVideos { done, total } } else { Progress::Analyzing { done, total } })
+        };
+        report(0);
+        let batch: Vec<(FileId, Analyzed)> = ids
+            .par_iter()
+            .filter_map(|&id| {
+                if cancelled() {
+                    return None;
+                }
+                let rec = file_by_id[&id];
+                let a = analyze_one(rec, opts).map(|a| (id, a));
+                report(done.fetch_add(1, Ordering::Relaxed) + 1);
+                a
+            })
+            .collect();
+        analyzed.extend(batch);
+        if cancelled() {
+            return None;
+        }
     }
 
     // --- T0: exact byte duplicates, across ALL files (not just primaries;
@@ -263,7 +286,13 @@ fn run_inner(root: &Path, opts: &PipelineOptions, on_progress: &(dyn Fn(Progress
         &video_candidates,
         &opts.ffmpeg_bin,
         opts.intensity.scheduling_hint(),
-        &|done, total| on_progress(Progress::Videos { done, total }),
+        // With videos excluded there is nothing to match, so don't announce
+        // a phase that would flash by with no count.
+        &|done, total| {
+            if opts.include_videos {
+                on_progress(Progress::Videos { done, total })
+            }
+        },
         &cancelled,
     );
     if cancelled() {
@@ -471,6 +500,47 @@ mod tests {
 
         let off = names(&PipelineOptions { include_videos: false, ..Default::default() });
         assert_eq!(off, ["pic.jpg"], "photos are untouched, videos are gone");
+    }
+
+    #[test]
+    fn photos_are_reported_first_then_videos_each_with_its_own_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        for n in ["a.jpg", "b.jpg", "c.jpg"] {
+            std::fs::write(tmp.path().join(n), b"not a real jpeg").unwrap();
+        }
+        for n in ["x.mp4", "y.mov"] {
+            std::fs::write(tmp.path().join(n), b"not a real video").unwrap();
+        }
+        let seen = std::sync::Mutex::new(Vec::new());
+        run_with_progress(tmp.path(), &PipelineOptions::default(), &|p| seen.lock().unwrap().push(p));
+        let seen = seen.into_inner().unwrap();
+
+        let photo_totals: Vec<usize> = seen.iter().filter_map(|p| if let Progress::Analyzing { total, .. } = p { Some(*total) } else { None }).collect();
+        let video_totals: Vec<usize> = seen.iter().filter_map(|p| if let Progress::AnalyzingVideos { total, .. } = p { Some(*total) } else { None }).collect();
+        assert!(photo_totals.iter().all(|&t| t == 3), "the photo count covers photos only: {photo_totals:?}");
+        assert!(video_totals.iter().all(|&t| t == 2), "the video count covers videos only: {video_totals:?}");
+
+        let last_photo = seen.iter().rposition(|p| matches!(p, Progress::Analyzing { .. })).unwrap();
+        let first_video = seen.iter().position(|p| matches!(p, Progress::AnalyzingVideos { .. })).unwrap();
+        assert!(last_photo < first_video, "photos finish before videos start");
+        assert!(seen.contains(&Progress::Analyzing { done: 3, total: 3 }));
+        assert!(seen.contains(&Progress::AnalyzingVideos { done: 2, total: 2 }));
+    }
+
+    #[test]
+    fn video_phases_are_not_reported_when_videos_are_excluded() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pic.jpg"), b"not a real jpeg").unwrap();
+        std::fs::write(tmp.path().join("clip.mp4"), b"not a real video").unwrap();
+        let phases = |include_videos: bool| {
+            let seen = std::sync::Mutex::new(Vec::new());
+            let opts = PipelineOptions { include_videos, ..Default::default() };
+            run_with_progress(tmp.path(), &opts, &|p| seen.lock().unwrap().push(p));
+            seen.into_inner().unwrap()
+        };
+        let is_video_phase = |p: &Progress| matches!(p, Progress::AnalyzingVideos { .. } | Progress::Videos { .. });
+        assert!(phases(true).iter().any(is_video_phase));
+        assert!(!phases(false).iter().any(is_video_phase));
     }
 
     #[test]
