@@ -111,50 +111,105 @@ fn mean_distance(a: &[Option<Hash256>], b: &[Option<Hash256>]) -> Option<f64> {
 /// run concurrently matters in practice, not just in principle -- the
 /// reference dataset's 8 derived videos otherwise serialize through
 /// hundreds of subprocess spawns on a single core.
-pub fn find_video_matches(candidates: &[VideoCandidate], ffmpeg_bin: &str, hint: Option<SchedulingHint>) -> Vec<VideoMatch> {
+pub fn find_video_matches(
+    candidates: &[VideoCandidate],
+    ffmpeg_bin: &str,
+    hint: Option<SchedulingHint>,
+    on_progress: &(dyn Fn(usize, usize) + Sync),
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Vec<VideoMatch> {
     let derived: Vec<&VideoCandidate> = candidates.iter().filter(|c| c.origin == Origin::Derived).collect();
     let native: Vec<&VideoCandidate> = candidates
         .iter()
         .filter(|c| c.origin == Origin::CameraOriginal)
         .collect();
 
+    // Progress is counted in derived videos finished: each one is a long
+    // run of ffmpeg frame extractions, so there are few, slow units -- a
+    // coarse count is still the honest thing to show. `cancelled` is
+    // checked before each one starts, so a cancel waits for at most the
+    // videos already in flight.
+    let total = derived.len();
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    on_progress(0, total);
+
     derived
         .into_par_iter()
         .filter_map(|dv| {
-            let duration_candidates: Vec<&&VideoCandidate> = native
-                .iter()
-                .filter(|nv| (nv.duration_seconds - dv.duration_seconds).abs() <= DURATION_TOLERANCE_SECONDS)
-                .collect();
-            if duration_candidates.is_empty() {
+            if cancelled() {
                 return None;
             }
-
-            let dv_hashes = frame_sequence(&dv.path, dv.duration_seconds, ffmpeg_bin, hint);
-            if dv_hashes.iter().all(|h| h.is_none()) {
-                return None;
-            }
-
-            duration_candidates
-                .into_iter()
-                .filter_map(|nv| {
-                    let nv_hashes = frame_sequence(&nv.path, nv.duration_seconds, ffmpeg_bin, hint);
-                    mean_distance(&dv_hashes, &nv_hashes).map(|d| (nv.id, d))
-                })
-                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-                .filter(|&(_, mean_d)| mean_d < MAX_MATCH_MEAN_DIST)
-                .map(|(native_id, mean_d)| VideoMatch {
-                    derived: dv.id,
-                    native: native_id,
-                    mean_phash_dist: mean_d,
-                    high_confidence: mean_d <= HIGH_CONFIDENCE_MAX_MEAN_DIST,
-                })
+            let result = match_one(dv, &native, ffmpeg_bin, hint);
+            on_progress(done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1, total);
+            result
         })
         .collect()
+}
+
+fn match_one(dv: &VideoCandidate, native: &[&VideoCandidate], ffmpeg_bin: &str, hint: Option<SchedulingHint>) -> Option<VideoMatch> {
+    let duration_candidates: Vec<&&VideoCandidate> = native
+        .iter()
+        .filter(|nv| (nv.duration_seconds - dv.duration_seconds).abs() <= DURATION_TOLERANCE_SECONDS)
+        .collect();
+    if duration_candidates.is_empty() {
+        return None;
+    }
+
+    let dv_hashes = frame_sequence(&dv.path, dv.duration_seconds, ffmpeg_bin, hint);
+    if dv_hashes.iter().all(|h| h.is_none()) {
+        return None;
+    }
+
+    duration_candidates
+        .into_iter()
+        .filter_map(|nv| {
+            let nv_hashes = frame_sequence(&nv.path, nv.duration_seconds, ffmpeg_bin, hint);
+            mean_distance(&dv_hashes, &nv_hashes).map(|d| (nv.id, d))
+        })
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .filter(|&(_, mean_d)| mean_d < MAX_MATCH_MEAN_DIST)
+        .map(|(native_id, mean_d)| VideoMatch {
+            derived: dv.id,
+            native: native_id,
+            mean_phash_dist: mean_d,
+            high_confidence: mean_d <= HIGH_CONFIDENCE_MAX_MEAN_DIST,
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancelled_run_skips_every_video_but_still_reports_the_total() {
+        let derived = VideoCandidate {
+            id: 1,
+            path: std::path::PathBuf::from("/nonexistent/derived.mp4"),
+            origin: Origin::Derived,
+            duration_seconds: 10.0,
+        };
+        let seen = std::sync::Mutex::new(Vec::new());
+        let out = find_video_matches(&[derived], "ffmpeg-not-needed", None, &|d, t| seen.lock().unwrap().push((d, t)), &|| true);
+        assert!(out.is_empty());
+        assert_eq!(*seen.lock().unwrap(), vec![(0, 1)]);
+    }
+
+    #[test]
+    fn progress_counts_each_derived_video_once_it_is_finished() {
+        let mk = |id| VideoCandidate {
+            id,
+            path: std::path::PathBuf::from("/nonexistent/derived.mp4"),
+            origin: Origin::Derived,
+            duration_seconds: 10.0,
+        };
+        let seen = std::sync::Mutex::new(Vec::new());
+        // No native candidates, so each derived video finishes at once
+        // without needing ffmpeg.
+        find_video_matches(&[mk(1), mk(2)], "ffmpeg-not-needed", None, &|d, t| seen.lock().unwrap().push((d, t)), &|| false);
+        let mut got = seen.lock().unwrap().clone();
+        got.sort();
+        assert_eq!(got, vec![(0, 2), (1, 2), (2, 2)]);
+    }
 
     #[test]
     fn mean_distance_ignores_failed_frame_extractions() {

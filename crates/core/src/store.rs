@@ -98,6 +98,16 @@ CREATE TABLE IF NOT EXISTS review_pairs (
     reason TEXT NOT NULL
 );
 
+-- Videos shown browse-only in their own tab: `no_match` (a derived video
+-- with no native original found) or `unknown_origin` (provenance
+-- couldn't be established, so it was never a match candidate).
+CREATE TABLE IF NOT EXISTS orphan_videos (
+    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    file_id TEXT NOT NULL REFERENCES files(id),
+    reason TEXT NOT NULL,
+    PRIMARY KEY (scan_id, file_id)
+);
+
 -- User decisions: deliberately separate from `clusters` (which is just the
 -- last scan's machine-generated suggestion) so a re-scan can't silently
 -- discard what a user already decided. Keyed on relative_path, not
@@ -147,6 +157,13 @@ pub struct StoredBurstRun {
     pub camera_model: String,
     /// In capture-time order (the `seq` column), not file-id order.
     pub member_file_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredOrphanVideo {
+    pub file_id: String,
+    /// `no_match` or `unknown_origin`.
+    pub reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -282,6 +299,17 @@ impl Store {
                 "INSERT INTO review_pairs (id, scan_id, tier, file_a_id, file_b_id, phash_dist, reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![new_id(), scan_id, tier_str(p.tier), a_row, b_row, p.phash_dist, p.reason],
             )?;
+        }
+
+        for (ids, reason) in [(&result.orphan_videos, "no_match"), (&result.unknown_provenance_videos, "unknown_origin")] {
+            for fid in ids {
+                if let Some(row) = id_map.get(fid) {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO orphan_videos (scan_id, file_id, reason) VALUES (?1, ?2, ?3)",
+                        params![scan_id, row, reason],
+                    )?;
+                }
+            }
         }
 
         tx.commit()?;
@@ -440,6 +468,16 @@ impl Store {
         Ok(runs)
     }
 
+    pub fn load_orphan_videos(&self, scan_id: &str) -> rusqlite::Result<Vec<StoredOrphanVideo>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT file_id, reason FROM orphan_videos WHERE scan_id = ?1 ORDER BY rowid")?;
+        let rows = stmt.query_map(params![scan_id], |row| {
+            Ok(StoredOrphanVideo { file_id: row.get(0)?, reason: row.get(1)? })
+        })?;
+        rows.collect()
+    }
+
     pub fn load_analysis(&self, file_id: &str) -> rusqlite::Result<Option<StoredAnalysis>> {
         self.conn
             .query_row(
@@ -590,6 +628,7 @@ fn drop_legacy_schema(conn: &Connection) -> rusqlite::Result<()> {
 /// point at `files` without a cascade, so the order matters.
 fn delete_all_scans(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
     for table in [
+        "orphan_videos",
         "cluster_members",
         "burst_run_members",
         "review_pairs",
@@ -855,6 +894,22 @@ mod tests {
         drop(store);
         let store = Store::open(tmp.path()).unwrap();
         assert_eq!(store.list_scans().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn orphan_videos_round_trip_with_their_reason_and_go_with_the_scan() {
+        let (root, mut result) = sample_result();
+        result.orphan_videos = vec![result.files[0].id];
+        result.unknown_provenance_videos = vec![result.files[1].id];
+        let mut store = Store::open_in_memory().unwrap();
+        let scan = store.save_scan(&root, &result).unwrap();
+
+        let got = store.load_orphan_videos(&scan).unwrap();
+        let reasons: Vec<&str> = got.iter().map(|o| o.reason.as_str()).collect();
+        assert_eq!(reasons, vec!["no_match", "unknown_origin"]);
+
+        store.save_scan(&root, &result).unwrap();
+        assert!(store.load_orphan_videos(&scan).unwrap().is_empty(), "the replaced scan's rows are gone");
     }
 
     #[test]

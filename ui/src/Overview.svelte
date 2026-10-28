@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from './lib/api';
-  import { tierLabel, type Review } from './lib/review.svelte';
+  import type { Review } from './lib/review.svelte';
 
   let {
     review,
@@ -46,13 +46,14 @@
   {#each review.visible as c (c.id)}
     {@const status = review.statuses.get(c.id) ?? 'undecided'}
     {@const shown = c.members.find((m) => review.effective(c, m)) ?? c.members[0]}
+    {@const kept = c.members.filter((m) => review.effective(c, m)).length}
     <button class="card {status}" data-id={c.id} class:focus={focusId === c.id} onclick={() => onOpen(c.id)} onfocus={() => onFocus(c.id)}>
       <img src={api.fileUrl(shown.id, 'thumb')} alt={shown.file_name} loading="lazy" />
       <span class="meta">
         <span class="badge {status}">{badge[status]}</span>
-        <span>{c.members.length} files</span>
+        <span>{c.tab === 'burst' ? `${kept} of ${c.members.length} kept` : `${c.members.length} files`}</span>
       </span>
-      <span class="tier">{tierLabel[c.tier] ?? c.tier}</span>
+      <span class="tier">{c.label}</span>
     </button>
   {/each}
 </div>
