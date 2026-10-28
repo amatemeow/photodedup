@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from './lib/api';
-  import type { Review } from './lib/review.svelte';
+  import { formatWhen, type Review } from './lib/review.svelte';
 
   let {
     review,
@@ -48,12 +48,19 @@
     {@const shown = c.members.find((m) => review.effective(c, m)) ?? c.members[0]}
     {@const kept = c.members.filter((m) => review.effective(c, m)).length}
     <button class="card {status}" data-id={c.id} class:focus={focusId === c.id} onclick={() => onOpen(c.id)} onfocus={() => onFocus(c.id)}>
-      <img src={api.fileUrl(shown.id, 'thumb')} alt={shown.file_name} loading="lazy" />
+      {#if c.tab === 'similar'}
+        <!-- A pair shows both photos: comparing them is the whole point. -->
+        <span class="two">
+          {#each c.members as m (m.id)}<img src={api.fileUrl(m.id, 'thumb')} alt={m.file_name} loading="lazy" />{/each}
+        </span>
+      {:else}
+        <img src={api.fileUrl(shown.id, 'thumb')} alt={shown.file_name} loading="lazy" />
+      {/if}
       <span class="meta">
         <span class="badge {status}">{badge[status]}</span>
         <span>{c.tab === 'burst' ? `${kept} of ${c.members.length} kept` : `${c.members.length} files`}</span>
       </span>
-      <span class="tier">{c.label}</span>
+      <span class="tier">{formatWhen(c.capturedAt)} · {c.label}</span>
     </button>
   {/each}
 </div>
@@ -79,6 +86,14 @@
   .card.focus {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
+  }
+  .two {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+  }
+  .two img {
+    aspect-ratio: 3 / 4;
   }
   .card img {
     width: 100%;

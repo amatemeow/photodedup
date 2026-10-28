@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api } from './lib/api';
-  import { formatBytes, type Group, type Review } from './lib/review.svelte';
+  import { formatBytes, formatWhen, type Group, type Review } from './lib/review.svelte';
   import Lightbox from './Lightbox.svelte';
 
   let {
@@ -69,12 +69,12 @@
     <span>{position} of {total}</span>
     <button class="secondary" onclick={onNext} disabled={position >= total} title="Next (→)">›</button>
     <span class="spacer"></span>
-    <span class="hint">{group.label}{group.reasons.length ? ` · ${group.reasons.join(', ').replaceAll('_', ' ')}` : ''}</span>
+    <span class="hint">{formatWhen(group.capturedAt)} · {group.label}{group.reasons.length ? ` · ${group.reasons.join(', ').replaceAll('_', ' ')}` : ''}</span>
     {#if isBurst}
       <button class="secondary" onclick={() => review.keepAll(group)} title="Keep every frame in this run">Keep all</button>
     {/if}
     <button onclick={onAccept} title="Accept suggestion and continue (Enter)">
-      {status === 'undecided' || status === 'partial' ? (isBurst ? 'Keep suggested only' : 'Accept suggestion') : 'Next'} ⏎
+      {status === 'undecided' || status === 'partial' ? (isBurst ? 'Keep suggested only' : group.tab === 'similar' || group.tab === 'orphans' ? 'Keep all' : 'Accept suggestion') : 'Next'} ⏎
     </button>
   </div>
 

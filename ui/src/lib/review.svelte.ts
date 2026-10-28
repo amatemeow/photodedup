@@ -1,4 +1,4 @@
-import { api, type Analysis, type FileDto, type OrphanVideo, type ReviewPair } from './api';
+import { api, type Analysis, type FileDto } from './api';
 
 /** `partial` = some but not all members decided (e.g. an interrupted
  * write); `accepted` = decided exactly as suggested; `changed` = decided
@@ -6,20 +6,23 @@ import { api, type Analysis, type FileDto, type OrphanVideo, type ReviewPair } f
 export type Status = 'undecided' | 'partial' | 'accepted' | 'changed';
 export type Filter = 'all' | 'undecided' | 'changed';
 
-/** The categories the review is split into. The first three are decided
- * (keep / quarantine per file); the last two are browse-only. */
+/** The categories the review is split into. Every one is decided the same
+ * way (keep / quarantine per file); they differ in what the engine
+ * suggests: duplicates and sequences suggest dropping the extras, while
+ * look-alikes and orphan videos suggest keeping everything. */
 export type Tab = 'exact' | 'true' | 'burst' | 'similar' | 'orphans';
-export type DecisionTab = 'exact' | 'true' | 'burst';
 export const tabs: Tab[] = ['exact', 'true', 'burst', 'similar', 'orphans'];
-export const isDecisionTab = (t: Tab): t is DecisionTab => t === 'exact' || t === 'true' || t === 'burst';
+export type Sort = 'oldest' | 'newest';
 
-/** One thing the user decides on: a duplicate cluster or a burst run.
- * `suggested` holds the file ids the engine would keep; anything else in
- * the group would be quarantined. */
+/** One thing the user decides on: a duplicate cluster, a sequence, a pair
+ * of look-alikes or a single orphan video. `suggested` holds the file ids
+ * the engine would keep; anything else in the group would be quarantined. */
 export interface Group {
   id: string;
-  tab: DecisionTab;
+  tab: Tab;
   label: string;
+  /** When it was taken, from the original (`YYYY-MM-DD HH:MM:SS`), or null. */
+  capturedAt: string | null;
   reasons: string[];
   members: FileDto[];
   suggested: Set<string>;
@@ -46,8 +49,7 @@ interface UndoEntry {
  * nothing kept. Files marked keep are never quarantined by a bulk action. */
 export class Review {
   groups = $state.raw<Group[]>([]);
-  pairs = $state.raw<ReviewPair[]>([]);
-  orphans = $state.raw<OrphanVideo[]>([]);
+  sort = $state<Sort>(loadSort());
   decisions = $state<Record<string, boolean>>({});
   tab = $state<Tab>('true');
   filter = $state<Filter>('all');
@@ -77,6 +79,7 @@ export class Review {
           id: c.id,
           tab: c.tier === 'T0' ? 'exact' : 'true',
           label: tierLabel[c.tier] ?? c.tier,
+          capturedAt: c.captured_at,
           reasons: c.reasons,
           members: c.members,
           suggested: new Set([c.keeper_file_id]),
@@ -86,6 +89,7 @@ export class Review {
           id: b.id,
           tab: 'burst',
           label: b.camera_model,
+          capturedAt: b.captured_at,
           reasons: [],
           members: b.frames,
           suggested: new Set([...(b.suggested_file_id ? [b.suggested_file_id] : []), ...b.frames.filter((f) => clusterKeepers.has(f.id)).map((f) => f.id)]),
@@ -95,8 +99,39 @@ export class Review {
       // Burst-tier pairs are the neighbours inside a burst run, which the
       // Burst tab already shows; this tab is for look-alikes that are NOT
       // part of a burst.
-      this.pairs = pairs.filter((p) => p.tier !== 'T2Burst');
-      this.orphans = orphans;
+      this.groups = [
+        ...this.groups,
+        // Burst-tier pairs are the neighbours inside a sequence, which the
+        // Quick sequences tab already shows; this tab is for look-alikes
+        // that are NOT part of one. Nothing here is suggested for removal.
+        ...pairs
+          .filter((p) => p.tier !== 'T2Burst')
+          .map<Group>((p) => {
+            const members = [p.file_a, p.file_b].filter((f): f is FileDto => f !== null);
+            return {
+              id: p.id,
+              tab: 'similar',
+              label: p.reason.replaceAll('_', ' '),
+              capturedAt: p.captured_at,
+              reasons: [],
+              members,
+              suggested: new Set(members.map((m) => m.id)),
+              sharpness: {},
+            };
+          }),
+        // Videos with no counterpart: one per group, kept unless the user
+        // says otherwise.
+        ...orphans.map<Group>((o) => ({
+          id: o.file.id,
+          tab: 'orphans',
+          label: orphanReason[o.reason] ?? o.reason,
+          capturedAt: o.captured_at,
+          reasons: [],
+          members: [o.file],
+          suggested: new Set([o.file.id]),
+          sharpness: {},
+        })),
+      ];
       this.decisions = decisions;
       // Open on the first category that has anything to review.
       this.tab = tabs.find((t) => this.tabCount(t) > 0) ?? 'true';
@@ -125,25 +160,37 @@ export class Review {
     return m;
   });
 
-  /** Groups of the current tab under the current filter. `partial` counts
-   * as undecided for filtering: it still needs attention. */
-  visible = $derived(
-    this.groups.filter((g) => {
-      if (g.tab !== this.tab) return false;
-      const s = this.statuses.get(g.id);
-      if (this.filter === 'undecided') return s === 'undecided' || s === 'partial';
-      if (this.filter === 'changed') return s === 'changed';
-      return true;
-    }),
-  );
+  /** Groups of the current tab under the current filter, in the chosen
+   * date order. Undated groups go last either way. `partial` counts as
+   * undecided for filtering: it still needs attention. */
+  visible = $derived.by(() => {
+    const dir = this.sort === 'oldest' ? 1 : -1;
+    return this.groups
+      .filter((g) => {
+        if (g.tab !== this.tab) return false;
+        const s = this.statuses.get(g.id);
+        if (this.filter === 'undecided') return s === 'undecided' || s === 'partial';
+        if (this.filter === 'changed') return s === 'changed';
+        return true;
+      })
+      .sort((a, b) => {
+        if (a.capturedAt === b.capturedAt) return 0; // stable: keeps engine order
+        if (a.capturedAt === null) return 1;
+        if (b.capturedAt === null) return -1;
+        return a.capturedAt < b.capturedAt ? -dir : dir;
+      });
+  });
 
-  /** Per decision tab: how many groups, how many still undecided, etc. */
+  setSort(s: Sort) {
+    this.sort = s;
+    try {
+      localStorage.setItem(SORT_KEY, s);
+    } catch {}
+  }
+
+  /** Per tab: how many groups, how many still undecided, etc. */
   countsByTab = $derived.by(() => {
-    const out: Record<DecisionTab, Counts> = {
-      exact: { all: 0, undecided: 0, changed: 0, reviewed: 0 },
-      true: { all: 0, undecided: 0, changed: 0, reviewed: 0 },
-      burst: { all: 0, undecided: 0, changed: 0, reviewed: 0 },
-    };
+    const out = Object.fromEntries(tabs.map((t) => [t, { all: 0, undecided: 0, changed: 0, reviewed: 0 }])) as Record<Tab, Counts>;
     for (const g of this.groups) {
       const c = out[g.tab];
       const s = this.statuses.get(g.id);
@@ -155,20 +202,20 @@ export class Review {
     return out;
   });
 
-  counts = $derived(isDecisionTab(this.tab) ? this.countsByTab[this.tab] : { all: 0, undecided: 0, changed: 0, reviewed: 0 });
+  counts = $derived(this.countsByTab[this.tab]);
 
   tabCount(t: Tab): number {
-    if (t === 'similar') return this.pairs.length;
-    if (t === 'orphans') return this.orphans.length;
-    return this.groups.filter((g) => g.tab === t).length;
+    return this.countsByTab[t].all;
   }
 
-  /** The first group among those containing `path` that would be left with
+  /** The first multi-member group containing `path` that would be left with
    * nothing kept if `path` were set to `keep`, ignoring `rows`' other
    * overrides. */
   private leavesNoneKept(path: string, rows: Map<string, boolean>): Group | undefined {
     return (this.groupsByPath.get(path) ?? []).find(
-      (g) => !g.members.some((m) => (m.relative_path === path ? false : (rows.get(m.relative_path) ?? this.effective(g, m)))),
+      // A group of one (an orphan video) has no other copy to keep, so
+      // quarantining it is the user's explicit call, not an accident.
+      (g) => g.members.length > 1 && !g.members.some((m) => (m.relative_path === path ? false : (rows.get(m.relative_path) ?? this.effective(g, m)))),
     );
   }
 
@@ -279,6 +326,27 @@ export class Review {
   }
 }
 
+const SORT_KEY = 'photodedup.sort';
+function loadSort(): Sort {
+  try {
+    return localStorage.getItem(SORT_KEY) === 'newest' ? 'newest' : 'oldest';
+  } catch {
+    return 'oldest';
+  }
+}
+
+const orphanReason: Record<string, string> = {
+  no_match: 'No original found',
+  unknown_origin: 'Source not identified',
+};
+
+/** `YYYY-MM-DD HH:MM:SS` (stored without a zone) as a readable local date. */
+export function formatWhen(s: string | null): string {
+  if (!s) return 'No date';
+  const d = new Date(s.replace(' ', 'T'));
+  return Number.isNaN(d.getTime()) ? s : d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
 export const tierLabel: Record<string, string> = {
   T0: 'Identical files',
   T1: 'Same photo, different copy',
@@ -298,12 +366,13 @@ export const tabInfo: Record<Tab, { title: string; blurb: string }> = {
   },
   similar: {
     title: 'Same-device review',
-    blurb: 'Photos that look alike but were taken moments apart. Nothing here is suggested for removal: browse only.',
+    blurb:
+      'Photos that look alike but were taken moments apart. Nothing is suggested for removal: everything is kept unless you choose otherwise. You can dismiss one of a pair, not both.',
   },
   orphans: {
     title: 'Orphan videos',
     blurb:
-      'Videos that look like copies but whose original was not found, and videos whose source could not be identified so they were never compared. Browse only.',
+      'Videos that look like copies but whose original was not found, and videos whose source could not be identified so they were never compared. Everything is kept unless you choose otherwise.',
   },
 };
 
