@@ -10,7 +10,7 @@ use crate::classify::{PairClassification, Tier, BURST_GAP_SECONDS};
 use crate::model::FileId;
 use crate::provenance::Origin;
 use chrono::NaiveDateTime;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// `T1` pairs (native vs. derived): keep only each `Derived`-side file's
 /// single closest native match. Mirrors `pass4b_resolve.py`'s
@@ -44,9 +44,28 @@ pub fn resolve_t1_edges(pairs: &[PairClassification]) -> Vec<(FileId, FileId, u3
 /// together through `cluster::merge_edges` -- that's correct, not
 /// over-merging, since it only happens when each pairwise link is itself
 /// each side's closest match.
-pub fn resolve_t1b_edges(pairs: &[PairClassification]) -> Vec<(FileId, FileId, u32)> {
+///
+/// `already_t1_matched`: derived-side `FileId`s that already resolved to
+/// a native original via `resolve_t1_edges`. A pair where *either* side is
+/// in this set is skipped entirely -- found via a real discrepancy against
+/// the reference dataset: two messenger copies of two different,
+/// burst-adjacent native photos (1s apart, same camera) can themselves
+/// hash close enough to pass as `T1b` candidates (the same burst-vs-
+/// duplicate ambiguity the native-native structural rule exists to
+/// prevent, just unguarded on the derived side, since derived files
+/// usually lack the timestamp that rule relies on). `T1b`'s whole premise
+/// is *orphaned* derived copies with no surviving original; a file that
+/// already has one via `T1` isn't orphaned, so it must not also merge
+/// into an unrelated cluster through a weaker `T1b` link.
+pub fn resolve_t1b_edges(
+    pairs: &[PairClassification],
+    already_t1_matched: &HashSet<FileId>,
+) -> Vec<(FileId, FileId, u32)> {
     let mut best: HashMap<FileId, (FileId, u32)> = HashMap::new();
     for p in pairs.iter().filter(|p| p.tier == Tier::T1b) {
+        if already_t1_matched.contains(&p.a) || already_t1_matched.contains(&p.b) {
+            continue;
+        }
         for (me, other) in [(p.a, p.b), (p.b, p.a)] {
             best.entry(me)
                 .and_modify(|cur| {
@@ -136,6 +155,53 @@ mod tests {
         ];
         let edges = resolve_t1_edges(&pairs);
         assert_eq!(edges, vec![(10, 2, 5)]);
+    }
+
+    #[test]
+    fn t1b_does_not_bridge_two_files_that_already_have_their_own_native_original() {
+        // Regression test for a real discrepancy found against the
+        // reference dataset: IMG_3537.JPG (derived) is a true duplicate of
+        // native IMG20261016074102.jpg (d=0-2), and IMG_3552.JPG (derived)
+        // is a true duplicate of native IMG20261016074103.jpg (d=0-2) --
+        // two separate burst-adjacent photos (1s apart, same camera), each
+        // independently re-saved through a messenger. The two derived
+        // copies themselves hash close enough (d=44, in the same ambiguous
+        // band as a genuine burst pair) to classify as a T1b candidate.
+        // Without the already_t1_matched guard, this merges two unrelated
+        // T1 clusters into one four-file cluster -- exactly the burst-vs-
+        // duplicate ambiguity the native-native structural rule exists to
+        // prevent, just unguarded on the derived side.
+        let native_a = 1; // IMG20261016074102.jpg
+        let native_b = 2; // IMG20261016074103.jpg
+        let derived_a = 10; // IMG_3537.JPG
+        let derived_b = 11; // IMG_3552.JPG
+
+        let pairs = vec![
+            pair(derived_a, Origin::Derived, native_a, Origin::CameraOriginal, 2),
+            pair(derived_b, Origin::Derived, native_b, Origin::CameraOriginal, 0),
+            pair(derived_a, Origin::Derived, derived_b, Origin::Derived, 44),
+        ];
+
+        let t1_edges = resolve_t1_edges(&pairs);
+        let matched: std::collections::HashSet<FileId> =
+            t1_edges.iter().map(|&(derived, _, _)| derived).collect();
+        assert_eq!(matched, [derived_a, derived_b].into_iter().collect());
+
+        let t1b_edges = resolve_t1b_edges(&pairs, &matched);
+        assert!(
+            t1b_edges.is_empty(),
+            "T1b must not bridge two files that already have their own native original, got {t1b_edges:?}"
+        );
+    }
+
+    #[test]
+    fn t1b_still_merges_genuinely_orphaned_derived_copies() {
+        // The case T1b exists for: neither side has a surviving native
+        // original, so merging them (keep the larger) is the correct,
+        // safe behavior -- the guard must not break this.
+        let pairs = vec![pair(10, Origin::Derived, 11, Origin::Derived, 5)];
+        let edges = resolve_t1b_edges(&pairs, &std::collections::HashSet::new());
+        assert_eq!(edges, vec![(10, 11, 5)]);
     }
 
     #[test]
