@@ -5,11 +5,12 @@
 //! "Incremental rescan" row -- the `size`/`mtime` columns exist from day
 //! one specifically so that hook is cheap to add without a schema change).
 
+use crate::classify::Tier;
 use crate::model::{FileId, MediaClassSerde};
 use crate::pipeline::{Analyzed, PipelineResult};
-use crate::provenance::Origin;
+use crate::provenance::{Evidence, Origin};
 use rusqlite::{params, Connection, OptionalExtension};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct Store {
     conn: Connection,
@@ -75,6 +76,20 @@ CREATE TABLE IF NOT EXISTS burst_run_members (
     PRIMARY KEY (burst_run_id, file_id)
 );
 
+-- Review-only pairs (T2Burst/T2NativeReview/T3CrossDevice/etc. -- never
+-- auto-selectable, see pipeline::PipelineResult::review_pairs). Was
+-- computed but never actually persisted before M2 needed to serve it to
+-- the "same-device review" UI tab.
+CREATE TABLE IF NOT EXISTS review_pairs (
+    id INTEGER PRIMARY KEY,
+    scan_id INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    tier TEXT NOT NULL,
+    file_a_id INTEGER NOT NULL REFERENCES files(id),
+    file_b_id INTEGER NOT NULL REFERENCES files(id),
+    phash_dist INTEGER NOT NULL,
+    reason TEXT NOT NULL
+);
+
 -- User decisions: deliberately separate from `clusters` (which is just the
 -- last scan's machine-generated suggestion) so a re-scan can't silently
 -- discard what a user already decided. Keyed on relative_path, not
@@ -106,6 +121,44 @@ pub struct StoredCluster {
     pub keeper_file_id: i64,
     pub member_file_ids: Vec<i64>,
     pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredReviewPair {
+    pub id: i64,
+    pub tier: String,
+    pub file_a_id: i64,
+    pub file_b_id: i64,
+    pub phash_dist: i64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredBurstRun {
+    pub id: i64,
+    pub camera_model: String,
+    /// In capture-time order (the `seq` column), not file-id order.
+    pub member_file_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredAnalysis {
+    pub origin: String,
+    pub confidence: f64,
+    pub evidence: Vec<Evidence>,
+    pub sharpness: Option<f64>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub camera_model: Option<String>,
+    pub capture_time: Option<String>,
+    pub duration_seconds: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanMeta {
+    pub id: i64,
+    pub root_path: String,
+    pub started_at: String,
 }
 
 impl Store {
@@ -201,8 +254,158 @@ impl Store {
             }
         }
 
+        for p in &result.review_pairs {
+            let (Some(&a_row), Some(&b_row)) = (id_map.get(&p.a), id_map.get(&p.b)) else {
+                continue;
+            };
+            tx.execute(
+                "INSERT INTO review_pairs (scan_id, tier, file_a_id, file_b_id, phash_dist, reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![scan_id, tier_str(p.tier), a_row, b_row, p.phash_dist, p.reason],
+            )?;
+        }
+
         tx.commit()?;
         Ok(scan_id)
+    }
+
+    pub fn list_scans(&self) -> rusqlite::Result<Vec<ScanMeta>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, root_path, started_at FROM scans ORDER BY id DESC")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ScanMeta {
+                id: row.get(0)?,
+                root_path: row.get(1)?,
+                started_at: row.get(2)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn get_scan(&self, scan_id: i64) -> rusqlite::Result<Option<ScanMeta>> {
+        self.conn
+            .query_row(
+                "SELECT id, root_path, started_at FROM scans WHERE id = ?1",
+                params![scan_id],
+                |row| {
+                    Ok(ScanMeta {
+                        id: row.get(0)?,
+                        root_path: row.get(1)?,
+                        started_at: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    pub fn get_file(&self, file_id: i64) -> rusqlite::Result<Option<StoredFile>> {
+        self.conn
+            .query_row(
+                "SELECT id, relative_path, file_name, media_class, size_bytes, mtime_unix, is_placeholder
+                 FROM files WHERE id = ?1",
+                params![file_id],
+                |row| {
+                    Ok(StoredFile {
+                        id: row.get(0)?,
+                        relative_path: row.get(1)?,
+                        file_name: row.get(2)?,
+                        media_class: media_class_from_str(&row.get::<_, String>(3)?),
+                        size_bytes: row.get::<_, i64>(4)? as u64,
+                        mtime_unix: row.get(5)?,
+                        is_placeholder: row.get::<_, i64>(6)? != 0,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    /// The real, absolute path to a file on disk -- joins the owning
+    /// scan's recorded `root_path` with the file's stored *relative*
+    /// path. This is the only sanctioned way a file id turns into a
+    /// filesystem path; callers serving file content must go through
+    /// this (never take a path from a request directly) -- see the
+    /// architecture plan's server security section.
+    pub fn get_file_full_path(&self, file_id: i64) -> rusqlite::Result<Option<PathBuf>> {
+        self.conn
+            .query_row(
+                "SELECT s.root_path, f.relative_path FROM files f
+                 JOIN scans s ON s.id = f.scan_id WHERE f.id = ?1",
+                params![file_id],
+                |row| {
+                    let root: String = row.get(0)?;
+                    let rel: String = row.get(1)?;
+                    Ok(Path::new(&root).join(rel))
+                },
+            )
+            .optional()
+    }
+
+    pub fn load_review_pairs(&self, scan_id: i64) -> rusqlite::Result<Vec<StoredReviewPair>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, tier, file_a_id, file_b_id, phash_dist, reason
+             FROM review_pairs WHERE scan_id = ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![scan_id], |row| {
+            Ok(StoredReviewPair {
+                id: row.get(0)?,
+                tier: row.get(1)?,
+                file_a_id: row.get(2)?,
+                file_b_id: row.get(3)?,
+                phash_dist: row.get(4)?,
+                reason: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn load_burst_runs(&self, scan_id: i64) -> rusqlite::Result<Vec<StoredBurstRun>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, camera_model FROM burst_runs WHERE scan_id = ?1 ORDER BY id")?;
+        let mut runs: Vec<StoredBurstRun> = stmt
+            .query_map(params![scan_id], |row| {
+                Ok(StoredBurstRun {
+                    id: row.get(0)?,
+                    camera_model: row.get(1)?,
+                    member_file_ids: Vec::new(),
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+
+        let mut mstmt = self
+            .conn
+            .prepare("SELECT file_id FROM burst_run_members WHERE burst_run_id = ?1 ORDER BY seq")?;
+        for r in &mut runs {
+            r.member_file_ids = mstmt
+                .query_map(params![r.id], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+        }
+        Ok(runs)
+    }
+
+    pub fn load_analysis(&self, file_id: i64) -> rusqlite::Result<Option<StoredAnalysis>> {
+        self.conn
+            .query_row(
+                "SELECT origin, confidence, evidence_json, sharpness, width, height, camera_model, capture_time, duration_seconds
+                 FROM analysis WHERE file_id = ?1",
+                params![file_id],
+                |row| {
+                    let evidence_json: String = row.get(2)?;
+                    let evidence: Vec<Evidence> = serde_json::from_str(&evidence_json).unwrap_or_default();
+                    Ok(StoredAnalysis {
+                        origin: row.get(0)?,
+                        confidence: row.get(1)?,
+                        evidence,
+                        sharpness: row.get(3)?,
+                        width: row.get(4)?,
+                        height: row.get(5)?,
+                        camera_model: row.get(6)?,
+                        capture_time: row.get(7)?,
+                        duration_seconds: row.get(8)?,
+                    })
+                },
+            )
+            .optional()
     }
 
     pub fn load_files(&self, scan_id: i64) -> rusqlite::Result<Vec<StoredFile>> {
@@ -333,6 +536,18 @@ fn origin_str(o: Origin) -> &'static str {
     }
 }
 
+fn tier_str(t: Tier) -> &'static str {
+    match t {
+        Tier::T1 => "T1",
+        Tier::T1b => "T1b",
+        Tier::T2Burst => "T2Burst",
+        Tier::T2NativeReview => "T2NativeReview",
+        Tier::T3CrossDevice => "T3CrossDevice",
+        Tier::T2DerivedReview => "T2DerivedReview",
+        Tier::T2UnknownReview => "T2UnknownReview",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,14 +606,30 @@ mod tests {
             reasons: vec!["native_vs_derived"],
         }];
 
+        let review_pairs = vec![crate::classify::PairClassification {
+            a: 0,
+            b: 1,
+            a_origin: Origin::CameraOriginal,
+            b_origin: Origin::CameraOriginal,
+            phash_dist: 44,
+            dt_seconds: Some(5),
+            tier: crate::classify::Tier::T2NativeReview,
+            reason: "native_native_review",
+        }];
+
+        let burst_runs = vec![crate::resolve::BurstRun {
+            camera_model: "OnePlus 15".into(),
+            files: vec![0, 1],
+        }];
+
         (
             root,
             PipelineResult {
                 files,
                 analyzed,
                 clusters,
-                review_pairs: vec![],
-                burst_runs: vec![],
+                review_pairs,
+                burst_runs,
                 video_matches: vec![],
                 orphan_videos: vec![],
                 unknown_provenance_videos: vec![],
@@ -449,5 +680,82 @@ mod tests {
         assert_ne!(scan1, scan2);
         assert_eq!(store.load_files(scan1).unwrap().len(), 2);
         assert_eq!(store.load_files(scan2).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn review_pairs_round_trip() {
+        let (root, result) = sample_result();
+        let mut store = Store::open_in_memory().unwrap();
+        let scan_id = store.save_scan(&root, &result).unwrap();
+
+        let pairs = store.load_review_pairs(scan_id).unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].tier, "T2NativeReview");
+        assert_eq!(pairs[0].phash_dist, 44);
+        assert_eq!(pairs[0].reason, "native_native_review");
+    }
+
+    #[test]
+    fn burst_runs_round_trip_in_capture_order() {
+        let (root, result) = sample_result();
+        let mut store = Store::open_in_memory().unwrap();
+        let scan_id = store.save_scan(&root, &result).unwrap();
+
+        let runs = store.load_burst_runs(scan_id).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].camera_model, "OnePlus 15");
+        assert_eq!(runs[0].member_file_ids.len(), 2);
+    }
+
+    #[test]
+    fn list_and_get_scan_metadata() {
+        let (root, result) = sample_result();
+        let mut store = Store::open_in_memory().unwrap();
+        let scan_id = store.save_scan(&root, &result).unwrap();
+
+        let scans = store.list_scans().unwrap();
+        assert_eq!(scans.len(), 1);
+        assert_eq!(scans[0].id, scan_id);
+        assert_eq!(scans[0].root_path, root.to_string_lossy());
+
+        let scan = store.get_scan(scan_id).unwrap().unwrap();
+        assert_eq!(scan.id, scan_id);
+        assert_eq!(store.get_scan(999).unwrap().is_none(), true);
+    }
+
+    #[test]
+    fn get_file_and_full_path_resolve_correctly() {
+        let (root, result) = sample_result();
+        let mut store = Store::open_in_memory().unwrap();
+        let scan_id = store.save_scan(&root, &result).unwrap();
+
+        let files = store.load_files(scan_id).unwrap();
+        let a_id = files.iter().find(|f| f.relative_path == "a.jpg").unwrap().id;
+
+        let fetched = store.get_file(a_id).unwrap().unwrap();
+        assert_eq!(fetched.file_name, "a.jpg");
+
+        let full_path = store.get_file_full_path(a_id).unwrap().unwrap();
+        assert_eq!(full_path, root.join("a.jpg"));
+    }
+
+    #[test]
+    fn analysis_round_trips_evidence_and_fields() {
+        let (root, result) = sample_result();
+        let mut store = Store::open_in_memory().unwrap();
+        let scan_id = store.save_scan(&root, &result).unwrap();
+
+        let files = store.load_files(scan_id).unwrap();
+        let a_id = files.iter().find(|f| f.relative_path == "a.jpg").unwrap().id;
+
+        let analysis = store.load_analysis(a_id).unwrap().unwrap();
+        assert_eq!(analysis.origin, "camera_original");
+        assert_eq!(analysis.camera_model.as_deref(), Some("OnePlus 15"));
+        assert_eq!(analysis.evidence, vec![Evidence::IntactCameraExif]);
+
+        // File b has no analysis entry in sample_result -- must come back
+        // as None, not an error or a default-filled struct.
+        let b_id = files.iter().find(|f| f.relative_path == "b.jpg").unwrap().id;
+        assert!(store.load_analysis(b_id).unwrap().is_none());
     }
 }
