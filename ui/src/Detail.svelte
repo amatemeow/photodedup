@@ -2,6 +2,7 @@
   import { api } from './lib/api';
   import { formatBytes, formatWhen, type Group, type Review } from './lib/review.svelte';
   import Lightbox from './Lightbox.svelte';
+  import Icon from './Icon.svelte';
 
   let {
     review,
@@ -39,6 +40,9 @@
   const status = $derived(review.statuses.get(group.id) ?? 'undecided');
   const isBurst = $derived(group.tab === 'burst');
   const sharpest = $derived(Math.max(0, ...Object.values(group.sharpness)));
+  const undecided = $derived(status === 'undecided' || status === 'partial');
+  const keepsAll = $derived(group.tab === 'similar' || group.tab === 'orphans');
+  const primaryLabel = $derived(!undecided ? 'Next' : isBurst ? 'Keep suggested only' : keepsAll ? 'Keep all' : 'Accept suggestion');
 
   // While the preview is open it handles its own keys (see Lightbox).
   function onKey(e: KeyboardEvent) {
@@ -56,60 +60,91 @@
     }
   }
 
-  const dims = (a: { width: number | null; height: number | null } | null) => (a?.width && a?.height ? `${a.width}×${a.height}` : '');
+  /** The segmented control sets a side; clicking the side already chosen does nothing. */
+  function choose(i: number, wantKeep: boolean) {
+    active = i;
+    const m = group.members[i];
+    if (review.effective(group, m) !== wantKeep) review.toggle(group, m);
+  }
+
+  const dims = (a: { width: number | null; height: number | null } | null) => (a?.width && a?.height ? `${a.width} × ${a.height}` : '');
   const minutes = (s: number) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
+  const loaded = (e: Event) => (e.currentTarget as HTMLImageElement).classList.add('in');
+  const ready = (node: HTMLImageElement) => {
+    if (node.complete) node.classList.add('in');
+  };
 </script>
 
 <svelte:window onkeydown={onKey} />
 
-<section>
+<section class="detail">
   <div class="bar">
-    <button class="secondary" onclick={onBack}>← Overview</button>
-    <button class="secondary" onclick={onPrev} disabled={position <= 1} title="Previous (←)">‹</button>
-    <span>{position} of {total}</span>
-    <button class="secondary" onclick={onNext} disabled={position >= total} title="Next (→)">›</button>
-    <span class="spacer"></span>
-    <span class="hint">{formatWhen(group.capturedAt)} · {group.label}{group.reasons.length ? ` · ${group.reasons.join(', ').replaceAll('_', ' ')}` : ''}</span>
-    {#if isBurst}
-      <button class="secondary" onclick={() => review.keepAll(group)} title="Keep every frame in this run">Keep all</button>
-    {/if}
-    <button onclick={onAccept} title="Accept suggestion and continue (Enter)">
-      {status === 'undecided' || status === 'partial' ? (isBurst ? 'Keep suggested only' : group.tab === 'similar' || group.tab === 'orphans' ? 'Keep all' : 'Accept suggestion') : 'Next'} ⏎
-    </button>
+    <div class="nav">
+      <button class="btn" onclick={onBack}><Icon name="chevron-left" /> Overview</button>
+      <div class="seg pager" role="group" aria-label="Navigate groups">
+        <button onclick={onPrev} disabled={position <= 1} title="Previous (←)" aria-label="Previous group"><Icon name="chevron-left" /></button>
+        <span class="pos" aria-live="polite">{position} of {total}</span>
+        <button onclick={onNext} disabled={position >= total} title="Next (→)" aria-label="Next group"><Icon name="chevron-right" /></button>
+      </div>
+    </div>
+
+    <div class="summary">
+      <strong>{formatWhen(group.capturedAt)}</strong>
+      <span class="hint">{group.label}{group.reasons.length ? ` · ${group.reasons.join(', ').replaceAll('_', ' ')}` : ''}</span>
+    </div>
+
+    <div class="actions">
+      {#if isBurst}
+        <button class="btn" onclick={() => review.keepAll(group)} title="Keep every frame in this sequence">Keep all</button>
+      {/if}
+      <button class="btn primary" onclick={onAccept} title="{primaryLabel} and continue (Enter)">{primaryLabel} <kbd class="on-accent">⏎</kbd></button>
+    </div>
   </div>
 
-  <div class="members">
+  <div class="members" style="--n:{group.members.length}">
     {#each group.members as m, i (m.id)}
       {@const keep = review.effective(group, m)}
-      {@const decided = review.isDecided(m)}
-      <article class:keep class:active={active === i}>
-        <button class="thumb" onclick={() => { active = i; previewing = i; }} title="Large preview (Space)">
-          <img src={api.fileUrl(m.id, 'thumb')} alt={m.file_name} loading="lazy" />
-          {#if i < 9}<kbd>{i + 1}</kbd>{/if}
+      <article class:aside={!keep} class:active={active === i}>
+        <button class="photo" onclick={() => { active = i; previewing = i; }} title="Large preview (Space)" aria-label="Preview {m.file_name}">
+          <span class="backdrop" style="background-image:url({api.fileUrl(m.id, 'thumb')})" aria-hidden="true"></span>
+          <!-- the small thumbnail is already cached (the overview used it), so the view opens at once;
+               the sharp preview fades in over it when it arrives -->
+          <img class="low" src={api.fileUrl(m.id, 'thumb')} alt="" decoding="async" aria-hidden="true" />
+          <img class="high" src={api.fileUrl(m.id, 'preview')} alt={m.file_name} decoding="async" onload={loaded} use:ready />
+          {#if i < 9}<kbd class="idx">{i + 1}</kbd>{/if}
+          <span class="flags">
+            {#if group.suggested.has(m.id) && !isBurst}<span class="badge overlay accent"><Icon name="check" size={11} /> Suggested</span>{/if}
+            {#if isBurst && group.suggested.has(m.id)}<span class="badge overlay accent"><Icon name="sparkles" size={11} /> Sharpest</span>{/if}
+          </span>
+          {#if !keep}<span class="veil"><span class="badge overlay warning">Will be quarantined</span></span>{/if}
         </button>
+
         <div class="info">
-          <strong title={m.relative_path}>{m.file_name}</strong>
+          <strong class="name" title={m.relative_path}>{m.file_name}</strong>
           {#await review.analysis(m.id) then a}
-            <span>
-              {[dims(a), a?.duration_seconds ? minutes(a.duration_seconds) : '', formatBytes(m.size_bytes)].filter(Boolean).join(' · ')}
-            </span>
-            {#if !isBurst}<span class="hint">{[a?.origin, a?.camera_model].filter(Boolean).join(' · ')}</span>{/if}
+            <span class="line">{[dims(a), a?.duration_seconds ? minutes(a.duration_seconds) : '', formatBytes(m.size_bytes)].filter(Boolean).join(' · ')}</span>
+            {#if !isBurst}<span class="hint">{[a?.origin?.replaceAll('_', ' '), a?.camera_model].filter(Boolean).join(' · ')}</span>{/if}
           {/await}
           {#if isBurst && group.sharpness[m.id] !== undefined}
             <span class="sharp" title="Sharpness (higher is sharper)">
               <span class="bar-fill" style:width="{sharpest ? (group.sharpness[m.id] / sharpest) * 100 : 0}%"></span>
-              <span class="hint">{Math.round(group.sharpness[m.id])}{group.suggested.has(m.id) ? ' · suggested' : ''}</span>
             </span>
+            <span class="hint">Sharpness {Math.round(group.sharpness[m.id])}</span>
           {/if}
         </div>
-        <button class="choice" class:keep onclick={() => review.toggle(group, m)} aria-pressed={keep}>
-          {keep ? 'Keep' : 'Quarantine'}
-        </button>
-        {#if !decided && keep && group.suggested.has(m.id) && !isBurst}<span class="hint">suggested</span>{/if}
+
+        <div class="seg block" role="group" aria-label="Decision for {m.file_name}">
+          <button class="keep" aria-pressed={keep} onclick={() => choose(i, true)}>{#if keep}<Icon name="check" size={14} />{/if} Keep</button>
+          <button class="aside" aria-pressed={!keep} onclick={() => choose(i, false)}>Quarantine</button>
+        </div>
       </article>
     {/each}
   </div>
-  <p class="hint">Quarantined files are moved aside, never deleted — and only when you apply your decisions. Anything marked Keep stays where it is.</p>
+
+  <p class="hint foot">
+    <Icon name="info" size={13} /> Quarantined files are moved aside, never deleted, and only when you apply your decisions. Anything marked Keep stays
+    where it is.
+  </p>
 </section>
 
 {#if previewing !== null}
@@ -117,91 +152,188 @@
 {/if}
 
 <style>
+  .detail {
+    display: grid;
+    gap: var(--s4);
+  }
   .bar {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: var(--s4);
+  }
+  .nav,
+  .actions {
     display: flex;
     align-items: center;
-    gap: 0.6rem;
-    flex-wrap: wrap;
-    margin-bottom: 1rem;
+    gap: var(--s2);
   }
-  .spacer {
-    flex: 1;
+  .pager {
+    align-items: center;
   }
+  .pager button {
+    display: grid;
+    place-items: center;
+    padding: 0 var(--s2);
+  }
+  .pager button:disabled {
+    opacity: 0.35;
+    cursor: default;
+  }
+  .pos {
+    padding: 0 var(--s2);
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    font-size: var(--fs-small);
+  }
+  .summary {
+    display: grid;
+    gap: 1px;
+    justify-items: center;
+    text-align: center;
+    min-width: 0;
+  }
+  .summary .hint {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+  }
+  .on-accent {
+    background: rgb(255 255 255 / 0.22);
+    color: inherit;
+    box-shadow: none;
+  }
+
   .members {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
-    gap: 1rem;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+    gap: var(--s4);
+    align-items: start;
   }
   article {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    padding: 0.6rem;
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    opacity: 0.75;
-  }
-  article.keep {
-    opacity: 1;
-    border-color: var(--ok);
+    display: grid;
+    gap: var(--s3);
+    padding: var(--s3);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+    box-shadow: var(--shadow-sm);
+    transition: box-shadow var(--t) var(--ease);
   }
   article.active {
-    outline: 2px solid var(--accent);
+    box-shadow: 0 0 0 2px var(--accent), var(--shadow-sm);
   }
-  .thumb {
+  .photo {
     position: relative;
+    display: grid;
+    place-items: center;
+    height: clamp(240px, 46vh, 520px);
     padding: 0;
-    background: var(--line);
-    border-radius: 8px;
+    border: 0;
+    border-radius: var(--radius);
     overflow: hidden;
+    background: var(--surface-2);
+    cursor: zoom-in;
   }
-  .thumb img {
-    display: block;
-    width: 100%;
-    aspect-ratio: 4 / 3;
-    object-fit: contain;
-  }
-  kbd {
+  /* the photo's own colours, blurred, fill the space around it instead of grey bars */
+  .backdrop {
     position: absolute;
-    top: 6px;
-    left: 6px;
-    background: rgb(0 0 0 / 0.65);
+    inset: -20px;
+    background-size: cover;
+    background-position: center;
+    filter: blur(26px) saturate(1.2) brightness(0.88);
+    opacity: 0.9;
+  }
+  .photo img {
+    grid-area: 1 / 1;
+    position: relative;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    filter: drop-shadow(0 4px 14px rgb(0 0 0 / 0.35));
+  }
+  /* the placeholder is always there; the sharp one fades in on top of it */
+  .photo img.high {
+    opacity: 0;
+    transition: opacity 0.3s var(--ease);
+  }
+  .photo img.high:global(.in) {
+    opacity: 1;
+  }
+  article.aside .photo img {
+    filter: grayscale(0.7) brightness(0.8);
+  }
+  .idx {
+    position: absolute;
+    top: var(--s2);
+    left: var(--s2);
+    background: rgb(20 20 22 / 0.72);
     color: #fff;
-    border-radius: 4px;
-    padding: 0 0.4rem;
-    font: 0.85em ui-monospace, monospace;
+    box-shadow: none;
+    backdrop-filter: blur(8px);
+  }
+  .flags {
+    position: absolute;
+    top: var(--s2);
+    right: var(--s2);
+    display: flex;
+    gap: var(--s1);
+  }
+  .veil {
+    position: absolute;
+    left: var(--s2);
+    bottom: var(--s2);
   }
   .info {
-    display: flex;
-    flex-direction: column;
-    font-size: 0.9em;
+    display: grid;
+    gap: 2px;
+    min-width: 0;
   }
-  .info strong {
+  .name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .line {
+    color: var(--label-2);
+    font-variant-numeric: tabular-nums;
+  }
   .sharp {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    margin-top: 2px;
+    display: block;
+    height: 4px;
+    margin-top: var(--s1);
+    border-radius: 2px;
+    background: var(--surface-2);
+    overflow: hidden;
   }
   .bar-fill {
     display: block;
-    height: 4px;
-    border-radius: 2px;
-    background: var(--accent);
+    height: 100%;
     min-width: 2px;
+    background: var(--accent);
+    border-radius: 2px;
   }
-  .choice {
-    background: transparent;
-    color: inherit;
-    border: 1px solid var(--line);
+  .foot {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    max-width: 80ch;
   }
-  .choice.keep {
-    background: var(--ok);
-    color: var(--ok-fg);
-    border-color: var(--ok);
+
+  @media (max-width: 760px) {
+    .bar {
+      grid-template-columns: 1fr;
+      justify-items: stretch;
+    }
+    .nav,
+    .actions {
+      justify-content: space-between;
+    }
+    .summary {
+      order: -1;
+    }
+    .photo {
+      height: clamp(200px, 38vh, 360px);
+    }
   }
 </style>
