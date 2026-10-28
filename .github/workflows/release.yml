@@ -3,6 +3,15 @@
 # push --tags`) and attaches them to a GitHub release with checksums and build
 # attestations.
 #
+# Hardening, because this workflow handles release artifacts:
+#  * every third-party action is pinned to a full commit SHA (the tag is in the
+#    comment), so a moved or hijacked tag can't change what runs;
+#  * the build job compiles code from many dependencies (build scripts run
+#    arbitrary code), so it gets NO write access to the repository and uses no
+#    build cache that a poisoned entry could ride in on;
+#  * only the small publish job can write to the release, and all it does is
+#    upload files the build job already produced and attested.
+#
 # NOTE: this workflow has NOT been run. What has been verified locally is the
 # pieces it strings together, on macOS/arm64 only: building the LGPL ffmpeg
 # (scripts/build-sidecar.sh), the licence gate on it, and `tauri build`. The
@@ -13,13 +22,15 @@ on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write       # create the release
-  id-token: write       # build attestations
-  attestations: write
+# Nothing by default; each job asks for exactly what it needs.
+permissions: {}
 
 jobs:
   build:
+    permissions:
+      contents: read
+      id-token: write       # build attestations
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -37,12 +48,13 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          workspaces: src-tauri
-      - uses: actions/setup-node@v4
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # the `stable` branch, as of 2026-10-28
+        with:
+          toolchain: stable
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
@@ -58,7 +70,7 @@ jobs:
         run: ./scripts/build-sidecar.sh
 
       - name: Install cargo-about
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-about
 
@@ -75,23 +87,39 @@ jobs:
           APPLE_SIGNING_IDENTITY: "-"
         run: npx --yes @tauri-apps/cli@2.12.4 build --bundles ${{ matrix.bundles }} --config tauri.release.conf.json
 
-      - name: Checksums
+      - name: Collect installers and checksums
         run: |
-          cd src-tauri/target/release/bundle
-          find . -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.AppImage' \) -print0 \
-            | xargs -0 -I{} sh -c 'cp "{}" "$GITHUB_WORKSPACE/"; cd "$GITHUB_WORKSPACE"; (sha256sum "$(basename "{}")" 2>/dev/null || shasum -a 256 "$(basename "{}")") >> SHA256SUMS-${{ matrix.os }}.txt'
+          mkdir dist
+          find src-tauri/target/release/bundle -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.AppImage' \) -exec cp {} dist/ \;
+          cd dist
+          ls
+          { sha256sum -- * 2>/dev/null || shasum -a 256 -- *; } > "../SHA256SUMS-${{ matrix.os }}.txt"
+          mv "../SHA256SUMS-${{ matrix.os }}.txt" .
 
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: |
-            *.dmg
-            *.msi
-            *.AppImage
+            dist/*.dmg
+            dist/*.msi
+            dist/*.AppImage
 
-      - uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          files: |
-            *.dmg
-            *.msi
-            *.AppImage
-            SHA256SUMS-*.txt
+          name: installers-${{ matrix.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write         # the only job that can touch the release
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: installers-*
+          merge-multiple: true
+          path: dist
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: dist/*

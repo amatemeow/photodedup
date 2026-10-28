@@ -694,6 +694,13 @@ spelled out, because several parts could only be partly tested from here.
   window opens and looks right, that *Browse...* shows the native dialog,
   that Cmd+Z reaches the page, that the navigation guard blocks external
   links, and what closing the window does on macOS (the app may stay running).
+- **Workflow hardening (after an automated review of the first commit):** every
+  third-party action is pinned to a full commit SHA with its release in a
+  comment (resolved from the real repositories, not guessed); the release build
+  job has read-only repository access and no build cache; and only a separate
+  publish job holds `contents: write`, uploading files the build job already
+  produced and attested. Pinned SHAs need refreshing deliberately (e.g. with
+  Dependabot for Actions); they will otherwise go stale.
 - **CI and release workflows have never run.** They parse as YAML and use the
   commands that were run locally, nothing more. The Windows and Linux legs and
   the Intel macOS leg are untested (the `macos-13` runner label may be retired).
