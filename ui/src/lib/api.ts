@@ -55,6 +55,29 @@ export interface Cluster {
   members: FileDto[];
 }
 
+export interface BurstRun {
+  id: string;
+  camera_model: string;
+  /** In capture-time order. */
+  frames: FileDto[];
+  sharpness: Record<string, number>;
+  suggested_file_id: string | null;
+}
+
+export interface ReviewPair {
+  id: string;
+  tier: string;
+  reason: string;
+  phash_dist: number;
+  file_a: FileDto | null;
+  file_b: FileDto | null;
+}
+
+export interface OrphanVideo {
+  file: FileDto;
+  reason: 'no_match' | 'unknown_origin';
+}
+
 export interface Analysis {
   origin: string;
   width: number | null;
@@ -96,6 +119,9 @@ export const api = {
   cancel: (jobId: number) => call<void>(`/api/jobs/${jobId}/cancel`, { method: 'POST' }),
   jobStatus: (jobId: number) => call<JobStatus>(`/api/jobs/${jobId}`),
   clusters: (scanId: string) => call<Cluster[]>(`/api/scans/${scanId}/clusters`),
+  burstRuns: (scanId: string) => call<BurstRun[]>(`/api/scans/${scanId}/burst-runs`),
+  reviewPairs: (scanId: string) => call<ReviewPair[]>(`/api/scans/${scanId}/review-pairs`),
+  orphanVideos: (scanId: string) => call<OrphanVideo[]>(`/api/scans/${scanId}/orphan-videos`),
   analysis: (fileId: string) => call<Analysis>(`/api/files/${fileId}/analysis`),
   decisions: (scanId: string) => call<Record<string, boolean>>(`/api/scans/${scanId}/decisions`),
   putDecisions: (scanId: string, rows: DecisionRow[]) =>

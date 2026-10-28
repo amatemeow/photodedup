@@ -77,7 +77,9 @@ pub enum Progress {
     Analyzing { done: usize, total: usize },
     ExactDuplicates,
     Matching,
-    Videos,
+    /// Derived videos matched so far -- few units, each slow (a run of
+    /// ffmpeg frame extractions), so the count moves in big steps.
+    Videos { done: usize, total: usize },
     Clustering,
 }
 
@@ -119,10 +121,10 @@ pub fn run_with_progress(root: &Path, opts: &PipelineOptions, on_progress: &(dyn
 
 /// Like `run_with_progress`, but stops early and returns `None` once
 /// `cancel` is set. Cancellation is cooperative: it's checked per file
-/// during `Analyzing` (so the long phase stops within one file's work per
-/// worker) and between the later phases. The exact-hash pass and video
-/// matching have no internal checkpoints, so a cancel that lands inside
-/// one of them takes effect when that phase ends.
+/// during `Analyzing`, per derived video during video matching, and
+/// between the later phases. The exact-hash pass has no internal
+/// checkpoints, so a cancel that lands inside it takes effect when that
+/// pass ends.
 pub fn run_cancellable(
     root: &Path,
     opts: &PipelineOptions,
@@ -235,7 +237,6 @@ fn run_inner(root: &Path, opts: &PipelineOptions, on_progress: &(dyn Fn(Progress
 
     // --- Video matching (separate mechanism: duration-blocked + frame
     // sequence, not phash-matrix candidate search). ---
-    on_progress(Progress::Videos);
     let video_candidates: Vec<VideoCandidate> = primary_ids
         .iter()
         .filter(|&&id| file_by_id[&id].media_class == MediaClassSerde::Video)
@@ -249,7 +250,13 @@ fn run_inner(root: &Path, opts: &PipelineOptions, on_progress: &(dyn Fn(Progress
             })
         })
         .collect();
-    let video_matches = find_video_matches(&video_candidates, &opts.ffmpeg_bin, opts.intensity.scheduling_hint());
+    let video_matches = find_video_matches(
+        &video_candidates,
+        &opts.ffmpeg_bin,
+        opts.intensity.scheduling_hint(),
+        &|done, total| on_progress(Progress::Videos { done, total }),
+        &cancelled,
+    );
     if cancelled() {
         return None;
     }

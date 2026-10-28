@@ -163,7 +163,12 @@ pub async fn list_review_pairs(
 pub struct BurstRunDto {
     pub id: String,
     pub camera_model: String,
+    /// In capture-time order.
     pub frames: Vec<FileDto>,
+    /// Laplacian-variance sharpness per frame id (where analysis exists).
+    pub sharpness: HashMap<String, f64>,
+    /// The frame suggested to keep when thinning the run: the sharpest.
+    pub suggested_file_id: Option<String>,
 }
 
 pub async fn list_burst_runs(
@@ -175,15 +180,48 @@ pub async fn list_burst_runs(
     let runs = store.load_burst_runs(&scan_id).map_err(internal)?;
     let files = file_lookup(&store, &scan_id).map_err(internal)?;
 
-    let out = runs
-        .into_iter()
-        .map(|r| BurstRunDto {
-            id: r.id,
-            camera_model: r.camera_model,
-            frames: r.member_file_ids.iter().filter_map(|id| files.get(id)).map(FileDto::from).collect(),
-        })
-        .collect();
+    let mut out = Vec::with_capacity(runs.len());
+    for r in runs {
+        let frames: Vec<FileDto> = r.member_file_ids.iter().filter_map(|id| files.get(id)).map(FileDto::from).collect();
+        let mut sharpness = HashMap::new();
+        for f in &frames {
+            if let Some(sh) = store.load_analysis(&f.id).map_err(internal)?.and_then(|a| a.sharpness) {
+                sharpness.insert(f.id.clone(), sh);
+            }
+        }
+        let suggested_file_id = frames
+            .iter()
+            .filter_map(|f| sharpness.get(&f.id).map(|&sh| (f, sh)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(f, _)| f.id.clone())
+            .or_else(|| frames.first().map(|f| f.id.clone()));
+        out.push(BurstRunDto { id: r.id, camera_model: r.camera_model, frames, sharpness, suggested_file_id });
+    }
     Ok(Json(out))
+}
+
+#[derive(Serialize)]
+pub struct OrphanVideoDto {
+    pub file: FileDto,
+    /// `no_match` or `unknown_origin`.
+    pub reason: String,
+}
+
+/// Videos with no counterpart to compare against -- browse only.
+pub async fn list_orphan_videos(
+    State(state): State<AppState>,
+    AxPath(scan_id): AxPath<String>,
+) -> Result<Json<Vec<OrphanVideoDto>>, StatusCode> {
+    let store = state.store.lock().unwrap();
+    super::require_scan(&store, &scan_id)?;
+    let orphans = store.load_orphan_videos(&scan_id).map_err(internal)?;
+    let files = file_lookup(&store, &scan_id).map_err(internal)?;
+    Ok(Json(
+        orphans
+            .into_iter()
+            .filter_map(|o| files.get(&o.file_id).map(|f| OrphanVideoDto { file: FileDto::from(f), reason: o.reason }))
+            .collect(),
+    ))
 }
 
 pub async fn get_analysis(

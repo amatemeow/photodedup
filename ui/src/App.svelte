@@ -14,7 +14,7 @@
     analyzing: 'Reading and fingerprinting photos',
     exact_duplicates: 'Checking for exact copies',
     matching: 'Looking for similar photos',
-    videos: 'Matching videos',
+    videos: 'Matching videos against their originals',
     clustering: 'Grouping duplicates',
   };
 
@@ -94,8 +94,21 @@
     return e instanceof Error ? e.message : String(e);
   }
 
+  // A determinate bar wherever the engine reports a count (photos, then
+  // videos); an indeterminate one for the short phases without one.
   const percent = (s: JobStatus) =>
-    s.state === 'running' && s.phase === 'analyzing' && s.total ? Math.round(((s.done ?? 0) / s.total) * 100) : null;
+    s.state === 'running' && (s.phase === 'analyzing' || s.phase === 'videos') && s.total
+      ? Math.round(((s.done ?? 0) / s.total) * 100)
+      : null;
+
+  const detail = (s: JobStatus) =>
+    s.state !== 'running' || !s.total
+      ? ''
+      : s.phase === 'analyzing'
+        ? `${s.done} of ${s.total} photos and videos`
+        : s.phase === 'videos'
+          ? `${s.done} of ${s.total} videos`
+          : '';
 </script>
 
 {#if view.kind === 'review'}
@@ -128,11 +141,7 @@
     {@const pct = percent(s)}
     <p>{s.state === 'running' ? phaseLabel[s.phase] : ''}…</p>
     <progress max="100" value={pct ?? undefined}></progress>
-    <p class="hint">
-      {#if s.state === 'running' && s.phase === 'analyzing' && s.total}
-        {s.done} of {s.total} photos and videos
-      {:else}&nbsp;{/if}
-    </p>
+    <p class="hint">{detail(s) || '\u00a0'}</p>
     <button class="secondary" onclick={cancel}>Cancel</button>
   {:else}
     <p class="error">Scan failed: {view.message}</p>

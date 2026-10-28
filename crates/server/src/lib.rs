@@ -68,6 +68,7 @@ pub async fn build_with_ui(
         .route("/api/jobs/{id}", get(routes::jobs::job_status))
         .route("/api/jobs/{id}/cancel", post(routes::jobs::cancel_job))
         .route("/api/jobs/{id}/events", get(routes::jobs::job_events))
+        .route("/api/scans/{id}/orphan-videos", get(routes::scans::list_orphan_videos))
         .route("/api/files/{id}/analysis", get(routes::scans::get_analysis))
         .route(
             "/api/scans/{id}/decisions",
@@ -296,6 +297,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn burst_runs_suggest_the_sharpest_frame_and_orphan_videos_list_with_their_reason() {
+        use photodedup_core::model::{FileRecord, MediaClassSerde};
+        use photodedup_core::pipeline::Analyzed;
+        use photodedup_core::provenance::{Origin, Provenance};
+
+        let root = std::env::temp_dir().join("photodedup-server-test-root-burst");
+        let rec = |id, name: &str, class| FileRecord {
+            id,
+            path: root.join(name),
+            file_name: name.into(),
+            media_class: class,
+            size_bytes: 10,
+            mtime_unix: 0,
+            is_placeholder: false,
+        };
+        let analysis = |sharpness| Analyzed {
+            provenance: Provenance { origin: Origin::CameraOriginal, confidence: 1.0, evidence: vec![] },
+            phash: None,
+            sharpness: Some(sharpness),
+            width: None,
+            height: None,
+            size_bytes: 10,
+            camera_model: None,
+            capture_time: None,
+            duration_seconds: None,
+        };
+        let result = photodedup_core::pipeline::PipelineResult {
+            files: vec![
+                rec(0, "f0.jpg", MediaClassSerde::Image),
+                rec(1, "f1.jpg", MediaClassSerde::Image),
+                rec(2, "f2.jpg", MediaClassSerde::Image),
+                rec(3, "v.mp4", MediaClassSerde::Video),
+            ],
+            analyzed: [(0, analysis(10.0)), (1, analysis(99.0)), (2, analysis(50.0))].into_iter().collect(),
+            clusters: vec![],
+            review_pairs: vec![],
+            burst_runs: vec![photodedup_core::resolve::BurstRun { camera_model: "Cam".into(), files: vec![0, 1, 2] }],
+            video_matches: vec![],
+            orphan_videos: vec![3],
+            unknown_provenance_videos: vec![],
+            placeholder_count: 0,
+            placeholder_bytes: 0,
+            refused_managed_libraries: vec![],
+        };
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let scan_id = photodedup_core::store::Store::open(tmp.path()).unwrap().save_scan(&root, &result).unwrap();
+        let (_l, router, info) = build(tmp.path()).await.unwrap();
+        std::mem::forget(tmp);
+
+        let get = |path: String| {
+            let router = router.clone();
+            async move {
+                let res = send(&router, axum::http::Request::get(path).body(axum::body::Body::empty()).unwrap()).await;
+                assert_eq!(res.status(), 200);
+                let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+            }
+        };
+        let runs = get(format!("/api/scans/{scan_id}/burst-runs?token={}", info.token)).await;
+        let run = &runs[0];
+        let frames: Vec<&str> = run["frames"].as_array().unwrap().iter().map(|f| f["file_name"].as_str().unwrap()).collect();
+        assert_eq!(frames, ["f0.jpg", "f1.jpg", "f2.jpg"], "capture order is preserved");
+        let sharpest = run["suggested_file_id"].as_str().unwrap();
+        let sharpest_name = run["frames"].as_array().unwrap().iter().find(|f| f["id"] == sharpest).unwrap()["file_name"].clone();
+        assert_eq!(sharpest_name, "f1.jpg");
+        assert_eq!(run["sharpness"].as_object().unwrap().len(), 3);
+
+        let orphans = get(format!("/api/scans/{scan_id}/orphan-videos?token={}", info.token)).await;
+        assert_eq!(orphans[0]["file"]["file_name"], "v.mp4");
+        assert_eq!(orphans[0]["reason"], "no_match");
+    }
+
+    #[tokio::test]
     async fn a_stale_scan_id_is_not_found_everywhere_not_empty_and_not_a_server_error() {
         let (router, info, _scan_id, _root) = test_server_with_scan().await;
         let stale = uuid::Uuid::new_v4();
@@ -312,6 +386,7 @@ mod tests {
             json("GET", format!("/api/scans/{stale}/clusters?token={t}"), ""),
             json("GET", format!("/api/scans/{stale}/review-pairs?token={t}"), ""),
             json("GET", format!("/api/scans/{stale}/burst-runs?token={t}"), ""),
+            json("GET", format!("/api/scans/{stale}/orphan-videos?token={t}"), ""),
             json("GET", format!("/api/scans/{stale}/decisions?token={t}"), ""),
             json("PUT", format!("/api/scans/{stale}/decisions?token={t}"), r#"{"relative_path":"a.jpg","keep":true}"#),
             json("POST", format!("/api/scans/{stale}/decisions/bulk?token={t}"), r#"[{"relative_path":"a.jpg","keep":true}]"#),

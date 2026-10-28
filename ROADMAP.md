@@ -176,7 +176,7 @@ as a choice.
     that reconnects or reloads (`EventSource` can't replay what it
     missed). Status is `running` + phase (`scanning`, `analyzing
     {done,total}`, `exact_duplicates`, `matching`, `videos`,
-    `clustering`), `done {scan_id}`, `cancelled`, or `failed {message}`.
+    `videos {done,total}`, `clustering`), `done {scan_id}`, `cancelled`, or `failed {message}`.
     Progress rides a `tokio::sync::watch` channel, which keeps only the
     latest value, so a per-file callback can't flood a slow client.
   - `POST /api/jobs/{id}/cancel` sets a flag the pipeline polls
@@ -186,10 +186,9 @@ as a choice.
     nothing: a half-analyzed result isn't a scan anyone could resume.
     Measured on the reference dataset: cancel took effect in under a
     second mid-`analyzing`. **Known limit:** the flag is checked per file
-    during `analyzing` and between later phases, but the exact-hash pass
-    and video matching have no internal checkpoints, so a cancel landing
-    inside one waits for that phase to end (video matching is the slow
-    one). Add checkpoints there if it proves noticeable.
+    during `analyzing`, per derived video during video matching, and
+    between the later phases; the exact-hash pass has no internal
+    checkpoints, so a cancel landing inside it waits for that pass to end.
   - **Path exception:** `root` is the one filesystem path that comes from
     a request (picking a folder is the point). It is still behind the
     session token, canonicalized, and must be an existing directory; file
@@ -265,14 +264,19 @@ as a choice.
   and a reviewed counter; opening a cluster shows its members side by side
   with prev/next inside the current filter, and the overview is always one
   click (or Esc) away, so earlier choices can be revisited at any time.
-  - **Decisions are per file, so any number of a cluster's members can be
-    kept.** The engine's pick is only a suggestion until the user acts on
-    it. The one rule: the last kept member of a cluster can't be
-    quarantined. "Accept all suggestions" only touches clusters nobody has
-    decided yet, behind a confirmation. Undo is multi-level.
-  - Keyboard (all of it also has a visible control): arrows or `j`/`k`
-    move, `1`-`9` toggle keep, `Enter` accepts and advances, `Space`
-    opens the large preview, `Esc` backs out, `u` undoes, `?` lists them.
+  - **Decisions are per file, so any number of a group's members can be
+    kept, and a file marked Keep is never quarantined** -- not by a bulk
+    action, not by another group's suggestion. The engine's pick is only a
+    suggestion until the user acts on it. The one thing refused is
+    marking *every* member of a group Quarantine: each group, and every
+    other group a shared file belongs to, must keep at least one copy.
+    "Accept all suggestions" only touches groups nobody has decided yet,
+    behind a confirmation that says how many files it would mark for
+    quarantine. Undo is multi-level, on Cmd+Z / Ctrl+Z.
+  - Keyboard (all of it also has a visible control): Cmd/Ctrl+Z undoes,
+    arrows or `j`/`k` move, `1`-`9` toggle keep, `Enter` accepts and
+    advances, `Space` opens the large preview, `Esc` backs out, `?` lists
+    them.
   - New API: `POST /api/scans/{id}/decisions/bulk` (one transaction) and
     `DELETE /api/scans/{id}/decisions?relative_path=` (back to undecided,
     for undo). Quarantine itself is not built: decisions are only
@@ -281,4 +285,40 @@ as a choice.
     not yet verified in a real browser.** Still to build: review pairs and
     burst runs as browse-only views, the Options tab, and virtualizing the
     overview grid for libraries much larger than the 182 clusters tested.
+
+- **Review split into the MVP's categories** (tabs, each with its own
+  count and one-line explanation): *Exact duplicates* (T0 clusters),
+  *True duplicates* (T1/T1b clusters, video matches included), *Burst
+  sequences*, *Same-device review* (browse only) and *Orphan videos*
+  (browse only). The first three are decided; the last two never offer a
+  way to mark anything. Checked against the reference dataset: 2 / 180 /
+  368 runs over 1332 frames, 126 same-device pairs (the known 126-vs-125
+  difference), 2 orphan videos.
+  - **Bursts** suggest only the sharpest frame (as the MVP defaulted), any
+    number of frames can be kept, and the detail view has *Keep all* and
+    *Keep suggested only*. A frame that is also a duplicate group's
+    suggested keeper is suggested-kept in the burst too, so thinning a
+    burst can't undo a duplicate group's choice. **Thinning every burst at
+    once is aggressive** (the MVP measured about 964 extra files / 4.8 GB
+    on this dataset), so "Accept all suggestions" shows how many files it
+    would mark before it does anything.
+  - **Same-device review excludes burst-tier pairs** (534 of the 660
+    stored review pairs): those are neighbours inside a burst run, which
+    the Burst tab already shows.
+  - **Orphan videos persist** (new `orphan_videos` table), in two labelled
+    sections: *no original found* (the 2 re-encoded clips) and *source not
+    identified*. The pipeline had always computed both lists but never
+    saved them.
+  - **Video matching reports progress** (`videos {done,total}`, counted in
+    derived videos finished) and checks for cancellation per video. The
+    bar was previously empty for the whole video phase.
+  - **Known engine gap, not fixed here:** 8 genuine iPhone Air clips
+    (`IMG_*.MOV`, with Apple make/model, GPS and creation time) are
+    classified `unknown` origin at 0.12 confidence, because video
+    provenance doesn't treat the QuickTime `com.apple.quicktime.make` /
+    `model` tags as camera evidence. Consequences: they are never
+    compared, and a messenger copy of an iPhone video could never be
+    matched to its original. Fixing it changes video classification, so it
+    needs re-checking against the video parity numbers (6 matches, 2
+    orphans) first.
 

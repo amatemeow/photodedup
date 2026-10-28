@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { api, type Cluster, type FileDto } from './lib/api';
-  import { formatBytes, tierLabel, type Review } from './lib/review.svelte';
+  import { api } from './lib/api';
+  import { formatBytes, type Group, type Review } from './lib/review.svelte';
+  import Lightbox from './Lightbox.svelte';
 
   let {
     review,
     paused,
-    cluster,
+    group,
     position,
     total,
     onBack,
@@ -16,7 +17,7 @@
     review: Review;
     /** A dialog is open elsewhere: ignore keys. */
     paused: boolean;
-    cluster: Cluster;
+    group: Group;
     position: number;
     total: number;
     onBack: () => void;
@@ -26,42 +27,31 @@
   } = $props();
 
   let active = $state(0); // highlighted member: target of Space
-  let previewing = $state<FileDto | null>(null);
+  let previewing = $state<number | null>(null);
 
-  // A new cluster starts with the first member highlighted and no preview.
+  // A new group starts with the first member highlighted and no preview.
   $effect(() => {
-    cluster.id;
+    group.id;
     active = 0;
     previewing = null;
   });
 
-  const status = $derived(review.statuses.get(cluster.id) ?? 'undecided');
+  const status = $derived(review.statuses.get(group.id) ?? 'undecided');
+  const isBurst = $derived(group.tab === 'burst');
+  const sharpest = $derived(Math.max(0, ...Object.values(group.sharpness)));
 
+  // While the preview is open it handles its own keys (see Lightbox).
   function onKey(e: KeyboardEvent) {
-    if (paused || e.metaKey || e.ctrlKey || e.altKey) return;
-    const members = cluster.members;
-    if (previewing) {
-      // Preview captures the keys; the shell's navigation must not also fire.
-      const i = members.findIndex((m) => m.id === previewing!.id);
-      if (e.key === 'Escape' || e.key === ' ') previewing = null;
-      else if (e.key === 'ArrowRight') previewing = members[(i + 1) % members.length];
-      else if (e.key === 'ArrowLeft') previewing = members[(i - 1 + members.length) % members.length];
-      // Any other key does nothing, but must not reach the shell either
-      // (Enter would accept and advance behind the preview).
-      else if (e.key === '?' || e.key === 'Tab') return;
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      return;
-    }
+    if (paused || previewing !== null || e.metaKey || e.ctrlKey || e.altKey) return;
     if (/^[1-9]$/.test(e.key)) {
-      const m = members[Number(e.key) - 1];
+      const m = group.members[Number(e.key) - 1];
       if (m) {
         active = Number(e.key) - 1;
-        review.toggle(cluster, m);
+        review.toggle(group, m);
         e.preventDefault();
       }
     } else if (e.key === ' ' && (e.target as HTMLElement).tagName !== 'BUTTON') {
-      previewing = members[active] ?? null;
+      previewing = active;
       e.preventDefault();
     }
   }
@@ -70,8 +60,7 @@
   const minutes = (s: number) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
 </script>
 
-<!-- Capture phase, so an open preview can swallow keys before the shell sees them. -->
-<svelte:window onkeydowncapture={onKey} />
+<svelte:window onkeydown={onKey} />
 
 <section>
   <div class="bar">
@@ -80,20 +69,23 @@
     <span>{position} of {total}</span>
     <button class="secondary" onclick={onNext} disabled={position >= total} title="Next (→)">›</button>
     <span class="spacer"></span>
-    <span class="hint">{tierLabel[cluster.tier] ?? cluster.tier}{cluster.reasons.length ? ` · ${cluster.reasons.join(', ').replaceAll('_', ' ')}` : ''}</span>
+    <span class="hint">{group.label}{group.reasons.length ? ` · ${group.reasons.join(', ').replaceAll('_', ' ')}` : ''}</span>
+    {#if isBurst}
+      <button class="secondary" onclick={() => review.keepAll(group)} title="Keep every frame in this run">Keep all</button>
+    {/if}
     <button onclick={onAccept} title="Accept suggestion and continue (Enter)">
-      {status === 'undecided' || status === 'partial' ? 'Accept suggestion' : 'Next'} ⏎
+      {status === 'undecided' || status === 'partial' ? (isBurst ? 'Keep suggested only' : 'Accept suggestion') : 'Next'} ⏎
     </button>
   </div>
 
   <div class="members">
-    {#each cluster.members as m, i (m.id)}
-      {@const keep = review.effective(cluster, m)}
+    {#each group.members as m, i (m.id)}
+      {@const keep = review.effective(group, m)}
       {@const decided = review.isDecided(m)}
       <article class:keep class:active={active === i}>
-        <button class="thumb" onclick={() => { active = i; previewing = m; }} title="Large preview (Space)">
-          <img src={api.fileUrl(m.id, 'thumb')} alt={m.file_name} />
-          <kbd>{i + 1}</kbd>
+        <button class="thumb" onclick={() => { active = i; previewing = i; }} title="Large preview (Space)">
+          <img src={api.fileUrl(m.id, 'thumb')} alt={m.file_name} loading="lazy" />
+          {#if i < 9}<kbd>{i + 1}</kbd>{/if}
         </button>
         <div class="info">
           <strong title={m.relative_path}>{m.file_name}</strong>
@@ -101,30 +93,27 @@
             <span>
               {[dims(a), a?.duration_seconds ? minutes(a.duration_seconds) : '', formatBytes(m.size_bytes)].filter(Boolean).join(' · ')}
             </span>
-            <span class="hint">{[a?.origin, a?.camera_model].filter(Boolean).join(' · ')}</span>
+            {#if !isBurst}<span class="hint">{[a?.origin, a?.camera_model].filter(Boolean).join(' · ')}</span>{/if}
           {/await}
+          {#if isBurst && group.sharpness[m.id] !== undefined}
+            <span class="sharp" title="Sharpness (higher is sharper)">
+              <span class="bar-fill" style:width="{sharpest ? (group.sharpness[m.id] / sharpest) * 100 : 0}%"></span>
+              <span class="hint">{Math.round(group.sharpness[m.id])}{group.suggested.has(m.id) ? ' · suggested' : ''}</span>
+            </span>
+          {/if}
         </div>
-        <button class="choice" class:keep onclick={() => review.toggle(cluster, m)} aria-pressed={keep}>
+        <button class="choice" class:keep onclick={() => review.toggle(group, m)} aria-pressed={keep}>
           {keep ? 'Keep' : 'Quarantine'}
         </button>
-        {#if !decided && keep && m.id === cluster.keeper_file_id}<span class="hint">suggested</span>{/if}
+        {#if !decided && keep && group.suggested.has(m.id) && !isBurst}<span class="hint">suggested</span>{/if}
       </article>
     {/each}
   </div>
-  <p class="hint">Quarantined files are moved aside, never deleted — and only when you apply your decisions.</p>
+  <p class="hint">Quarantined files are moved aside, never deleted — and only when you apply your decisions. Anything marked Keep stays where it is.</p>
 </section>
 
-{#if previewing}
-  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div class="lightbox" onclick={() => (previewing = null)}>
-    {#if previewing.media_class === 'Video'}
-      <!-- svelte-ignore a11y_media_has_caption -->
-      <video src={api.fileUrl(previewing.id, 'original')} controls autoplay onclick={(e) => e.stopPropagation()}></video>
-    {:else}
-      <img src={api.fileUrl(previewing.id, 'preview')} alt={previewing.file_name} />
-    {/if}
-    <span class="caption">{previewing.file_name} · ← → switch · Esc close</span>
-  </div>
+{#if previewing !== null}
+  <Lightbox files={group.members} index={previewing} onIndex={(i) => ((previewing = i), (active = i))} onClose={() => (previewing = null)} />
 {/if}
 
 <style>
@@ -192,6 +181,19 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .sharp {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 2px;
+  }
+  .bar-fill {
+    display: block;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--accent);
+    min-width: 2px;
+  }
   .choice {
     background: transparent;
     color: inherit;
@@ -201,24 +203,5 @@
     background: var(--ok);
     color: var(--ok-fg);
     border-color: var(--ok);
-  }
-  .lightbox {
-    position: fixed;
-    inset: 0;
-    background: rgb(0 0 0 / 0.88);
-    display: grid;
-    place-items: center;
-    z-index: 20;
-  }
-  .lightbox img,
-  .lightbox video {
-    max-width: 94vw;
-    max-height: 90vh;
-  }
-  .caption {
-    position: absolute;
-    bottom: 1rem;
-    color: #ddd;
-    font-size: 0.85em;
   }
 </style>
