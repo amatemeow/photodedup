@@ -103,6 +103,14 @@
     settings && save(Object.fromEntries(knobs.map((k) => [k.id, settings!.advanced[k.id].default])) as SettingsPatch);
 
   const workers = (id: IntensityId) => settings?.tiers.find((t) => t.id === id)?.workers;
+
+  import { applyTheme, storedTheme, type Theme } from './lib/theme';
+  let theme = $state<Theme>(storedTheme());
+  const themes: [Theme, string][] = [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']];
+  const pickTheme = (t: Theme) => {
+    theme = t;
+    applyTheme(t);
+  };
 </script>
 
 <main>
@@ -120,6 +128,16 @@
         <div class="skeleton" style="height:220px"></div>
       {/if}
     {:else}
+      <section>
+        <h2 class="lead">Appearance</h2>
+        <p class="hint intro">System follows your computer's light or dark setting.</p>
+        <div class="seg" role="group" aria-label="Appearance">
+          {#each themes as [key, label] (key)}
+            <button aria-pressed={theme === key} onclick={() => pickTheme(key)}>{label}</button>
+          {/each}
+        </div>
+      </section>
+
       <section>
         <h2 class="lead">Scan speed</h2>
         <p class="hint intro">
