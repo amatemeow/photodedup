@@ -369,3 +369,23 @@ as a choice.
     lone or hash-less frame is dropped, the threshold is inclusive, a
     slowly changing sequence chains).
 
+- **"Include videos" flag.** A scan can leave videos out entirely
+  (`PipelineOptions::include_videos`, default on; `include_videos` in the
+  scan request; `--no-videos` on the CLI; a checkbox on the start screen,
+  remembered in the browser). Off means videos, and any sidecar travelling
+  with one, are dropped from the scan report before anything downstream
+  can touch them: not listed, not hashed in the exact-duplicate pass (video
+  files are the big ones), not probed, not matched. Checked on the
+  reference dataset (456 of 2718 files are videos): 2262 files scanned,
+  video matches and orphans 0, true duplicates 175 (the 5 video clusters
+  gone), sequences and same-device pairs unchanged at 269 / 902 and 126.
+  - A saved scan doesn't record whether videos were included, so the Orphan
+    videos tab just says "No orphan videos" either way. Recording it per
+    scan (so the UI can say "videos weren't scanned") needs a schema
+    change; not done yet.
+  - The checkbox is a stand-in: like scan intensity, it belongs in the
+    persistent Options tab once that exists.
+  - Timing is not claimed: the 179 s no-video run is only comparable to a
+    run with videos made on an otherwise idle machine, and the one I have
+    (250 s) wasn't.
+

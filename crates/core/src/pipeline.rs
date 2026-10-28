@@ -19,7 +19,7 @@ use crate::video_match::{find_video_matches, VideoCandidate, VideoMatch};
 use chrono::NaiveDateTime;
 use rayon::prelude::*;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -32,6 +32,11 @@ pub struct PipelineOptions {
     /// unthrottled run was observed pegging every core on a 12-core
     /// machine during development).
     pub intensity: ScanIntensity,
+    /// Whether videos are part of the scan at all. Off means they are left
+    /// out entirely -- not listed, not hashed (video files are the big
+    /// ones), not probed, not matched -- as if the folder had none. On by
+    /// default.
+    pub include_videos: bool,
 }
 
 impl Default for PipelineOptions {
@@ -40,6 +45,7 @@ impl Default for PipelineOptions {
             ffmpeg_bin: "ffmpeg".to_string(),
             ffprobe_bin: "ffprobe".to_string(),
             intensity: ScanIntensity::default(),
+            include_videos: true,
         }
     }
 }
@@ -139,7 +145,10 @@ pub fn run_cancellable(
 fn run_inner(root: &Path, opts: &PipelineOptions, on_progress: &(dyn Fn(Progress) + Sync), cancel: &AtomicBool) -> Option<PipelineResult> {
     let cancelled = || cancel.load(Ordering::Relaxed);
     on_progress(Progress::Scanning);
-    let scan_report = scan(root);
+    let mut scan_report = scan(root);
+    if !opts.include_videos {
+        drop_videos(&mut scan_report);
+    }
     let file_by_id: HashMap<FileId, &FileRecord> = scan_report.files.iter().map(|f| (f.id, f)).collect();
 
     // Only sibling-set primaries get independently analyzed/compared;
@@ -386,6 +395,27 @@ fn run_inner(root: &Path, opts: &PipelineOptions, on_progress: &(dyn Fn(Progress
     })
 }
 
+/// Removes every video, and any sidecar travelling with one, from a scan
+/// report -- before anything downstream (the exact-hash pass reads whole
+/// files) can touch them.
+fn drop_videos(report: &mut crate::scan::ScanReport) {
+    let video: HashSet<FileId> = report
+        .files
+        .iter()
+        .filter(|f| f.media_class == MediaClassSerde::Video)
+        .map(|f| f.id)
+        .chain(
+            report
+                .sibling_sets
+                .iter()
+                .filter(|s| report.files.iter().any(|f| f.id == s.primary && f.media_class == MediaClassSerde::Video))
+                .flat_map(|s| s.all_members()),
+        )
+        .collect();
+    report.files.retain(|f| !video.contains(&f.id));
+    report.sibling_sets.retain(|s| !video.contains(&s.primary));
+}
+
 /// Picks a cluster's display tier (T0 > T1 > T1b) from whichever of its
 /// members' edges are present in `tier_of_edge`. Checks **all pairs**
 /// among `members`, not just sorted-adjacent ones: after union-find, a
@@ -423,6 +453,25 @@ fn norm(a: FileId, b: FileId) -> (FileId, FileId) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn videos_are_left_out_of_the_scan_when_the_flag_is_off() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("clip.mp4"), b"not a real video").unwrap();
+        std::fs::write(tmp.path().join("clip2.MOV"), b"not a real video").unwrap();
+        std::fs::write(tmp.path().join("pic.jpg"), b"not a real jpeg").unwrap();
+
+        let names = |opts: &PipelineOptions| {
+            let mut n: Vec<String> = run(tmp.path(), opts).files.into_iter().map(|f| f.file_name).collect();
+            n.sort();
+            n
+        };
+        let on = names(&PipelineOptions::default());
+        assert_eq!(on, ["clip.mp4", "clip2.MOV", "pic.jpg"]);
+
+        let off = names(&PipelineOptions { include_videos: false, ..Default::default() });
+        assert_eq!(off, ["pic.jpg"], "photos are untouched, videos are gone");
+    }
 
     #[test]
     fn a_pre_set_cancel_flag_stops_the_run_before_any_result_exists() {

@@ -20,14 +20,14 @@ async fn main() -> anyhow::Result<()> {
     match cmd.as_str() {
         "scan" => {
             let Some(path) = args.get(2) else {
-                eprintln!("usage: photodedup scan <path> [--mode efficient|default|performance|N]");
+                eprintln!("usage: photodedup scan <path> [--mode efficient|default|performance|N] [--no-videos]");
                 std::process::exit(2);
             };
             let intensity = parse_mode(&args).unwrap_or_else(|msg| {
                 eprintln!("{msg}");
                 std::process::exit(2);
             });
-            run_scan(&PathBuf::from(path), intensity);
+            run_scan(&PathBuf::from(path), intensity, !args.iter().any(|a| a == "--no-videos"));
         }
         "serve" => {
             let db_path = args.get(2).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".photodedup-scan.sqlite3"));
@@ -40,11 +40,12 @@ async fn main() -> anyhow::Result<()> {
 
 fn print_usage() {
     println!("photodedup — commands:");
-    println!("  scan <path> [--mode efficient|default|performance|N]   scan a folder, print a summary");
+    println!("  scan <path> [--mode efficient|default|performance|N] [--no-videos]   scan a folder, print a summary");
     println!("    --mode efficient     fewest workers + strongest E-core bias -- quietest, slowest (measured ~8x lower CPU power than default)");
     println!("    --mode default       (default) efficiency-core-targeted workers, moderate scheduling priority -- can still use performance cores when it needs to");
     println!("    --mode performance   every logical core, no scheduling downgrade -- fastest, most resource-hungry");
     println!("    --mode N             an explicit worker count, no automatic scheduling hint");
+    println!("    --no-videos          leave videos out of the scan entirely (not listed, hashed, probed or matched)");
     println!("  serve [db-path]   start the review server (browser fallback -- M4's native shell calls photodedup-server directly instead)");
     println!("(report/apply/undo land with later M1 work -- see ROADMAP.md)");
 }
@@ -98,13 +99,17 @@ fn parse_mode(args: &[String]) -> Result<ScanIntensity, String> {
     value.parse().map_err(|e| format!("--mode: {e}"))
 }
 
-fn run_scan(path: &PathBuf, intensity: ScanIntensity) {
+fn run_scan(path: &PathBuf, intensity: ScanIntensity, include_videos: bool) {
     let t0 = Instant::now();
     let opts = PipelineOptions {
         intensity,
+        include_videos,
         ..PipelineOptions::default()
     };
     println!("mode: {:?} ({} worker(s))", intensity, intensity.worker_count());
+    if !include_videos {
+        println!("videos: not scanned (--no-videos)");
+    }
     let result = run(path, &opts);
     let elapsed = t0.elapsed();
 

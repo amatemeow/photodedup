@@ -18,6 +18,20 @@
     clustering: 'Grouping duplicates',
   };
 
+  // Remembered between sessions; both flags move to the Options tab once it
+  // exists. Storage can be unavailable (private windows), so every access is
+  // guarded and the default (videos included) applies.
+  const VIDEOS_KEY = 'photodedup.includeVideos';
+  let includeVideos = $state(true);
+  try {
+    includeVideos = localStorage.getItem(VIDEOS_KEY) !== 'false';
+  } catch {}
+  $effect(() => {
+    try {
+      localStorage.setItem(VIDEOS_KEY, String(includeVideos));
+    } catch {}
+  });
+
   let root = $state('');
   let view = $state<View>({ kind: 'start' });
   let busy = $state(false);
@@ -43,7 +57,7 @@
   async function scan() {
     error = '';
     try {
-      const { job_id } = await api.startScan(root.trim());
+      const { job_id } = await api.startScan(root.trim(), { includeVideos });
       view = { kind: 'scanning', jobId: job_id, status: { state: 'running', phase: 'scanning' } };
       stopWatching = api.watchJob(job_id, onStatus, onLost);
     } catch (e) {
@@ -125,6 +139,11 @@
     <form onsubmit={(e) => { e.preventDefault(); check(); }}>
       <label for="root">Folder to scan</label>
       <input id="root" bind:value={root} placeholder="/Users/me/Pictures/Trip" autocomplete="off" spellcheck="false" />
+      <label class="check">
+        <input type="checkbox" bind:checked={includeVideos} />
+        Include videos
+      </label>
+      <p class="hint tight">Turn off to leave videos out entirely: faster, and they are neither compared nor listed.</p>
       <button disabled={busy || !root.trim()}>{busy ? 'Checking…' : 'Scan'}</button>
     </form>
     <p class="hint">Type or paste the folder path. A native folder picker arrives with the desktop shell.</p>
@@ -165,6 +184,17 @@
   form {
     display: grid;
     gap: 0.5rem;
+  }
+  .check {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .check input {
+    padding: 0;
+  }
+  .tight {
+    margin: -0.25rem 0 0.25rem;
   }
   .row {
     display: flex;
