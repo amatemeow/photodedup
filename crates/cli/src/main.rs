@@ -63,8 +63,11 @@ async fn main() -> anyhow::Result<()> {
         }
         "batches" => batches_cmd(&db_arg(&args, 2)),
         "serve" => {
-            let db_path = args.get(2).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".photodedup-scan.sqlite3"));
-            serve(db_path).await?;
+            // The address is printed; a browser is only opened if asked to.
+            // (It used to open one on every start, which is a nuisance when
+            // the server is started often, e.g. by scripts and tests.)
+            let open = args.iter().any(|a| a == "--open");
+            serve(db_arg(&args, 2), open).await?;
         }
         _ => print_usage(),
     }
@@ -83,7 +86,7 @@ fn print_usage() {
     println!("  check-sidecar <binary>...    refuse a GPL/non-free ffmpeg or ffprobe (the gate for anything we bundle)");
     println!("  batches [db-path]            list what has been moved to quarantine");
     println!("  undo <batch-id> [db-path]    put a batch back where it came from");
-    println!("  serve [db-path]   start the review server (browser fallback -- M4's native shell calls photodedup-server directly instead)");
+    println!("  serve [db-path] [--open]   start the review server and print its address (--open also opens your browser)");
     println!("(report/apply/undo land with later M1 work -- see ROADMAP.md)");
 }
 
@@ -191,12 +194,14 @@ fn undo_cmd(id: &str, db: &PathBuf) {
     }
 }
 
-async fn serve(db_path: PathBuf) -> anyhow::Result<()> {
+async fn serve(db_path: PathBuf, open: bool) -> anyhow::Result<()> {
     let info = photodedup_server::run(db_path, find_ui_dir()).await?;
     let url = info.url();
     println!("review server running at {url}");
     println!("(Ctrl+C to stop)");
-    open_browser(&url);
+    if open {
+        open_browser(&url);
+    }
 
     tokio::signal::ctrl_c().await?;
     println!("\nstopping.");
