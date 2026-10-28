@@ -80,6 +80,7 @@ pub async fn build_with_ui(
         .route("/api/scans/{id}/apply", post(routes::apply::run))
         .route("/api/batches", get(routes::apply::batches))
         .route("/api/batches/{id}/undo", post(routes::apply::undo))
+        .route("/api/settings", get(routes::settings::get).put(routes::settings::put))
         .route("/api/files/{id}/analysis", get(routes::scans::get_analysis))
         .route(
             "/api/scans/{id}/decisions",
@@ -513,6 +514,38 @@ mod tests {
             let res = send(&router, axum::http::Request::get(format!("/files/{id}/{kind}?token={}", info.token)).body(axum::body::Body::empty()).unwrap()).await;
             assert_eq!(res.status(), 404, "{kind}");
         }
+    }
+
+    #[tokio::test]
+    async fn the_scan_intensity_setting_defaults_validates_and_persists_across_restarts() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let (_l, router, info) = build(tmp.path()).await.unwrap();
+        let t = &info.token;
+
+        let (s, got) = call(&router, "GET", format!("/api/settings?token={t}"), "").await;
+        assert_eq!(s, 200);
+        assert_eq!(got["scan_intensity"], "default");
+        let ids: Vec<&str> = got["tiers"].as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["efficient", "default", "performance"]);
+        let workers = |g: &serde_json::Value, id: &str| g["tiers"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap()["workers"].as_u64().unwrap();
+        assert!(workers(&got, "efficient") <= workers(&got, "default") && workers(&got, "default") <= workers(&got, "performance"));
+        assert_eq!(workers(&got, "performance"), got["logical_cores"].as_u64().unwrap());
+
+        for bad in [r#"{"scan_intensity":"turbo"}"#, r#"{"scan_intensity":"4"}"#, r#"{"scan_intensity":""}"#] {
+            let (s, _) = call(&router, "PUT", format!("/api/settings?token={t}"), bad).await;
+            assert_eq!(s, 400, "{bad}");
+        }
+        let (_, still) = call(&router, "GET", format!("/api/settings?token={t}"), "").await;
+        assert_eq!(still["scan_intensity"], "default", "a rejected value changes nothing");
+
+        let (s, saved) = call(&router, "PUT", format!("/api/settings?token={t}"), r#"{"scan_intensity":"efficient"}"#).await;
+        assert_eq!(s, 200);
+        assert_eq!(saved["scan_intensity"], "efficient");
+
+        // a fresh server on the same database (a restart) still has it
+        let (_l2, router2, info2) = build(tmp.path()).await.unwrap();
+        let (_, after) = call(&router2, "GET", format!("/api/settings?token={}", info2.token), "").await;
+        assert_eq!(after["scan_intensity"], "efficient");
     }
 
     #[tokio::test]

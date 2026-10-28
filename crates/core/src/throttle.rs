@@ -101,6 +101,25 @@ impl std::str::FromStr for ScanIntensity {
 }
 
 impl ScanIntensity {
+    /// The three tiers a person can pick as a standing preference, by the
+    /// name used in settings and requests. (`Custom(n)` is for scripts and
+    /// tests, not a setting.)
+    pub const NAMED: [(&'static str, ScanIntensity); 3] = [
+        ("efficient", ScanIntensity::Efficient),
+        ("default", ScanIntensity::Default),
+        ("performance", ScanIntensity::Performance),
+    ];
+
+    /// Parses only the three named tiers.
+    pub fn from_name(name: &str) -> Option<ScanIntensity> {
+        Self::NAMED.iter().find(|(n, _)| *n == name).map(|(_, t)| *t)
+    }
+
+    /// How many logical cores this machine has: what `Performance` uses.
+    pub fn logical_cores() -> usize {
+        available_parallelism()
+    }
+
     pub fn worker_count(&self) -> usize {
         match self {
             ScanIntensity::Efficient => (default_tier_workers() / 2).max(1),

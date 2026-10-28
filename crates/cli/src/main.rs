@@ -246,7 +246,7 @@ fn run_scan(path: &PathBuf, intensity: ScanIntensity, include_videos: bool) {
     use photodedup_core::classify::Tier;
     let same_device_review = result.review_pairs.iter().filter(|p| p.tier == Tier::T2NativeReview).count();
     let cross_device = result.review_pairs.iter().filter(|p| p.tier == Tier::T3CrossDevice).count();
-    println!("same-device review pairs (browse-only): {same_device_review}");
+    println!("same-device review pairs: {same_device_review}");
     println!("cross-device review pairs: {cross_device}");
 
     let high_conf = result.video_matches.iter().filter(|m| m.high_confidence).count();

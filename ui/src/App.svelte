@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { api, ApiError, type JobStatus, type Phase } from './lib/api';
+  import { api, ApiError, type IntensityId, type JobStatus, type Phase } from './lib/api';
   import Review from './Review.svelte';
+  import Options from './Options.svelte';
 
   type View =
     | { kind: 'start' }
+    | { kind: 'options' }
     | { kind: 'found'; scanId: string; startedAt: string }
     | { kind: 'scanning'; jobId: number; status: JobStatus }
     | { kind: 'review'; scanId: string }
@@ -32,6 +34,18 @@
       localStorage.setItem(VIDEOS_KEY, String(includeVideos));
     } catch {}
   });
+
+  // Shown on the start screen so it is clear how the next scan will run.
+  let intensity = $state<IntensityId | null>(null);
+  const intensityName: Record<IntensityId, string> = { efficient: 'Efficient', default: 'Default', performance: 'Performance' };
+  async function loadIntensity() {
+    try {
+      intensity = (await api.settings()).scan_intensity;
+    } catch {
+      intensity = null; // the hint is a convenience; the scan works without it
+    }
+  }
+  loadIntensity();
 
   let root = $state('');
   let view = $state<View>({ kind: 'start' });
@@ -122,11 +136,16 @@
     !hasCount(s) || s.state !== 'running' ? '' : `${s.done} of ${s.total} ${s.phase === 'analyzing' ? 'photos' : 'videos'}`;
 </script>
 
-{#if view.kind === 'review'}
+{#if view.kind === 'options'}
+  <Options onBack={() => { view = { kind: 'start' }; loadIntensity(); }} />
+{:else if view.kind === 'review'}
   <Review scanId={view.scanId} onExit={() => (view = { kind: 'start' })} />
 {:else}
 <main>
-  <h1>photodedup</h1>
+  <div class="head">
+    <h1>photodedup</h1>
+    {#if view.kind === 'start'}<button class="secondary" onclick={() => (view = { kind: 'options' })}>Options</button>{/if}
+  </div>
 
   {#if !api.hasToken}
     <p class="note">No session token. Open the URL the app printed when it started.</p>
@@ -142,6 +161,7 @@
       </label>
       <p class="hint tight">Turn off to leave videos out entirely: faster, and they are neither compared nor listed.</p>
       <button disabled={busy || !root.trim()}>{busy ? 'Checking…' : 'Scan'}</button>
+      {#if intensity}<p class="hint tight">Scan speed: {intensityName[intensity]}. Change it in Options.</p>{/if}
     </form>
     <p class="hint">Type or paste the folder path. A native folder picker arrives with the desktop shell.</p>
   {:else if view.kind === 'found'}
@@ -174,9 +194,15 @@
     margin: 0 auto;
     padding: 4rem 1rem;
   }
+  .head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0 0 2rem;
+  }
   h1 {
     font-size: 1.4rem;
-    margin: 0 0 2rem;
+    margin: 0;
   }
   form {
     display: grid;

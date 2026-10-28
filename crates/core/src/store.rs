@@ -98,6 +98,13 @@ CREATE TABLE IF NOT EXISTS review_pairs (
     reason TEXT NOT NULL
 );
 
+-- App-level preferences (key/value). Not tied to a scan: they outlive every
+-- scan, and belong to whoever owns this database rather than to a browser.
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 -- Companions of a primary file (RAW, XMP, the MOV of a Live Photo): they
 -- move with it when a decision is applied.
 CREATE TABLE IF NOT EXISTS file_siblings (
@@ -545,6 +552,20 @@ impl Store {
                 .collect::<rusqlite::Result<_>>()?;
         }
         Ok(runs)
+    }
+
+    pub fn get_setting(&self, key: &str) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0))
+            .optional()
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
     }
 
     /// Test-only escape hatch for rewriting rows the way a tampered
@@ -1089,6 +1110,20 @@ mod tests {
 
         store.save_scan(&root, &result).unwrap();
         assert!(store.load_orphan_videos(&scan).unwrap().is_empty(), "the replaced scan's rows are gone");
+    }
+
+    #[test]
+    fn settings_round_trip_and_survive_a_new_scan() {
+        let (root, result) = sample_result();
+        let mut store = Store::open_in_memory().unwrap();
+        assert_eq!(store.get_setting("scan_intensity").unwrap(), None);
+        store.set_setting("scan_intensity", "efficient").unwrap();
+        store.set_setting("scan_intensity", "performance").unwrap();
+        assert_eq!(store.get_setting("scan_intensity").unwrap().as_deref(), Some("performance"));
+
+        store.save_scan(&root, &result).unwrap();
+        store.save_scan(&root, &result).unwrap();
+        assert_eq!(store.get_setting("scan_intensity").unwrap().as_deref(), Some("performance"), "preferences are not scan data");
     }
 
     #[test]

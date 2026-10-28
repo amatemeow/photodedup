@@ -138,6 +138,13 @@ export interface Batch {
   restored: number;
 }
 
+export type IntensityId = 'efficient' | 'default' | 'performance';
+export interface Settings {
+  scan_intensity: IntensityId;
+  tiers: { id: IntensityId; workers: number }[];
+  logical_cores: number;
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -177,6 +184,10 @@ export const api = {
     call<void>(`/api/scans/${scanId}/decisions/bulk`, { method: 'POST', body: JSON.stringify(rows) }),
   clearDecision: (scanId: string, relativePath: string) =>
     call<void>(`/api/scans/${scanId}/decisions?relative_path=${encodeURIComponent(relativePath)}`, { method: 'DELETE' }),
+
+  settings: () => call<Settings>('/api/settings'),
+  saveSettings: (scan_intensity: IntensityId) =>
+    call<Settings>('/api/settings', { method: 'PUT', body: JSON.stringify({ scan_intensity }) }),
 
   applyPlan: (scanId: string) => call<Plan>(`/api/scans/${scanId}/apply/plan`),
   apply: (scanId: string) =>
