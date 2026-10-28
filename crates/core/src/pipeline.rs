@@ -165,7 +165,14 @@ fn run_inner(root: &Path, opts: &PipelineOptions) -> PipelineResult {
         .collect();
 
     let t1_image_edges = resolve_t1_edges(&pair_classifications);
-    let t1b_image_edges = resolve_t1b_edges(&pair_classifications);
+    // A derived file that already resolved to a native original via T1
+    // isn't "orphaned" -- T1b must not also merge it into an unrelated
+    // cluster through a weaker derived-derived link. See resolve.rs's
+    // doc comment on resolve_t1b_edges for the real discrepancy this
+    // guards against.
+    let already_t1_matched: std::collections::HashSet<FileId> =
+        t1_image_edges.iter().map(|&(derived, _, _)| derived).collect();
+    let t1b_image_edges = resolve_t1b_edges(&pair_classifications, &already_t1_matched);
 
     // --- Video matching (separate mechanism: duration-blocked + frame
     // sequence, not phash-matrix candidate search). ---

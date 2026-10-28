@@ -19,7 +19,6 @@ shaped these decisions.
 | **Paid macOS notarisation** | $99/yr Apple Developer Program; a Homebrew Cask (free, strips the quarantine xattr) covers most of the same friction | CI signing step is parameterised, not hardcoded to ad-hoc-only, so flipping it on later is a config change |
 | **Windows code signing (SmartScreen)** | OV certs now require hardware tokens/HSM; real cost | SignPath.io's free OSS tier is the planned path if users report friction; artifact build is already reproducible via GitHub Actions, which SignPath needs |
 | **Windows background-scheduling equivalent** (`SetPriorityClass(..., BELOW_NORMAL_PRIORITY_CLASS)`, `THREAD_MODE_BACKGROUND_BEGIN`) | No Windows target to verify against yet; didn't want a `windows-sys` dependency added speculatively | `platform::noop::NoopScheduler` is the only thing that needs replacing — every caller already goes through the `PlatformScheduler` trait (`crates/core/src/platform/`), untouched by adding a real Windows impl |
-| **T1 cluster / same-device-review-pair count, off by one vs. the MVP** | 179 vs MVP's 180 T1 clusters, 126 vs 125 review pairs, consistently reproducible on the reference dataset but not yet root-caused | Not yet — needs a direct diff against the MVP's `t1_groups.json`/`pairs_t2.json` to find which single pair classifies differently and why, before M1 can claim exact parity rather than "very close" |
 | **Scan-intensity (Efficient/Default/Performance) as a persistent app setting** | No UI exists yet (M2+) — currently a `--mode` CLI flag, set fresh per invocation | `ScanIntensity` (`throttle.rs`) is a small `Copy` enum with no state of its own; M2's settings/options surface needs only to read a stored value and pass it into `PipelineOptions`, not touch the scheduling logic itself. **Explicit user requirement, recorded here so it isn't lost before M2 design starts:** this belongs in the app's persistent Options/Settings tab (a standing preference the user sets once), not a per-scan prompt or CLI-only flag — the `--mode` flag stays for scripting/testing, but isn't the primary UX once a UI exists |
 
 ## Resolved during M0 (moved out of "deferred", not into the table above)
@@ -72,3 +71,36 @@ shaped these decisions.
   `#[cfg(...)]` blocks. Windows has no scheduling impl yet (see the
   roadmap table above); POSIX/Linux differentiates tiers via nice value
   only (no QoS-class equivalent exists at that API level).
+- **T1-cluster-count discrepancy (179 vs. MVP's 180), root-caused and
+  fixed.** Diffing actual cluster membership (not just counts) against
+  `~/photo-dedup/decisions_input.json` found one real bug: two messenger-
+  derived copies of two *different*, burst-adjacent native photos
+  (`IMG20261016074102.jpg`/`...074103.jpg`, 1s apart, same camera) hash
+  close enough to each other (d=44) to fire `T1b` -- but each of those two
+  derived files already has its own high-confidence native original (d=0
+  and d=2). Un-guarded, that `T1b` edge bridged two correct, separate `T1`
+  clusters into one incorrect four-file cluster. This is the exact
+  burst-vs-duplicate ambiguity the native-native structural rule exists to
+  prevent, just unguarded on the derived side (derived files usually lack
+  the timestamp that rule depends on). Fixed in `resolve_t1b_edges`
+  (`resolve.rs`): a derived file that already resolved to a native
+  original via `T1` is excluded from `T1b` matching entirely -- it isn't
+  "orphaned," so it must not bridge into an unrelated cluster through a
+  weaker link. Regression-tested with the exact file pair. **Result:
+  cluster membership now matches the MVP's `decisions_input.json`
+  exactly, 182/182, zero diff** (confirmed by full set-diff, not just
+  count).
+- **Same-device-review-pair count (126 vs. MVP's 125), explained --
+  not a bug.** All three differing pairs sit within 1-4 pHash bits of
+  `CANDIDATE_MAX_DIST = 45` (confirmed: Python 44/46/48 vs. Rust's
+  independently-computed 46/44/44 for the same three pairs), crossing the
+  threshold on opposite sides between the two implementations. This is
+  the accepted cost of the M0 design decision to match pHash **distance
+  bands**, not bit-exact hashes (Pillow's and the `image` crate's Lanczos3
+  resize aren't bit-identical implementations -- see `/SPIKES.md` §3).
+  Unlike the `T1b` case, this has no safety implication: `T2NativeReview`
+  is browse-only, nothing auto-merges or auto-quarantines based on
+  membership in it, so a pair landing on one side of a fixed threshold
+  instead of the other is cosmetic, not a correctness bug. Not planned to
+  be "fixed" -- doing so would require bit-identical resize filters between
+  Rust and Python, which M0 already judged not worth pursuing.
