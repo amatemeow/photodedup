@@ -1,12 +1,12 @@
 //! Turns raw candidate pairs into the clean edges/runs that actually feed
 //! `cluster::merge_edges` and the UI. Port of
 //! `~/photo-dedup/scripts/pass4b_resolve.py`: argmin resolution per file
-//! (so a weak, borderline candidate pair surviving `CANDIDATE_MAX_DIST`'s
+//! (so a weak, borderline candidate pair surviving the match-distance setting's
 //! generous net can't merge two genuinely unrelated files -- only each
 //! file's single *closest* match becomes an edge) and independent
 //! burst-run detection by time+camera sequence.
 
-use crate::classify::{PairClassification, Tier, BURST_GAP_SECONDS};
+use crate::classify::{PairClassification, Tier};
 use crate::hash::Hash256;
 use crate::model::FileId;
 use crate::provenance::Origin;
@@ -90,7 +90,7 @@ pub fn resolve_t1b_edges(
 /// perceptual hashes differ by at most this many of 256 bits.
 ///
 /// Why this exists: a run found by timestamps alone is just "photos taken
-/// within `BURST_GAP_SECONDS` of each other", and on the reference
+/// within the sequence time gap of each other", and on the reference
 /// dataset a quarter of the consecutive frames inside such runs were at
 /// chance-level difference (110+ bits: unrelated shots). Thinning "the
 /// sharpest of the run" across a portrait, a full-body shot and a
@@ -106,7 +106,7 @@ pub fn resolve_t1b_edges(
 /// threshold nears the 100-134 range of unrelated photos. Erring toward
 /// over-splitting is the cheap direction: a frame left alone is simply
 /// kept.
-pub const BURST_VISUAL_MAX_DIST: u32 = 80;
+pub const BURST_VISUAL_MAX_DIST: u32 = crate::thresholds::SEQUENCE_SIMILARITY.default as u32;
 
 /// Refines time-based runs into groups that also look alike. Single-linkage
 /// within each run (a frame joins a group if it is within `max_dist` of any
@@ -163,8 +163,8 @@ pub struct BurstRun {
 
 /// Independent of pairwise classification: sorts each camera's native
 /// images by capture time and splits into runs wherever the gap exceeds
-/// `BURST_GAP_SECONDS`. A run of 1 isn't a burst by definition.
-pub fn detect_burst_runs(images: &[(FileId, String, NaiveDateTime)]) -> Vec<BurstRun> {
+/// `gap_seconds`. A run of 1 isn't a burst by definition.
+pub fn detect_burst_runs(images: &[(FileId, String, NaiveDateTime)], gap_seconds: i64) -> Vec<BurstRun> {
     let mut by_camera: HashMap<&str, Vec<(NaiveDateTime, FileId)>> = HashMap::new();
     for (id, camera, t) in images {
         by_camera.entry(camera.as_str()).or_default().push((*t, *id));
@@ -176,7 +176,7 @@ pub fn detect_burst_runs(images: &[(FileId, String, NaiveDateTime)]) -> Vec<Burs
         let mut run: Vec<(NaiveDateTime, FileId)> = vec![items[0]];
         for &(t, id) in &items[1..] {
             let gap = (t - run.last().unwrap().0).num_seconds();
-            if gap <= BURST_GAP_SECONDS {
+            if gap <= gap_seconds {
                 run.push((t, id));
             } else {
                 if run.len() >= 2 {
@@ -274,13 +274,13 @@ mod tests {
     fn pair(a_id: FileId, a_origin: Origin, b_id: FileId, b_origin: Origin, dist: u32) -> PairClassification {
         let a = ClassifyInput { id: a_id, origin: a_origin, camera_model: None, capture_time: None };
         let b = ClassifyInput { id: b_id, origin: b_origin, camera_model: None, capture_time: None };
-        classify_pair(&a, &b, dist)
+        classify_pair(&a, &b, dist, 3)
     }
 
     #[test]
     fn t1_resolution_keeps_only_the_closest_native_match() {
         // Derived file 10 weakly matches native file 1 (d=40, likely noise
-        // that only survived the generous CANDIDATE_MAX_DIST net) and
+        // that only survived the generous match-distance net) and
         // strongly matches native file 2 (d=5, the real duplicate).
         let pairs = vec![
             pair(10, Origin::Derived, 1, Origin::CameraOriginal, 40),
@@ -343,18 +343,32 @@ mod tests {
             (0u32, "OnePlus 15".to_string(), ts("2026-10-19 10:00:00")),
             (1u32, "OnePlus 15".to_string(), ts("2026-10-19 10:00:01")),
             (2u32, "OnePlus 15".to_string(), ts("2026-10-19 10:00:02")),
-            // gap > BURST_GAP_SECONDS here
+            // gap > the burst gap here
             (3u32, "OnePlus 15".to_string(), ts("2026-10-19 10:05:00")),
         ];
-        let runs = detect_burst_runs(&images);
+        let runs = detect_burst_runs(&images, 3);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].files, vec![0, 1, 2]);
     }
 
     #[test]
+    fn the_time_gap_setting_decides_what_counts_as_one_sequence() {
+        let images = vec![
+            (0u32, "Cam".to_string(), ts("2026-10-19 10:00:00")),
+            (1u32, "Cam".to_string(), ts("2026-10-19 10:00:05")),
+            (2u32, "Cam".to_string(), ts("2026-10-19 10:00:10")),
+        ];
+        assert!(detect_burst_runs(&images, 3).is_empty(), "five seconds apart is not a sequence at a 3 s gap");
+        let loose = detect_burst_runs(&images, 5);
+        assert_eq!(loose.len(), 1);
+        assert_eq!(loose[0].files, vec![0, 1, 2], "the gap is inclusive");
+        assert_eq!(detect_burst_runs(&images, 30).len(), 1);
+    }
+
+    #[test]
     fn single_photo_is_not_a_burst() {
         let images = vec![(0u32, "OnePlus 15".to_string(), ts("2026-10-19 10:00:00"))];
-        assert!(detect_burst_runs(&images).is_empty());
+        assert!(detect_burst_runs(&images, 3).is_empty());
     }
 
     #[test]
@@ -363,6 +377,6 @@ mod tests {
             (0u32, "OnePlus 15".to_string(), ts("2026-10-19 10:00:00")),
             (1u32, "iPhone Air".to_string(), ts("2026-10-19 10:00:01")),
         ];
-        assert!(detect_burst_runs(&images).is_empty());
+        assert!(detect_burst_runs(&images, 3).is_empty());
     }
 }

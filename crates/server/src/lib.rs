@@ -549,6 +549,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_advanced_thresholds_have_ranges_validate_as_a_whole_and_persist() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let (_l, router, info) = build(tmp.path()).await.unwrap();
+        let t = &info.token;
+        let url = format!("/api/settings?token={t}");
+
+        let (_, got) = call(&router, "GET", url.clone(), "").await;
+        let a = &got["advanced"];
+        assert_eq!((a["match_distance"]["value"].as_i64(), a["match_distance"]["default"].as_i64()), (Some(45), Some(45)));
+        assert_eq!((a["sequence_similarity"]["min"].as_i64(), a["sequence_similarity"]["max"].as_i64()), (Some(40), Some(100)));
+        assert_eq!(a["sequence_gap_seconds"]["value"], 3);
+
+        // a partial update changes only what was sent
+        let (s, saved) = call(&router, "PUT", url.clone(), r#"{"sequence_gap_seconds":10}"#).await;
+        assert_eq!(s, 200);
+        assert_eq!(saved["advanced"]["sequence_gap_seconds"]["value"], 10);
+        assert_eq!(saved["advanced"]["match_distance"]["value"], 45);
+        assert_eq!(saved["scan_intensity"], "default");
+
+        // out-of-range, negative and mixed requests are refused whole
+        for bad in [
+            r#"{"match_distance":24}"#, r#"{"match_distance":61}"#, r#"{"match_distance":-5}"#, r#"{"sequence_similarity":101}"#,
+            r#"{"sequence_gap_seconds":0}"#, r#"{"sequence_gap_seconds":31}"#,
+            r#"{"scan_intensity":"performance","match_distance":999}"#,
+        ] {
+            let (s, _) = call(&router, "PUT", url.clone(), bad).await;
+            assert_eq!(s, 400, "{bad}");
+        }
+        let (_, after) = call(&router, "GET", url.clone(), "").await;
+        assert_eq!(after["scan_intensity"], "default", "the valid half of a refused request was not saved");
+        assert_eq!(after["advanced"]["sequence_gap_seconds"]["value"], 10);
+
+        // range limits are inclusive, and everything survives a restart
+        let (s, _) = call(&router, "PUT", url, r#"{"match_distance":25,"sequence_similarity":100}"#).await;
+        assert_eq!(s, 200);
+        let (_l2, router2, info2) = build(tmp.path()).await.unwrap();
+        let (_, again) = call(&router2, "GET", format!("/api/settings?token={}", info2.token), "").await;
+        assert_eq!(again["advanced"]["match_distance"]["value"], 25);
+        assert_eq!(again["advanced"]["sequence_similarity"]["value"], 100);
+        assert_eq!(again["advanced"]["sequence_gap_seconds"]["value"], 10);
+    }
+
+    #[tokio::test]
     async fn a_stale_scan_id_is_not_found_everywhere_not_empty_and_not_a_server_error() {
         let (router, info, _scan_id, _root) = test_server_with_scan().await;
         let stale = uuid::Uuid::new_v4();

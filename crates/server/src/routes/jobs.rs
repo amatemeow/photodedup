@@ -56,7 +56,13 @@ fn resolve_intensity(requested: Option<&str>, store: &photodedup_core::store::St
 }
 
 pub async fn start_scan(State(state): State<AppState>, Json(body): Json<StartBody>) -> Result<(StatusCode, Json<StartDto>), (StatusCode, String)> {
-    let intensity = resolve_intensity(body.mode.as_deref(), &state.store.lock().unwrap()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let (intensity, thresholds) = {
+        let store = state.store.lock().unwrap();
+        (
+            resolve_intensity(body.mode.as_deref(), &store).map_err(|e| (StatusCode::BAD_REQUEST, e))?,
+            super::settings::stored_thresholds(&store),
+        )
+    };
     let include_videos = body.include_videos.unwrap_or(true);
     let root = std::fs::canonicalize(&body.root)
         .ok()
@@ -90,7 +96,7 @@ pub async fn start_scan(State(state): State<AppState>, Json(body): Json<StartBod
     let store = state.store.clone();
     let cache_dir = state.cache_dir.clone();
     tokio::task::spawn_blocking(move || {
-        let opts = PipelineOptions { intensity, include_videos, ..Default::default() };
+        let opts = PipelineOptions { intensity, include_videos, thresholds, ..Default::default() };
         // `send_replace`, not `send`: it never fails when no one is
         // listening, and watch keeps only the latest value -- exactly the
         // coalescing a per-file callback needs.
