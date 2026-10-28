@@ -108,7 +108,7 @@
 <main>
   <header class="top">
     <button class="btn" onclick={onBack}><Icon name="chevron-left" /> Back</button>
-    <h1 class="title">Options</h1>
+    <h1 class="title">Settings</h1>
     <span class="status" aria-live="polite">{#if saved}<Icon name="check" size={14} /> Saved{/if}</span>
   </header>
 

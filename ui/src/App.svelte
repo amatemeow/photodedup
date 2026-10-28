@@ -198,7 +198,7 @@
   <main>
     <header class="top">
       {#if view.kind === 'start'}
-        <button class="btn plain" onclick={() => (view = { kind: 'options' })}><Icon name="gear" /> Options</button>
+        <button class="btn plain" onclick={() => (view = { kind: 'options' })}><Icon name="sliders" /> Settings</button>
       {/if}
     </header>
 
@@ -273,7 +273,7 @@
 
           <button class="btn primary large" disabled={busy || !root.trim()}>{busy ? 'Checking…' : 'Scan'}</button>
           {#if intensity}
-            <p class="hint center">Scan speed: {intensityName[intensity]} · change it in Options</p>
+            <p class="hint center">Scan speed: {intensityName[intensity]} · change it in Settings</p>
           {/if}
         </form>
 

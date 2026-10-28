@@ -30,7 +30,7 @@ async function audit(name) {
 await page.goto(`${base}/?token=${token}`);
 await page.waitForSelector('#root');
 await audit('start');
-await page.getByRole('button', { name: 'Options' }).click();
+await page.getByRole('button', { name: 'Settings' }).click();
 await page.waitForSelector('text=Scan speed');
 await audit('options');
 await page.locator('summary').click();
