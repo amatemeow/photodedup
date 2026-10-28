@@ -1,6 +1,10 @@
 use photodedup_core::store::Store;
 use std::path::PathBuf;
+use photodedup_core::pipeline::Progress;
+use serde::Serialize;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
 
 /// Shared server state. `Store` wraps a single `rusqlite::Connection`,
 /// which isn't `Sync` -- a `Mutex` serializes access across concurrent
@@ -24,4 +28,40 @@ pub struct AppState {
     /// owner-only -- see `routes/files.rs`'s cache functions for the
     /// owner-only creation and atomic-write half of this.
     pub cache_dir: Arc<PathBuf>,
+    /// The most recent scan job (running or finished), if any -- see
+    /// `routes/jobs.rs`. Only one runs at a time, and only the latest is
+    /// kept: a finished scan's real record is its row in the store.
+    pub job: Arc<Mutex<Option<Job>>>,
+}
+
+pub struct Job {
+    pub id: u64,
+    pub rx: watch::Receiver<JobStatus>,
+    /// Set by `POST /api/jobs/{id}/cancel`; polled by the pipeline.
+    pub cancel: Arc<AtomicBool>,
+}
+
+impl Job {
+    pub fn status(&self) -> JobStatus {
+        self.rx.borrow().clone()
+    }
+}
+
+/// What a scan job reports to clients, serialized as the SSE payload and
+/// the snapshot body: `{"state":"running","phase":...}`,
+/// `{"state":"done","scan_id":N}`, `{"state":"cancelled"}` or
+/// `{"state":"failed","message":...}`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum JobStatus {
+    Running(Progress),
+    Done { scan_id: i64 },
+    Cancelled,
+    Failed { message: String },
+}
+
+impl JobStatus {
+    pub fn is_terminal(&self) -> bool {
+        !matches!(self, JobStatus::Running(_))
+    }
 }
