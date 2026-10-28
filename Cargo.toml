@@ -55,3 +55,5 @@ tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 # Session token generation only -- not used for anything cryptographic
 # beyond "hard to guess", so getrandom-backed OsRng via `rand` is plenty.
 rand = "0.8"
+# Opaque scan ids (see core::store): random v4, never reused.
+uuid = { version = "1", features = ["v4"] }

@@ -11,10 +11,11 @@ use photodedup_core::model::MediaClassSerde;
 use photodedup_core::store::{StoredAnalysis, StoredFile};
 use serde::Serialize;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 #[derive(Serialize)]
 pub struct ScanSummaryDto {
-    id: i64,
+    id: String,
     root_path: String,
     started_at: String,
     file_count: usize,
@@ -29,13 +30,13 @@ pub async fn list_scans(State(state): State<AppState>) -> Result<Json<Vec<ScanSu
     let mut out = Vec::with_capacity(scans.len());
     for s in scans {
         out.push(ScanSummaryDto {
-            id: s.id,
+            id: s.id.clone(),
             root_path: s.root_path,
             started_at: s.started_at,
-            file_count: store.load_files(s.id).map_err(internal)?.len(),
-            cluster_count: store.load_clusters(s.id).map_err(internal)?.len(),
-            review_pair_count: store.load_review_pairs(s.id).map_err(internal)?.len(),
-            burst_run_count: store.load_burst_runs(s.id).map_err(internal)?.len(),
+            file_count: store.load_files(&s.id).map_err(internal)?.len(),
+            cluster_count: store.load_clusters(&s.id).map_err(internal)?.len(),
+            review_pair_count: store.load_review_pairs(&s.id).map_err(internal)?.len(),
+            burst_run_count: store.load_burst_runs(&s.id).map_err(internal)?.len(),
         });
     }
     Ok(Json(out))
@@ -43,7 +44,9 @@ pub async fn list_scans(State(state): State<AppState>) -> Result<Json<Vec<ScanSu
 
 #[derive(Serialize)]
 pub struct FileDto {
-    pub id: i64,
+    pub id: String,
+    /// What decisions are keyed by (stable across re-scans, unlike `id`).
+    pub relative_path: String,
     pub file_name: String,
     pub media_class: MediaClassSerde,
     pub size_bytes: u64,
@@ -53,7 +56,8 @@ pub struct FileDto {
 impl From<&StoredFile> for FileDto {
     fn from(f: &StoredFile) -> Self {
         FileDto {
-            id: f.id,
+            id: f.id.clone(),
+            relative_path: f.relative_path.clone(),
             file_name: f.file_name.clone(),
             media_class: f.media_class,
             size_bytes: f.size_bytes,
@@ -93,20 +97,21 @@ impl From<StoredAnalysis> for AnalysisDto {
 
 #[derive(Serialize)]
 pub struct ClusterDto {
-    pub id: i64,
+    pub id: String,
     pub tier: String,
-    pub keeper_file_id: i64,
+    pub keeper_file_id: String,
     pub reasons: Vec<String>,
     pub members: Vec<FileDto>,
 }
 
 pub async fn list_clusters(
     State(state): State<AppState>,
-    AxPath(scan_id): AxPath<i64>,
+    AxPath(scan_id): AxPath<String>,
 ) -> Result<Json<Vec<ClusterDto>>, StatusCode> {
     let store = state.store.lock().unwrap();
-    let clusters = store.load_clusters(scan_id).map_err(internal)?;
-    let files = file_lookup(&store, scan_id).map_err(internal)?;
+    super::require_scan(&store, &scan_id)?;
+    let clusters = store.load_clusters(&scan_id).map_err(internal)?;
+    let files = file_lookup(&store, &scan_id).map_err(internal)?;
 
     let out = clusters
         .into_iter()
@@ -123,7 +128,7 @@ pub async fn list_clusters(
 
 #[derive(Serialize)]
 pub struct ReviewPairDto {
-    pub id: i64,
+    pub id: String,
     pub tier: String,
     pub reason: String,
     pub phash_dist: i64,
@@ -133,11 +138,12 @@ pub struct ReviewPairDto {
 
 pub async fn list_review_pairs(
     State(state): State<AppState>,
-    AxPath(scan_id): AxPath<i64>,
+    AxPath(scan_id): AxPath<String>,
 ) -> Result<Json<Vec<ReviewPairDto>>, StatusCode> {
     let store = state.store.lock().unwrap();
-    let pairs = store.load_review_pairs(scan_id).map_err(internal)?;
-    let files = file_lookup(&store, scan_id).map_err(internal)?;
+    super::require_scan(&store, &scan_id)?;
+    let pairs = store.load_review_pairs(&scan_id).map_err(internal)?;
+    let files = file_lookup(&store, &scan_id).map_err(internal)?;
 
     let out = pairs
         .into_iter()
@@ -155,18 +161,19 @@ pub async fn list_review_pairs(
 
 #[derive(Serialize)]
 pub struct BurstRunDto {
-    pub id: i64,
+    pub id: String,
     pub camera_model: String,
     pub frames: Vec<FileDto>,
 }
 
 pub async fn list_burst_runs(
     State(state): State<AppState>,
-    AxPath(scan_id): AxPath<i64>,
+    AxPath(scan_id): AxPath<String>,
 ) -> Result<Json<Vec<BurstRunDto>>, StatusCode> {
     let store = state.store.lock().unwrap();
-    let runs = store.load_burst_runs(scan_id).map_err(internal)?;
-    let files = file_lookup(&store, scan_id).map_err(internal)?;
+    super::require_scan(&store, &scan_id)?;
+    let runs = store.load_burst_runs(&scan_id).map_err(internal)?;
+    let files = file_lookup(&store, &scan_id).map_err(internal)?;
 
     let out = runs
         .into_iter()
@@ -181,18 +188,18 @@ pub async fn list_burst_runs(
 
 pub async fn get_analysis(
     State(state): State<AppState>,
-    AxPath(file_id): AxPath<i64>,
+    AxPath(file_id): AxPath<Uuid>,
 ) -> Result<Json<AnalysisDto>, StatusCode> {
     let store = state.store.lock().unwrap();
     store
-        .load_analysis(file_id)
+        .load_analysis(&file_id.to_string())
         .map_err(internal)?
         .map(|a| Json(a.into()))
         .ok_or(StatusCode::NOT_FOUND)
 }
 
-fn file_lookup(store: &photodedup_core::store::Store, scan_id: i64) -> rusqlite::Result<HashMap<i64, StoredFile>> {
-    Ok(store.load_files(scan_id)?.into_iter().map(|f| (f.id, f)).collect())
+fn file_lookup(store: &photodedup_core::store::Store, scan_id: &str) -> rusqlite::Result<HashMap<String, StoredFile>> {
+    Ok(store.load_files(&scan_id)?.into_iter().map(|f| (f.id.clone(), f)).collect())
 }
 
 fn internal<E: std::fmt::Display>(e: E) -> StatusCode {

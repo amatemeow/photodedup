@@ -71,7 +71,13 @@ pub async fn build_with_ui(
         .route("/api/files/{id}/analysis", get(routes::scans::get_analysis))
         .route(
             "/api/scans/{id}/decisions",
-            get(routes::decisions::get_decisions).put(routes::decisions::put_decision),
+            get(routes::decisions::get_decisions)
+                .put(routes::decisions::put_decision)
+                .delete(routes::decisions::clear_decision),
+        )
+        .route(
+            "/api/scans/{id}/decisions/bulk",
+            post(routes::decisions::put_decisions_bulk),
         )
         .route("/api/resume", get(routes::decisions::resume))
         .route("/files/{id}/thumb", get(routes::files::thumbnail))
@@ -142,7 +148,7 @@ mod tests {
     /// Like `test_server`, but the DB already has one minimal scan saved
     /// -- what the decisions/resume tests need to exercise real queries
     /// instead of hitting an empty database.
-    async fn test_server_with_scan() -> (Router, ServerInfo, i64, std::path::PathBuf) {
+    async fn test_server_with_scan() -> (Router, ServerInfo, String, std::path::PathBuf) {
         use photodedup_core::model::{FileRecord, MediaClassSerde};
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -249,12 +255,21 @@ mod tests {
     #[tokio::test]
     async fn unknown_file_id_returns_not_found_not_a_crash() {
         let (router, info) = test_server().await;
-        let uri = format!("/files/999/original?token={}", info.token);
-        let res = router
-            .oneshot(axum::http::Request::get(uri).body(axum::body::Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let uri = format!("/files/{}/original?token={}", uuid::Uuid::new_v4(), info.token);
+        let res = send(&router, axum::http::Request::get(uri).body(axum::body::Body::empty()).unwrap()).await;
         assert_eq!(res.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn malformed_or_path_like_file_ids_are_rejected_before_touching_anything() {
+        let (router, info) = test_server().await;
+        for bad in ["999", "not-a-uuid", "..%2F..%2Fetc%2Fpasswd", "%2e%2e", "0000"] {
+            for kind in ["thumb", "preview", "original"] {
+                let uri = format!("/files/{bad}/{kind}?token={}", info.token);
+                let res = send(&router, axum::http::Request::get(uri).body(axum::body::Body::empty()).unwrap()).await;
+                assert!(res.status().is_client_error() && res.status() != 200, "{bad}/{kind} -> {}", res.status());
+            }
+        }
     }
 
     #[tokio::test]
@@ -278,6 +293,65 @@ mod tests {
         let body = axum::body::to_bytes(get_res.into_body(), usize::MAX).await.unwrap();
         let decisions: HashMap<String, bool> = serde_json::from_slice(&body).unwrap();
         assert_eq!(decisions.get("a.jpg"), Some(&true));
+    }
+
+    #[tokio::test]
+    async fn a_stale_scan_id_is_not_found_everywhere_not_empty_and_not_a_server_error() {
+        let (router, info, _scan_id, _root) = test_server_with_scan().await;
+        let stale = uuid::Uuid::new_v4();
+        let t = &info.token;
+        let json = |m: &str, uri: String, body: &str| {
+            axum::http::Request::builder()
+                .method(m)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap()
+        };
+        let cases = [
+            json("GET", format!("/api/scans/{stale}/clusters?token={t}"), ""),
+            json("GET", format!("/api/scans/{stale}/review-pairs?token={t}"), ""),
+            json("GET", format!("/api/scans/{stale}/burst-runs?token={t}"), ""),
+            json("GET", format!("/api/scans/{stale}/decisions?token={t}"), ""),
+            json("PUT", format!("/api/scans/{stale}/decisions?token={t}"), r#"{"relative_path":"a.jpg","keep":true}"#),
+            json("POST", format!("/api/scans/{stale}/decisions/bulk?token={t}"), r#"[{"relative_path":"a.jpg","keep":true}]"#),
+            json("DELETE", format!("/api/scans/{stale}/decisions?relative_path=a.jpg&token={t}"), ""),
+        ];
+        for req in cases {
+            let desc = format!("{} {}", req.method(), req.uri().path());
+            assert_eq!(send(&router, req).await.status(), 404, "{desc}");
+        }
+    }
+
+    #[tokio::test]
+    async fn bulk_decisions_and_clear_work_over_http() {
+        let (router, info, scan_id, _root) = test_server_with_scan().await;
+        let base = format!("/api/scans/{scan_id}/decisions");
+        let t = &info.token;
+
+        let res = send(
+            &router,
+            axum::http::Request::post(format!("{base}/bulk?token={t}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    r#"[{"relative_path":"a.jpg","keep":true},{"relative_path":"b.jpg","keep":false}]"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), 204);
+
+        let res = send(
+            &router,
+            axum::http::Request::delete(format!("{base}?relative_path=a.jpg&token={t}")).body(axum::body::Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), 204);
+
+        let res = send(&router, axum::http::Request::get(format!("{base}?token={t}")).body(axum::body::Body::empty()).unwrap()).await;
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let got: HashMap<String, bool> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(got, HashMap::from([("b.jpg".to_string(), false)]));
     }
 
     #[tokio::test]

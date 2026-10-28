@@ -1,11 +1,12 @@
 <script lang="ts">
   import { api, ApiError, type JobStatus, type Phase } from './lib/api';
+  import Review from './Review.svelte';
 
   type View =
     | { kind: 'start' }
-    | { kind: 'found'; scanId: number; startedAt: string }
+    | { kind: 'found'; scanId: string; startedAt: string }
     | { kind: 'scanning'; jobId: number; status: JobStatus }
-    | { kind: 'ready'; scanId: number; clusters: number }
+    | { kind: 'review'; scanId: string }
     | { kind: 'ended'; message: string };
 
   const phaseLabel: Record<Phase, string> = {
@@ -54,7 +55,7 @@
   async function onStatus(status: JobStatus) {
     if (view.kind !== 'scanning') return;
     if (status.state === 'running') view = { ...view, status };
-    else if (status.state === 'done') await open(status.scan_id);
+    else if (status.state === 'done') open(status.scan_id);
     else if (status.state === 'cancelled') {
       view = { kind: 'start' };
       error = 'Scan cancelled.';
@@ -75,12 +76,8 @@
     }
   }
 
-  async function open(scanId: number) {
-    try {
-      view = { kind: 'ready', scanId, clusters: (await api.clusters(scanId)).length };
-    } catch (e) {
-      view = { kind: 'ended', message: describe(e) };
-    }
+  function open(scanId: string) {
+    view = { kind: 'review', scanId };
   }
 
   async function cancel() {
@@ -101,6 +98,9 @@
     s.state === 'running' && s.phase === 'analyzing' && s.total ? Math.round(((s.done ?? 0) / s.total) * 100) : null;
 </script>
 
+{#if view.kind === 'review'}
+  <Review scanId={view.scanId} onExit={() => (view = { kind: 'start' })} />
+{:else}
 <main>
   <h1>photodedup</h1>
 
@@ -117,8 +117,9 @@
     <p class="hint">Type or paste the folder path. A native folder picker arrives with the desktop shell.</p>
   {:else if view.kind === 'found'}
     <p>This folder was scanned before{view.startedAt ? ` (${new Date(view.startedAt).toLocaleString()})` : ''}.</p>
+    <p class="hint">Scanning again replaces that scan and the keep/quarantine choices you made on it.</p>
     <div class="row">
-      <button onclick={() => open((view as { scanId: number }).scanId)}>Resume</button>
+      <button onclick={() => open((view as { scanId: string }).scanId)}>Resume</button>
       <button class="secondary" onclick={scan}>Scan again</button>
       <button class="secondary" onclick={() => (view = { kind: 'start' })}>Back</button>
     </div>
@@ -133,10 +134,6 @@
       {:else}&nbsp;{/if}
     </p>
     <button class="secondary" onclick={cancel}>Cancel</button>
-  {:else if view.kind === 'ready'}
-    <p>Scan #{view.scanId} is ready: {view.clusters} groups of duplicates found.</p>
-    <p class="hint">The review screen is the next piece of the UI.</p>
-    <button class="secondary" onclick={() => (view = { kind: 'start' })}>Scan another folder</button>
   {:else}
     <p class="error">Scan failed: {view.message}</p>
     <button class="secondary" onclick={() => (view = { kind: 'start' })}>Back</button>
@@ -144,36 +141,9 @@
 
   {#if error}<p class="error" role="alert">{error}</p>{/if}
 </main>
+{/if}
 
 <style>
-  :global(:root) {
-    --bg: #fafafa;
-    --fg: #1d1d1f;
-    --muted: #6e6e73;
-    --line: #d2d2d7;
-    --accent: #0a64d8;
-    --accent-fg: #fff;
-    --danger: #c4291c;
-    color-scheme: light;
-  }
-  @media (prefers-color-scheme: dark) {
-    :global(:root) {
-      --bg: #1c1c1e;
-      --fg: #f5f5f7;
-      --muted: #98989d;
-      --line: #3a3a3c;
-      --accent: #4c9aff;
-      --accent-fg: #0b0b0c;
-      --danger: #ff6b5e;
-      color-scheme: dark;
-    }
-  }
-  :global(body) {
-    margin: 0;
-    background: var(--bg);
-    color: var(--fg);
-    font: 15px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif;
-  }
   main {
     max-width: 36rem;
     margin: 0 auto;
@@ -187,47 +157,9 @@
     display: grid;
     gap: 0.5rem;
   }
-  input {
-    font: inherit;
-    padding: 0.55rem 0.7rem;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: transparent;
-    color: inherit;
-  }
-  button {
-    font: inherit;
-    padding: 0.5rem 1rem;
-    border: 0;
-    border-radius: 8px;
-    background: var(--accent);
-    color: var(--accent-fg);
-    cursor: pointer;
-  }
-  button:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-  button.secondary {
-    background: transparent;
-    color: inherit;
-    border: 1px solid var(--line);
-  }
   .row {
     display: flex;
     gap: 0.5rem;
     flex-wrap: wrap;
-  }
-  progress {
-    width: 100%;
-    accent-color: var(--accent);
-  }
-  .hint,
-  .note {
-    color: var(--muted);
-    font-size: 0.9em;
-  }
-  .error {
-    color: var(--danger);
   }
 </style>

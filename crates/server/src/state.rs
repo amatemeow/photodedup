@@ -55,7 +55,7 @@ impl Job {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum JobStatus {
     Running(Progress),
-    Done { scan_id: i64 },
+    Done { scan_id: String },
     Cancelled,
     Failed { message: String },
 }
