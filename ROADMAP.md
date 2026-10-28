@@ -11,7 +11,7 @@ shaped these decisions.
 |---|---|---|
 | **Library scale, 100k+ files** | Blocked search (4×u64 XOR+popcount under rayon) reaches ~50k files in a few seconds with no index; trip-sized (thousands) is the stated first target | `CandidateIndex` trait (`crates/core/src/search.rs`) — swap the brute-force impl for multi-index LSH (256 bits → 16-bit bands) or a BK-tree without touching anything above it |
 | **Bounded thumbnail cache** | 219 MB for 2273 files in the MVP does not extrapolate (≈10 GB at 100k files) | Content-addressed thumb store lives behind one module; serve 256px grid thumbs + on-demand 1024px previews from day one so the cache policy is a localized change |
-| **Incremental rescan** | Not needed for one-shot trip folders | SQLite schema records `(size, mtime, inode/file-id)` per file from day one, even though nothing reads it yet |
+| **Incremental rescan** (detect new/changed files in an already-scanned folder and merge them into the existing scan, without re-hashing everything) | Not needed for one-shot trip folders. Note this is narrower than it sounds now that resume exists (see "Resolved during M2" below): reopening an *unchanged* folder already resumes instantly with no rescan at all -- this item is specifically about a folder that *gained or changed* files since its last scan | SQLite schema records `(size, mtime, inode/file-id)` per file from day one, even though nothing reads it yet |
 | **Managed libraries** (Apple Photos `.photoslibrary`, Lightroom catalogs) | Moving a file out from under a managed library corrupts its database — genuinely risky, not just unimplemented | Day one **detects and hard-refuses** to touch these trees; the detector is the hook, support is the roadmap item |
 | **External drives / NAS over SMB** | Needs disconnection-survivable apply and throttled, resumable hashing — its own engineering effort | Journalled apply and cross-volume copy-verify-delete already ship in M3; SMB only adds retry/resume on top |
 | **AVIF** | Not produced by either phone in the reference dataset | `rav1d` (pure Rust, AV1 is royalty-free) drops into the decoder dispatch next to `zune-jpeg`/`png` |
@@ -104,3 +104,34 @@ shaped these decisions.
   instead of the other is cosmetic, not a correctness bug. Not planned to
   be "fixed" -- doing so would require bit-identical resize filters between
   Rust and Python, which M0 already judged not worth pursuing.
+
+## Resolved during M2
+
+- **Mid-review persistence / resume-after-quit.** Prompted by a direct
+  question: if a user reviews part of a dataset and quits, can they pick
+  up where they left off? Investigating turned up a real, concrete gap --
+  the `decisions` table existed and was correctly keyed (`scan_id` +
+  stable relative path, not the pipeline's ephemeral per-run `FileId`),
+  but nothing exposed it over HTTP (no save endpoint, no read-back
+  endpoint), and every `scan` invocation created a brand-new `scan_id`
+  with no way to recognize "this folder was already scanned." Fixed:
+  - `Store::find_latest_scan_for_root` -- the lookup behind resuming:
+    matches on a canonicalized root path, so a trailing slash or a path
+    reached through a symlink still finds the same scan.
+  - `Store::load_decisions` -- bulk read of everything recorded for a
+    scan, for restoring UI state in one round trip rather than one file
+    at a time.
+  - `GET`/`PUT /api/scans/{id}/decisions` and `GET /api/resume?root=...`
+    (`routes/decisions.rs`) -- the actual HTTP surface; `resume` is
+    deliberately read-only/side-effect-free, it only looks, a future
+    scan-trigger endpoint is what actually runs the pipeline.
+  - Design decision (user's call, given three options): opening the app
+    on a recognized folder **auto-resumes the last scan** rather than
+    silently rescanning or asking the user to pick from a list. An
+    explicit rescan stays available as a distinct action.
+  Verified live against the real reference dataset, not just unit tests:
+  started a server, made real decisions via the API, killed the process
+  entirely (a genuinely new PID, a fresh random auth token -- no
+  in-memory state carried over), started a fresh server instance, and
+  confirmed both the resume lookup and all three decisions survived
+  intact. 7 new tests (4 store, 3 server) alongside that live check.

@@ -51,6 +51,11 @@ pub async fn build(db_path: &std::path::Path) -> anyhow::Result<(TcpListener, Ro
         .route("/api/scans/{id}/review-pairs", get(routes::scans::list_review_pairs))
         .route("/api/scans/{id}/burst-runs", get(routes::scans::list_burst_runs))
         .route("/api/files/{id}/analysis", get(routes::scans::get_analysis))
+        .route(
+            "/api/scans/{id}/decisions",
+            get(routes::decisions::get_decisions).put(routes::decisions::put_decision),
+        )
+        .route("/api/resume", get(routes::decisions::resume))
         .route("/files/{id}/thumb", get(routes::files::thumbnail))
         .route("/files/{id}/preview", get(routes::files::preview))
         .route("/files/{id}/original", get(routes::files::original))
@@ -104,6 +109,7 @@ pub async fn run(db_path: PathBuf) -> anyhow::Result<ServerInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use tower::ServiceExt;
 
     async fn test_server() -> (Router, ServerInfo) {
@@ -111,6 +117,50 @@ mod tests {
         let (_listener, router, info) = build(tmp.path()).await.unwrap();
         std::mem::forget(tmp); // keep the file alive for the test's duration
         (router, info)
+    }
+
+    /// Like `test_server`, but the DB already has one minimal scan saved
+    /// -- what the decisions/resume tests need to exercise real queries
+    /// instead of hitting an empty database.
+    async fn test_server_with_scan() -> (Router, ServerInfo, i64, std::path::PathBuf) {
+        use photodedup_core::model::{FileRecord, MediaClassSerde};
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let root = std::env::temp_dir().join("photodedup-server-test-root");
+        let files = vec![FileRecord {
+            id: 0,
+            path: root.join("a.jpg"),
+            file_name: "a.jpg".into(),
+            media_class: MediaClassSerde::Image,
+            size_bytes: 100,
+            mtime_unix: 0,
+            is_placeholder: false,
+        }];
+        let result = photodedup_core::pipeline::PipelineResult {
+            files,
+            analyzed: Default::default(),
+            clusters: vec![],
+            review_pairs: vec![],
+            burst_runs: vec![],
+            video_matches: vec![],
+            orphan_videos: vec![],
+            unknown_provenance_videos: vec![],
+            placeholder_count: 0,
+            placeholder_bytes: 0,
+            refused_managed_libraries: vec![],
+        };
+        let scan_id = {
+            let mut store = photodedup_core::store::Store::open(tmp.path()).unwrap();
+            store.save_scan(&root, &result).unwrap()
+        };
+
+        let (_listener, router, info) = build(tmp.path()).await.unwrap();
+        std::mem::forget(tmp);
+        (router, info, scan_id, root)
+    }
+
+    async fn send(router: &Router, req: axum::http::Request<axum::body::Body>) -> axum::http::Response<axum::body::Body> {
+        router.clone().oneshot(req).await.unwrap()
     }
 
     #[tokio::test]
@@ -167,5 +217,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn decision_written_then_read_back_round_trips() {
+        let (router, info, scan_id, _root) = test_server_with_scan().await;
+
+        let put_uri = format!("/api/scans/{scan_id}/decisions?token={}", info.token);
+        let put_res = send(
+            &router,
+            axum::http::Request::put(put_uri)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"relative_path":"a.jpg","keep":true}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(put_res.status(), 204);
+
+        let get_uri = format!("/api/scans/{scan_id}/decisions?token={}", info.token);
+        let get_res = send(&router, axum::http::Request::get(get_uri).body(axum::body::Body::empty()).unwrap()).await;
+        assert_eq!(get_res.status(), 200);
+        let body = axum::body::to_bytes(get_res.into_body(), usize::MAX).await.unwrap();
+        let decisions: HashMap<String, bool> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(decisions.get("a.jpg"), Some(&true));
+    }
+
+    #[tokio::test]
+    async fn resume_finds_the_scan_for_a_known_root_and_nothing_for_an_unknown_one() {
+        let (router, info, scan_id, root) = test_server_with_scan().await;
+
+        let known_uri = format!("/api/resume?root={}&token={}", root.display(), info.token);
+        let res = send(&router, axum::http::Request::get(known_uri).body(axum::body::Body::empty()).unwrap()).await;
+        assert_eq!(res.status(), 200);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let dto: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(dto["scan_id"], scan_id);
+
+        let unknown_uri = format!("/api/resume?root=/nothing/scanned/here&token={}", info.token);
+        let res = send(&router, axum::http::Request::get(unknown_uri).body(axum::body::Body::empty()).unwrap()).await;
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let dto: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(dto["scan_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn decisions_route_also_requires_the_token() {
+        let (router, _info, scan_id, _root) = test_server_with_scan().await;
+        let uri = format!("/api/scans/{scan_id}/decisions");
+        let res = send(&router, axum::http::Request::get(uri).body(axum::body::Body::empty()).unwrap()).await;
+        assert_eq!(res.status(), 401);
     }
 }
