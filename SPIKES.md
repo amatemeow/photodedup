@@ -85,9 +85,37 @@ not bit-exact hashes, since resize filters differ) is cleared with margin.
 These three pairs are now encoded as permanent regression tests in
 `crates/core/src/hash.rs`.
 
+## 4. Image EXIF via `nom-exif` (M1) — confirmed for both JPEG and HEIC
+
+`nom-exif` (pure Rust, MIT, no ISOBMFF box-parsing of our own needed) reads
+full EXIF — Make/Model/DateTimeOriginal/SubSecTimeOriginal/GPS/MakerNote —
+directly from both JPEG and HEIC via one API (`ExifIter`/`Exif`). Verified
+against `IMG_3684.HEIC` (full Apple tag set incl. GPS) and the messenger-
+derived `IMG_3465.JPG` (present but telling: ExifVersion/ColorSpace/a
+thumbnail, but **no Make/Model/DateTimeOriginal** — confirms
+`Evidence::IntactCameraExif` must require that specific trio, not "any EXIF
+present", exactly as designed).
+
+**Gap found, not a blocker:** `nom-exif`'s `TrackInfo` (the video path, via
+`MediaSource::has_track()`) gets Apple's video metadata perfectly
+(`Make`/`Model`/`CreateDate`/`GpsIso6709` all present on the iPhone `.MOV`
+sample) but has **no mapping for Android's vendor atom** — on the OnePlus
+`.mp4` sample it returns `CreateDate`/dimensions/GPS but silently omits
+Make/Model entirely (no error, just absent). Since this dataset is
+specifically two-phone, one-vendor coverage isn't enough.
+
+**Decision:** `nom-exif` handles all image metadata (JPEG + HEIC, one code
+path, zero subprocess calls). `ffprobe` handles all video metadata (both
+vendors, already proven in §2) — not as a "fallback" to nom-exif's partial
+video coverage, since mixing two partial sources would need its own
+merge/precedence logic for no real benefit when ffprobe alone already
+covers 100% of the video case.
+
 ## Net effect on the dependency list
 
-Both spikes removed a dependency rather than needing a new one:
-**exiftool and libheif-rs are out.** The only native (non-pure-Rust)
-dependency is the ffmpeg sidecar, used for HEIC and video frame decode —
-exactly what was already being bundled for video.
+**exiftool and libheif-rs are out.** `nom-exif` (pure Rust, MIT) replaces
+exiftool for all image metadata. The only native (non-pure-Rust) dependency
+remains the ffmpeg sidecar — used for HEIC/video pixel decode (§1) *and*
+video metadata via `ffprobe` (§2, §4), since that's a subprocess call either
+way and splitting video metadata across two partial sources would add
+complexity for no benefit.

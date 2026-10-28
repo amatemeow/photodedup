@@ -6,3 +6,5 @@ node_modules/
 dist/
 .DS_Store
 *.log
+# CLI scan output (local test runs) -- never meant to be tracked
+.photodedup-scan.sqlite3*
