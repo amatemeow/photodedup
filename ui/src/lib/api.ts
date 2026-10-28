@@ -168,6 +168,16 @@ export interface Shell {
   tools: { name: string; found: boolean; version: string | null }[];
 }
 
+export interface ScanSummary {
+  id: string;
+  root_path: string;
+  started_at: string;
+  file_count: number;
+  cluster_count: number;
+  review_pair_count: number;
+  burst_run_count: number;
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -208,6 +218,7 @@ export const api = {
   clearDecision: (scanId: string, relativePath: string) =>
     call<void>(`/api/scans/${scanId}/decisions?relative_path=${encodeURIComponent(relativePath)}`, { method: 'DELETE' }),
 
+  scans: () => call<ScanSummary[]>('/api/scans'),
   shell: () => call<Shell>('/api/shell'),
   /** The shell's native folder dialog; null if the user cancels it. */
   pickFolder: () => call<{ path: string | null }>('/api/pick-folder', { method: 'POST' }),

@@ -1,29 +1,30 @@
 <script lang="ts">
-  import { api, ApiError, type IntensityId, type JobStatus, type Phase, type Shell } from './lib/api';
+  import { api, ApiError, type IntensityId, type JobStatus, type Phase, type ScanSummary, type Shell } from './lib/api';
   import Review from './Review.svelte';
   import Options from './Options.svelte';
+  import Icon from './Icon.svelte';
 
   type View =
     | { kind: 'start' }
     | { kind: 'options' }
     | { kind: 'found'; scanId: string; startedAt: string }
-    | { kind: 'scanning'; jobId: number; status: JobStatus }
+    | { kind: 'scanning'; jobId: number; status: JobStatus; withVideos: boolean }
     | { kind: 'review'; scanId: string }
     | { kind: 'ended'; message: string };
 
-  const phaseLabel: Record<Phase, string> = {
-    scanning: 'Finding files',
-    analyzing: 'Reading and fingerprinting photos',
-    analyzing_videos: 'Reading video details',
-    exact_duplicates: 'Checking for exact copies',
-    matching: 'Looking for similar photos',
-    videos: 'Matching videos against their originals',
-    clustering: 'Grouping duplicates',
-  };
+  // The scan, in the order the engine does it.
+  const phases: { id: Phase; label: string; videosOnly?: boolean }[] = [
+    { id: 'scanning', label: 'Finding files' },
+    { id: 'analyzing', label: 'Reading and fingerprinting photos' },
+    { id: 'analyzing_videos', label: 'Reading video details', videosOnly: true },
+    { id: 'exact_duplicates', label: 'Checking for exact copies' },
+    { id: 'matching', label: 'Looking for similar photos' },
+    { id: 'videos', label: 'Matching videos against their originals', videosOnly: true },
+    { id: 'clustering', label: 'Grouping duplicates' },
+  ];
 
-  // Remembered between sessions; both flags move to the Options tab once it
-  // exists. Storage can be unavailable (private windows), so every access is
-  // guarded and the default (videos included) applies.
+  // Remembered between sessions. Storage can be unavailable (private windows),
+  // so every access is guarded and the default (videos included) applies.
   const VIDEOS_KEY = 'photodedup.includeVideos';
   let includeVideos = $state(true);
   try {
@@ -53,7 +54,25 @@
   api.shell().then((s) => (shell = s)).catch(() => {}); // a convenience; the app works without it
   const missingTools = $derived(shell?.tools.filter((t) => !t.found).map((t) => t.name) ?? []);
 
+  // The scan already in the database, offered as "continue where you left off".
+  let last = $state<ScanSummary | null>(null);
+  let lastLoaded = $state(false);
+  async function loadLast() {
+    try {
+      last = (await api.scans())[0] ?? null;
+    } catch {
+      last = null;
+    } finally {
+      lastLoaded = true;
+    }
+  }
+  loadLast();
+
   let root = $state('');
+  let view = $state<View>({ kind: 'start' });
+  let busy = $state(false);
+  let error = $state('');
+  let stopWatching: (() => void) | undefined;
 
   async function browse() {
     error = '';
@@ -64,10 +83,6 @@
       error = describe(e);
     }
   }
-  let view = $state<View>({ kind: 'start' });
-  let busy = $state(false);
-  let error = $state('');
-  let stopWatching: (() => void) | undefined;
 
   async function check() {
     error = '';
@@ -93,7 +108,7 @@
     error = '';
     try {
       const { job_id } = await api.startScan(folder, { includeVideos: withVideos });
-      view = { kind: 'scanning', jobId: job_id, status: { state: 'running', phase: 'scanning' } };
+      view = { kind: 'scanning', jobId: job_id, status: { state: 'running', phase: 'scanning' }, withVideos };
       stopWatching = api.watchJob(job_id, onStatus, onLost);
     } catch (e) {
       error = describe(e);
@@ -129,6 +144,11 @@
     view = { kind: 'review', scanId };
   }
 
+  function backToStart() {
+    view = { kind: 'start' };
+    loadLast();
+  }
+
   async function cancel() {
     if (view.kind !== 'scanning') return;
     try {
@@ -147,123 +167,286 @@
   // videos); an indeterminate one for the short phases without one.
   const hasCount = (s: JobStatus) =>
     s.state === 'running' && (s.phase === 'analyzing' || s.phase === 'analyzing_videos' || s.phase === 'videos') && !!s.total;
-
   const percent = (s: JobStatus) => (hasCount(s) && s.state === 'running' ? Math.round(((s.done ?? 0) / s.total!) * 100) : null);
 
   // Photos and videos are separate phases with separate counts, so each
   // says what it counts.
   const detail = (s: JobStatus) =>
     !hasCount(s) || s.state !== 'running' ? '' : `${s.done} of ${s.total} ${s.phase === 'analyzing' ? 'photos' : 'videos'}`;
+
+  const folderName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+  function ago(iso: string): string {
+    const secs = (new Date(iso).getTime() - Date.now()) / 1000;
+    const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+    for (const [unit, size] of [['day', 86400], ['hour', 3600], ['minute', 60]] as const) {
+      if (Math.abs(secs) >= size) return rtf.format(Math.round(secs / size), unit);
+    }
+    return 'just now';
+  }
+  const groupCount = (s: ScanSummary) => s.cluster_count + s.burst_run_count;
+
+  const shownPhases = (withVideos: boolean) => phases.filter((p) => withVideos || !p.videosOnly);
+  const phaseIndex = (withVideos: boolean, s: JobStatus) =>
+    s.state === 'running' ? shownPhases(withVideos).findIndex((p) => p.id === s.phase) : -1;
 </script>
 
 {#if view.kind === 'options'}
   <Options onBack={() => { view = { kind: 'start' }; loadIntensity(); }} />
 {:else if view.kind === 'review'}
-  <Review scanId={view.scanId} onExit={() => (view = { kind: 'start' })} onRescan={startScan} />
+  <Review scanId={view.scanId} onExit={backToStart} onRescan={startScan} />
 {:else}
-<main>
-  <div class="head">
-    <h1>photodedup</h1>
-    {#if view.kind === 'start'}<button class="secondary" onclick={() => (view = { kind: 'options' })}>Options</button>{/if}
-  </div>
+  <main>
+    <header class="top">
+      {#if view.kind === 'start'}
+        <button class="btn plain" onclick={() => (view = { kind: 'options' })}><Icon name="gear" /> Options</button>
+      {/if}
+    </header>
 
-  {#if !api.hasToken}
-    <p class="note">No session token. Open the URL the app printed when it started.</p>
-  {/if}
-
-  {#if view.kind === 'start'}
-    <form onsubmit={(e) => { e.preventDefault(); check(); }}>
-      <label for="root">Folder to scan</label>
-      <div class="pick">
-        <input id="root" bind:value={root} placeholder="/Users/me/Pictures/Trip" autocomplete="off" spellcheck="false" />
-        {#if shell?.native_folder_picker}<button type="button" class="secondary" onclick={browse}>Browse…</button>{/if}
+    <div class="column">
+      <div class="brand">
+        <svg class="mark" viewBox="0 0 64 64" aria-hidden="true">
+          <defs>
+            <linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2d6cf0" /><stop offset="1" stop-color="#1a3fa6" /></linearGradient>
+          </defs>
+          <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#g)" />
+          <rect x="15" y="12" width="28" height="28" rx="4" fill="#fff" fill-opacity=".45" />
+          <rect x="21" y="20" width="28" height="28" rx="4" fill="#fff" />
+          <circle cx="40" cy="28" r="3" fill="#f6b93b" />
+          <path d="M21 48v-6c4-5 8-5 11-2 3-5 9-6 17 0v8Z" fill="#2f8f57" />
+        </svg>
+        <h1 class="title display">photodedup</h1>
+        <p class="secondary lead">Find duplicate photos and videos. Nothing is ever deleted.</p>
       </div>
-      <label class="check">
-        <input type="checkbox" bind:checked={includeVideos} />
-        Include videos
-      </label>
-      <p class="hint tight">Turn off to leave videos out entirely: faster, and they are neither compared nor listed.</p>
-      <button disabled={busy || !root.trim()}>{busy ? 'Checking…' : 'Scan'}</button>
-      {#if intensity}<p class="hint tight">Scan speed: {intensityName[intensity]}. Change it in Options.</p>{/if}
-    </form>
-    {#if !shell?.native_folder_picker}<p class="hint">Type or paste the folder path.</p>{/if}
-    {#if missingTools.length}
-      <p class="warn" role="alert">
-        {missingTools.join(' and ')} {missingTools.length > 1 ? 'were' : 'was'} not found. Without {missingTools.length > 1 ? 'them' : 'it'}, HEIC
-        photos and videos can't be read (ordinary JPEGs still work). Install ffmpeg and restart the app.
-      </p>
-    {/if}
-  {:else if view.kind === 'found'}
-    <p>This folder was scanned before{view.startedAt ? ` (${new Date(view.startedAt).toLocaleString()})` : ''}.</p>
-    <p class="hint">Scanning again replaces that scan; the keep/quarantine choices you made on files that haven't changed are kept.</p>
-    <div class="row">
-      <button onclick={() => open((view as { scanId: string }).scanId)}>Resume</button>
-      <button class="secondary" onclick={scan}>Scan again</button>
-      <button class="secondary" onclick={() => (view = { kind: 'start' })}>Back</button>
-    </div>
-  {:else if view.kind === 'scanning'}
-    {@const s = view.status}
-    {@const pct = percent(s)}
-    <p>{s.state === 'running' ? phaseLabel[s.phase] : ''}…</p>
-    <progress max="100" value={pct ?? undefined}></progress>
-    <p class="hint">{detail(s) || '\u00a0'}</p>
-    <button class="secondary" onclick={cancel}>Cancel</button>
-  {:else}
-    <p class="error">Scan failed: {view.message}</p>
-    <button class="secondary" onclick={() => (view = { kind: 'start' })}>Back</button>
-  {/if}
 
-  {#if error}<p class="error" role="alert">{error}</p>{/if}
-</main>
+      {#if !api.hasToken}
+        <div class="notice warning" role="alert"><Icon name="info" size={18} /><p>No session token. Open the URL the app printed when it started.</p></div>
+      {/if}
+
+      {#if view.kind === 'start'}
+        {#if missingTools.length}
+          <div class="notice warning" role="alert">
+            <Icon name="info" size={18} />
+            <p>
+              <strong>{missingTools.join(' and ')} {missingTools.length > 1 ? 'were' : 'was'} not found.</strong> Without
+              {missingTools.length > 1 ? 'them' : 'it'}, HEIC photos and videos can't be read (ordinary JPEGs still work). Install ffmpeg and
+              restart the app.
+            </p>
+          </div>
+        {/if}
+
+        {#if last}
+          <section class="card resume" aria-label="Continue where you left off">
+            <div class="resume-text">
+              <p class="caption">Continue where you left off</p>
+              <p class="lead name"><Icon name="folder" size={18} /> {folderName(last.root_path)}</p>
+              <p class="hint">{groupCount(last)} groups to review · scanned {ago(last.started_at)}</p>
+            </div>
+            <button class="btn primary" onclick={() => open(last!.id)}>Continue <Icon name="arrow-right" /></button>
+          </section>
+        {/if}
+
+        <form class="card" onsubmit={(e) => { e.preventDefault(); check(); }}>
+          <h2 class="lead">{last ? 'Scan another folder' : 'Scan a folder'}</h2>
+
+          <div class="row">
+            <input
+              id="root"
+              class="field grow"
+              bind:value={root}
+              placeholder={shell?.native_folder_picker ? 'Choose a folder, or paste its path' : '/Users/me/Pictures/Trip'}
+              aria-label="Folder to scan"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            {#if shell?.native_folder_picker}
+              <button type="button" class="btn" onclick={browse}><Icon name="folder" /> Choose…</button>
+            {/if}
+          </div>
+
+          <label class="switch setting">
+            <input type="checkbox" bind:checked={includeVideos} />
+            <span>
+              <strong>Include videos</strong>
+              <span class="hint block">Turn off to skip them entirely: faster, and they are neither compared nor listed.</span>
+            </span>
+          </label>
+
+          <button class="btn primary large" disabled={busy || !root.trim()}>{busy ? 'Checking…' : 'Scan'}</button>
+          {#if intensity}
+            <p class="hint center">Scan speed: {intensityName[intensity]} · change it in Options</p>
+          {/if}
+        </form>
+
+        {#if !lastLoaded}<div class="skeleton" style="height:0"></div>{/if}
+      {:else if view.kind === 'found'}
+        <section class="card">
+          <h2 class="lead">You've scanned this folder before</h2>
+          <p class="secondary">
+            {folderName(root)} was scanned{view.startedAt ? ` ${ago(view.startedAt)}` : ''}. Resume to carry on where you stopped.
+            Scanning again replaces that scan; the choices you made on files that haven't changed are kept.
+          </p>
+          <div class="row">
+            <button class="btn primary" onclick={() => open((view as { scanId: string }).scanId)}>Resume</button>
+            <button class="btn" onclick={scan}>Scan again</button>
+            <button class="btn plain" onclick={() => (view = { kind: 'start' })}>Back</button>
+          </div>
+        </section>
+      {:else if view.kind === 'scanning'}
+        {@const s = view.status}
+        {@const current = phaseIndex(view.withVideos, s)}
+        {@const pct = percent(s)}
+        <section class="card" aria-live="polite">
+          <div class="row between">
+            <h2 class="lead">Scanning…</h2>
+            <button class="btn plain" onclick={cancel}>Cancel</button>
+          </div>
+          <progress max="100" value={pct ?? undefined} aria-label="Scan progress"></progress>
+          <p class="hint">{detail(s) || ' '}</p>
+          <ol class="steps">
+            {#each shownPhases(view.withVideos) as p, i (p.id)}
+              <li class:done={i < current} class:now={i === current}>
+                {#if i < current}<Icon name="check" size={16} />{:else if i === current}<span class="spinner"></span>{:else}<span class="dot"></span>{/if}
+                <span>{p.label}</span>
+              </li>
+            {/each}
+          </ol>
+        </section>
+      {:else}
+        <section class="card">
+          <div class="notice danger" role="alert"><Icon name="info" size={18} /><p><strong>The scan didn't finish.</strong> {view.message}</p></div>
+          <button class="btn" onclick={backToStart}>Back</button>
+        </section>
+      {/if}
+
+      {#if error}
+        <div class="notice danger" role="alert"><Icon name="info" size={18} /><p>{error}</p></div>
+      {/if}
+    </div>
+  </main>
 {/if}
 
 <style>
   main {
-    max-width: 36rem;
+    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+  .top {
+    display: flex;
+    justify-content: flex-end;
+    padding: var(--s3) var(--s4);
+    min-height: 54px;
+  }
+  .column {
+    width: min(520px, 100%);
     margin: 0 auto;
-    padding: 4rem 1rem;
-  }
-  .head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin: 0 0 2rem;
-  }
-  h1 {
-    font-size: 1.4rem;
-    margin: 0;
-  }
-  form {
+    padding: var(--s2) var(--s4) var(--s7);
     display: grid;
-    gap: 0.5rem;
+    gap: var(--s4);
+    align-content: start;
   }
-  .pick {
-    display: flex;
-    gap: 0.5rem;
+  .brand {
+    display: grid;
+    justify-items: center;
+    gap: var(--s2);
+    padding: var(--s4) 0 var(--s2);
+    text-align: center;
   }
-  .pick input {
-    flex: 1;
+  .mark {
+    width: 72px;
+    height: 72px;
+    filter: drop-shadow(0 6px 14px rgb(0 0 0 / 0.22));
   }
-  .warn {
-    border: 1px solid var(--danger);
-    border-radius: 8px;
-    padding: 0.5rem 0.8rem;
-    color: var(--danger);
+  .display {
+    font-size: var(--fs-display);
   }
-  .check {
+  .card {
+    display: grid;
+    gap: var(--s4);
+    padding: var(--s5);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+    box-shadow: var(--shadow-sm);
+  }
+  .resume {
+    grid-template-columns: 1fr auto;
+    align-items: center;
+  }
+  .resume-text {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+  .name {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-  }
-  .check input {
-    padding: 0;
-  }
-  .tight {
-    margin: -0.25rem 0 0.25rem;
+    gap: var(--s2);
+    font-weight: 600;
+    min-width: 0;
   }
   .row {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--s2);
+    align-items: center;
     flex-wrap: wrap;
+  }
+  .row.between {
+    justify-content: space-between;
+  }
+  .grow {
+    flex: 1;
+    min-width: 0;
+  }
+  .setting {
+    align-items: flex-start;
+  }
+  .setting strong {
+    font-weight: 600;
+  }
+  .block {
+    display: block;
+  }
+  .center {
+    text-align: center;
+  }
+  .steps {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: var(--s2);
+  }
+  .steps li {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    color: var(--label-3);
+  }
+  .steps li.done {
+    color: var(--success);
+  }
+  .steps li.done span:last-child {
+    color: var(--label-2);
+  }
+  .steps li.now {
+    color: var(--label);
+    font-weight: 600;
+  }
+  .dot {
+    width: 16px;
+    height: 16px;
+    flex: none;
+    display: grid;
+    place-items: center;
+  }
+  .dot::after {
+    content: '';
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--separator);
+  }
+  .steps :global(svg) {
+    flex: none;
   }
 </style>
