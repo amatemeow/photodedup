@@ -1,0 +1,10 @@
+[package]
+name = "ppm_bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "pnm"] }
+
+[profile.release]
+opt-level = 3

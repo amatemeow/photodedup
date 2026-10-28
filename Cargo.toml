@@ -6,6 +6,7 @@ members = [
     # crates/server joins once M2 starts (loopback HTTP + SSE)
     # src-tauri joins once M4 starts (native shell)
 ]
+exclude = ["spikes"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,9 +23,25 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # via `rav1d`, a clean BSD-2 dependency, not ravif/rav1e) -- and rav1e
 # transitively pulls in `libfuzzer-sys`, NCSA-licensed, caught by
 # `cargo deny check licenses`. Enable only the codecs actually in use.
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# pnm (PPM) decode: used as the pipe format from the ffmpeg sidecar instead
+# of PNG -- PNG's DEFLATE compression costs ~1.1s/file round-trip (ffmpeg
+# encode + Rust decode) on a 12MP HEIC source; uncompressed PPM costs ~0.1s
+# for the same frame, a >10x win, since this is a local pipe where the
+# extra bytes are free and compression CPU is not. Confirmed `pnm` pulls in
+# no new transitive deps (independent of the `avif` feature deliberately
+# left off -- see the note below).
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "pnm"] }
 blake3 = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 thiserror = "1"
+# Image EXIF (JPEG + HEIC, one code path, pure Rust) -- see SPIKES.md §4.
+# Video metadata goes through ffprobe instead; nom-exif's TrackInfo path
+# has no mapping for Android vendor atoms (com.oplus.product.model).
+nom-exif = "2"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+walkdir = "2"
+# POSIX setpriority() for background-friendly scanning (see
+# core::throttle) -- ubiquitous, tiny, MIT/Apache-2.0.
+libc = "0.2"

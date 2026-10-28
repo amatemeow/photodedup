@@ -123,6 +123,26 @@ pub fn phash256(img: &DynamicImage) -> Hash256 {
     pack_bits(dct.iter().take(HASH_SIZE).flat_map(|row| row[..HASH_SIZE].iter().map(move |&v| v > med)))
 }
 
+/// Laplacian-variance sharpness, matching
+/// `~/photo-dedup/scripts/pass3_phash.py`'s finite-difference 3x3
+/// Laplacian on a 512x512 grayscale resize (no extra dependency needed for
+/// a real Laplacian kernel). Used to pre-select the sharpest frame in a
+/// burst run.
+pub fn sharpness(img: &DynamicImage) -> f64 {
+    let luma = resize_luma(img, 512, 512);
+    let h = luma.len();
+    let w = luma[0].len();
+    let mut values = Vec::with_capacity((h - 2) * (w - 2));
+    for r in 1..h - 1 {
+        for c in 1..w - 1 {
+            let lap = -4.0 * luma[r][c] + luma[r - 1][c] + luma[r + 1][c] + luma[r][c - 1] + luma[r][c + 1];
+            values.push(lap);
+        }
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64
+}
+
 /// `imagehash.dhash(img, hash_size=16)`: resize to 17x16, threshold each
 /// pixel against its left neighbour.
 pub fn dhash256(img: &DynamicImage) -> Hash256 {
