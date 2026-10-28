@@ -218,6 +218,6 @@ as a choice.
     `npm audit` reports two low-severity advisories (prototype pollution
     in `deepmerge`, via `@sveltejs/vite-plugin-svelte`, no fix available).
     Build-time only; nothing from it ships in `ui/dist`.
-  - Not yet verified in a real browser -- built, type-checked, and served
-    by the Rust server, but the click-through is still owed.
+  - Click-through confirmed in a real browser by the user (start flow,
+    scan, progress).
 
