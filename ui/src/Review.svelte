@@ -3,6 +3,7 @@
   import { Review, tabInfo, tabs, type Filter, type Sort, type Tab } from './lib/review.svelte';
   import Overview from './Overview.svelte';
   import Detail from './Detail.svelte';
+  import Apply from './Apply.svelte';
 
   let { scanId, onExit }: { scanId: string; onExit: () => void } = $props();
 
@@ -14,6 +15,9 @@
   let currentId = $state<string | null>(null); // null = overview
   let focusId = $state<string | null>(null); // overview keyboard focus
   let helpOpen = $state(false);
+  let applyOpen = $state(false);
+  // Set once files have actually moved: the results below no longer match disk.
+  let moved = $state(false);
   let plan = $state<{ groups: number; quarantine: number } | null>(null); // pending "accept all" confirmation
 
   const undoKey = /Mac|iPhone|iPad/i.test(navigator.userAgent) ? '⌘Z' : 'Ctrl+Z';
@@ -76,6 +80,7 @@
   }
 
   function onKey(e: KeyboardEvent) {
+    if (applyOpen) return; // the apply panel owns the keyboard while it is open
     const t = e.target as HTMLElement;
     if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') return;
     // Undo is the platform's own chord: Cmd+Z on a Mac, Ctrl+Z elsewhere.
@@ -114,12 +119,25 @@
       {review.counts.reviewed} of {review.counts.all} reviewed
       <progress max={review.counts.all || 1} value={review.counts.reviewed}></progress>
     </span>
+    <button
+      class="apply"
+      onclick={() => (applyOpen = true)}
+      title="Move the files you marked Quarantine into a quarantine folder (nothing is deleted)"
+    >
+      Apply{review.markedCount ? ` (${review.markedCount})` : ''}…
+    </button>
     <button class="secondary" onclick={() => review.undo()} disabled={!review.canUndo} title="Undo ({undoKey})">Undo</button>
     <button class="secondary" onclick={() => (helpOpen = true)} title="Keyboard shortcuts (?)">?</button>
   </header>
 
   {#if review.error}
     <p class="error" role="alert">{review.error} <button class="link" onclick={() => (review.error = '')}>Dismiss</button></p>
+  {/if}
+
+  {#if moved}
+    <p class="stale" role="status">
+      Files were moved to quarantine, so what you see below no longer matches the folder. Go back and scan it again to refresh.
+    </p>
   {/if}
 
   {#if !review.loaded}
@@ -180,6 +198,10 @@
   {/if}
 </div>
 
+{#if applyOpen}
+  <Apply {scanId} onClose={() => (applyOpen = false)} onChanged={() => (moved = true)} />
+{/if}
+
 {#if helpOpen}
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
   <div class="backdrop" onclick={() => (helpOpen = false)}>
@@ -223,6 +245,16 @@
   .progress progress {
     flex: 1;
     max-width: 16rem;
+  }
+  .apply {
+    white-space: nowrap;
+  }
+  .stale {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    border-radius: 8px;
+    padding: 0.5rem 0.8rem;
+    margin: 0 0 0.75rem;
   }
   .tabs {
     display: flex;

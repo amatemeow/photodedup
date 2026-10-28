@@ -24,10 +24,16 @@ use uuid::Uuid;
 fn resolve(state: &AppState, file_id: &Uuid) -> Result<(PathBuf, MediaClassSerde), StatusCode> {
     let id = file_id.to_string();
     let store = state.store.lock().unwrap();
-    let path = store
-        .get_file_full_path(&id)
+    let (root, rel) = store
+        .get_file_location(&id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    // Not just "root joined with rel": the path is checked to contain no
+    // `..` and no symlink, so a file replaced by a link to somewhere else
+    // after the scan cannot be used to read outside the scanned folder.
+    let path = photodedup_core::fsguard::Workspace::open(std::path::Path::new(&root))
+        .and_then(|ws| ws.existing_file(&rel))
+        .map_err(|_| StatusCode::NOT_FOUND)?;
     let file = store
         .get_file(&id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?

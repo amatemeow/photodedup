@@ -57,6 +57,16 @@ pub async fn start_scan(State(state): State<AppState>, Json(body): Json<StartBod
         .filter(|p| p.is_dir())
         .ok_or((StatusCode::BAD_REQUEST, format!("not a directory: {}", body.root.display())))?;
 
+    // The database's thumbnail cache sits next to the database. If that is
+    // inside the folder being scanned, a re-scan would read our own
+    // thumbnails as photos; refuse rather than quietly pollute the results.
+    if std::fs::canonicalize(&*state.cache_dir).is_ok_and(|c| c.starts_with(&root)) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "the database (and its thumbnail cache) is inside this folder; start the app with a database path outside it".into(),
+        ));
+    }
+
     // Claim the slot and publish the job before spawning, so a racing
     // second request sees it running.
     let cancel = Arc::new(AtomicBool::new(false));
@@ -191,6 +201,18 @@ mod tests {
         let err = start_scan(State(state.clone()), body(tmp.path(), Some("turbo"))).await.unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(state.job.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_scan_is_refused_when_the_database_cache_is_inside_the_folder_being_scanned() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = test_state();
+        let inside = root.path().join("scan.sqlite3.thumbs");
+        std::fs::create_dir(&inside).unwrap();
+        state.cache_dir = Arc::new(inside);
+        let err = start_scan(State(state), body(root.path(), None)).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("inside this folder"));
     }
 
     #[tokio::test]

@@ -43,6 +43,12 @@ pub fn scan(root: &Path) -> ScanReport {
 
         if entry.file_type().is_dir() {
             if let Some(name) = entry.file_name().to_str() {
+                // Our own quarantine folder holds files we moved out of the
+                // library; scanning it would report them as duplicates again.
+                if name == crate::fsguard::QUARANTINE_DIR_NAME {
+                    it.skip_current_dir();
+                    continue;
+                }
                 if MANAGED_LIBRARY_MARKERS.iter().any(|m| name.ends_with(m)) {
                     report.refused_managed_libraries.push(entry.path().to_path_buf());
                     it.skip_current_dir();
@@ -253,6 +259,18 @@ mod tests {
         assert_eq!(report.files.len(), 1);
         assert_eq!(report.files[0].file_name, "outside.jpg");
         assert_eq!(report.refused_managed_libraries.len(), 1);
+    }
+
+    #[test]
+    fn our_own_quarantine_folder_is_never_scanned() {
+        let tmp = TempDir::new().unwrap();
+        let q = tmp.path().join(crate::fsguard::QUARANTINE_DIR_NAME).join("20260101T000000Z");
+        fs::create_dir_all(&q).unwrap();
+        touch(&q, "moved.jpg");
+        touch(tmp.path(), "kept.jpg");
+        let report = scan(tmp.path());
+        assert_eq!(report.files.len(), 1);
+        assert_eq!(report.files[0].file_name, "kept.jpg");
     }
 
     #[test]

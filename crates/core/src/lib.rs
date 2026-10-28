@@ -7,10 +7,12 @@
 //! classify -> cluster -> keeper pipeline, SQLite persistence) built and
 //! parity-tested against the reference dataset.
 
+pub mod apply;
 pub mod classify;
 pub mod cluster;
 pub mod decode;
 pub mod exacthash;
+pub mod fsguard;
 pub mod hash;
 pub mod keeper;
 pub mod metadata;

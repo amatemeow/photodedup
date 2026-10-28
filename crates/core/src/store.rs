@@ -98,7 +98,42 @@ CREATE TABLE IF NOT EXISTS review_pairs (
     reason TEXT NOT NULL
 );
 
--- Videos shown browse-only in their own tab: `no_match` (a derived video
+-- Companions of a primary file (RAW, XMP, the MOV of a Live Photo): they
+-- move with it when a decision is applied.
+CREATE TABLE IF NOT EXISTS file_siblings (
+    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    primary_file_id TEXT NOT NULL REFERENCES files(id),
+    sibling_file_id TEXT NOT NULL REFERENCES files(id),
+    PRIMARY KEY (primary_file_id, sibling_file_id)
+);
+
+-- The apply journal. Deliberately NOT tied to a scan: a scan is replaced by
+-- the next one, but a batch must stay undoable for as long as its files sit
+-- in quarantine. Rows are written BEFORE any file moves (write-ahead), so a
+-- crash mid-apply can be reconciled from what is actually on disk.
+CREATE TABLE IF NOT EXISTS apply_batches (
+    id TEXT PRIMARY KEY,
+    root_path TEXT NOT NULL,
+    -- `.photodedup-quarantine/<timestamp>`, relative to root_path
+    quarantine_dir TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    -- running | done | partially_undone | undone
+    state TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS apply_items (
+    batch_id TEXT NOT NULL REFERENCES apply_batches(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    relative_path TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    mtime_unix INTEGER NOT NULL,
+    is_sibling INTEGER NOT NULL,
+    -- planned | moved | skipped | restored
+    state TEXT NOT NULL,
+    note TEXT,
+    PRIMARY KEY (batch_id, seq)
+);
+
+-- Videos with no counterpart, shown in their own tab in their own tab: `no_match` (a derived video
 -- with no native original found) or `unknown_origin` (provenance
 -- couldn't be established, so it was never a match candidate).
 CREATE TABLE IF NOT EXISTS orphan_videos (
@@ -157,6 +192,26 @@ pub struct StoredBurstRun {
     pub camera_model: String,
     /// In capture-time order (the `seq` column), not file-id order.
     pub member_file_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredBatch {
+    pub id: String,
+    pub root_path: String,
+    pub quarantine_dir: String,
+    pub created_at: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredBatchItem {
+    pub seq: i64,
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub mtime_unix: i64,
+    pub is_sibling: bool,
+    pub state: String,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -301,6 +356,18 @@ impl Store {
             )?;
         }
 
+        for set in &result.sibling_sets {
+            let Some(primary) = id_map.get(&set.primary) else { continue };
+            for sib in &set.siblings {
+                if let Some(sib_row) = id_map.get(sib) {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO file_siblings (scan_id, primary_file_id, sibling_file_id) VALUES (?1, ?2, ?3)",
+                        params![scan_id, primary, sib_row],
+                    )?;
+                }
+            }
+        }
+
         for (ids, reason) in [(&result.orphan_videos, "no_match"), (&result.unknown_provenance_videos, "unknown_origin")] {
             for fid in ids {
                 if let Some(row) = id_map.get(fid) {
@@ -425,6 +492,18 @@ impl Store {
             .optional()
     }
 
+    /// A file's scan root and its path relative to it -- the two halves
+    /// `Workspace` needs to open it safely.
+    pub fn get_file_location(&self, file_id: &str) -> rusqlite::Result<Option<(String, String)>> {
+        self.conn
+            .query_row(
+                "SELECT s.root_path, f.relative_path FROM files f JOIN scans s ON s.id = f.scan_id WHERE f.id = ?1",
+                params![file_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+    }
+
     pub fn load_review_pairs(&self, scan_id: &str) -> rusqlite::Result<Vec<StoredReviewPair>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, tier, file_a_id, file_b_id, phash_dist, reason
@@ -466,6 +545,100 @@ impl Store {
                 .collect::<rusqlite::Result<_>>()?;
         }
         Ok(runs)
+    }
+
+    /// Test-only escape hatch for rewriting rows the way a tampered
+    /// database would look.
+    #[cfg(test)]
+    pub(crate) fn exec_for_test(&self, sql: &str) {
+        self.conn.execute(sql, []).unwrap();
+    }
+
+    /// Primary file id -> ids of the companions that travel with it.
+    pub fn load_siblings(&self, scan_id: &str) -> rusqlite::Result<HashMap<String, Vec<String>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT primary_file_id, sibling_file_id FROM file_siblings WHERE scan_id = ?1 ORDER BY rowid")?;
+        let rows = stmt.query_map(params![scan_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out: HashMap<String, Vec<String>> = HashMap::new();
+        for row in rows {
+            let (p, s) = row?;
+            out.entry(p).or_default().push(s);
+        }
+        Ok(out)
+    }
+
+    /// Writes a batch and all its items in one transaction, before any file
+    /// is touched (the write-ahead rule). Items start as `planned`.
+    pub fn create_batch(
+        &self,
+        id: &str,
+        root_path: &str,
+        quarantine_dir: &str,
+        items: &[(String, u64, i64, bool)], // relative path, size, mtime, is_sibling
+    ) -> rusqlite::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        self.conn.execute(
+            "INSERT INTO apply_batches (id, root_path, quarantine_dir, created_at, state) VALUES (?1, ?2, ?3, ?4, 'running')",
+            params![id, root_path, quarantine_dir, chrono::Utc::now().to_rfc3339()],
+        )?;
+        for (seq, (rel, size, mtime, sib)) in items.iter().enumerate() {
+            self.conn.execute(
+                "INSERT INTO apply_items (batch_id, seq, relative_path, size_bytes, mtime_unix, is_sibling, state)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'planned')",
+                params![id, seq as i64, rel, *size as i64, mtime, *sib as i64],
+            )?;
+        }
+        tx.commit()
+    }
+
+    pub fn set_item_state(&self, batch_id: &str, seq: i64, state: &str, note: Option<&str>) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE apply_items SET state = ?3, note = ?4 WHERE batch_id = ?1 AND seq = ?2",
+            params![batch_id, seq, state, note],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_batch_state(&self, batch_id: &str, state: &str) -> rusqlite::Result<()> {
+        self.conn.execute("UPDATE apply_batches SET state = ?2 WHERE id = ?1", params![batch_id, state])?;
+        Ok(())
+    }
+
+    pub fn load_batches(&self) -> rusqlite::Result<Vec<StoredBatch>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, root_path, quarantine_dir, created_at, state FROM apply_batches ORDER BY created_at DESC, rowid DESC")?;
+        let rows = stmt.query_map([], batch_from_row)?;
+        rows.collect()
+    }
+
+    pub fn get_batch(&self, id: &str) -> rusqlite::Result<Option<StoredBatch>> {
+        self.conn
+            .query_row(
+                "SELECT id, root_path, quarantine_dir, created_at, state FROM apply_batches WHERE id = ?1",
+                params![id],
+                batch_from_row,
+            )
+            .optional()
+    }
+
+    pub fn load_batch_items(&self, batch_id: &str) -> rusqlite::Result<Vec<StoredBatchItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, relative_path, size_bytes, mtime_unix, is_sibling, state, note FROM apply_items WHERE batch_id = ?1 ORDER BY seq",
+        )?;
+        let rows = stmt.query_map(params![batch_id], |r| {
+            Ok(StoredBatchItem {
+                seq: r.get(0)?,
+                relative_path: r.get(1)?,
+                size_bytes: r.get::<_, i64>(2)? as u64,
+                mtime_unix: r.get(3)?,
+                is_sibling: r.get::<_, i64>(4)? != 0,
+                state: r.get(5)?,
+                note: r.get(6)?,
+            })
+        })?;
+        rows.collect()
     }
 
     pub fn load_orphan_videos(&self, scan_id: &str) -> rusqlite::Result<Vec<StoredOrphanVideo>> {
@@ -628,6 +801,7 @@ fn drop_legacy_schema(conn: &Connection) -> rusqlite::Result<()> {
 /// point at `files` without a cascade, so the order matters.
 fn delete_all_scans(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
     for table in [
+        "file_siblings",
         "orphan_videos",
         "cluster_members",
         "burst_run_members",
@@ -642,6 +816,10 @@ fn delete_all_scans(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
         tx.execute(&format!("DELETE FROM {table}"), [])?;
     }
     Ok(())
+}
+
+fn batch_from_row(r: &rusqlite::Row) -> rusqlite::Result<StoredBatch> {
+    Ok(StoredBatch { id: r.get(0)?, root_path: r.get(1)?, quarantine_dir: r.get(2)?, created_at: r.get(3)?, state: r.get(4)? })
 }
 
 fn insert_analysis(tx: &rusqlite::Transaction, row_id: &str, a: &Analyzed) -> rusqlite::Result<()> {
@@ -809,6 +987,7 @@ mod tests {
                 placeholder_count: 0,
                 placeholder_bytes: 0,
                 refused_managed_libraries: vec![],
+                sibling_sets: vec![],
             },
         )
     }
