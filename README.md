@@ -70,7 +70,7 @@ photodedup scan <folder> [--mode efficient|default|performance|N] [--no-videos]
 photodedup apply  [db] [--commit]      # dry run unless --commit
 photodedup batches [db]                # what is in quarantine
 photodedup undo <batch-id> [db]
-photodedup serve [db]                  # the review UI in a browser
+photodedup serve [db] [--open]         # the review UI in a browser (prints the address; --open opens it)
 photodedup check-sidecar <binary>...   # refuse a GPL ffmpeg
 ```
 
