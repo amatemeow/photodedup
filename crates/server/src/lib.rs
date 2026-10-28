@@ -50,6 +50,13 @@ pub async fn build_with_ui(
     ui_dir: Option<PathBuf>,
 ) -> anyhow::Result<(TcpListener, Router, ServerInfo)> {
     let store = photodedup_core::store::Store::open(db_path)?;
+    // A crash mid-apply leaves a journalled batch half-done; reconcile it
+    // with what is actually on disk before serving anything.
+    match photodedup_core::apply::recover(&store) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("photodedup: finished {n} interrupted apply batch(es)"),
+        Err(e) => eprintln!("photodedup: could not check for interrupted batches: {e}"),
+    }
     let token = auth::new_token();
     let cache_dir = routes::files::init_cache_dir(db_path)?;
     let state = AppState {
@@ -69,6 +76,10 @@ pub async fn build_with_ui(
         .route("/api/jobs/{id}/cancel", post(routes::jobs::cancel_job))
         .route("/api/jobs/{id}/events", get(routes::jobs::job_events))
         .route("/api/scans/{id}/orphan-videos", get(routes::scans::list_orphan_videos))
+        .route("/api/scans/{id}/apply/plan", get(routes::apply::preview))
+        .route("/api/scans/{id}/apply", post(routes::apply::run))
+        .route("/api/batches", get(routes::apply::batches))
+        .route("/api/batches/{id}/undo", post(routes::apply::undo))
         .route("/api/files/{id}/analysis", get(routes::scans::get_analysis))
         .route(
             "/api/scans/{id}/decisions",
@@ -175,6 +186,7 @@ mod tests {
             placeholder_count: 0,
             placeholder_bytes: 0,
             refused_managed_libraries: vec![],
+            sibling_sets: vec![],
         };
         let scan_id = {
             let mut store = photodedup_core::store::Store::open(tmp.path()).unwrap();
@@ -340,6 +352,7 @@ mod tests {
             placeholder_count: 0,
             placeholder_bytes: 0,
             refused_managed_libraries: vec![],
+            sibling_sets: vec![],
         };
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let scan_id = photodedup_core::store::Store::open(tmp.path()).unwrap().save_scan(&root, &result).unwrap();
@@ -370,6 +383,138 @@ mod tests {
         assert_eq!(orphans[0]["reason"], "no_match");
     }
 
+    /// A server over real files on disk: `files` are created under a temp
+    /// root and scanned into one cluster whose keeper is the first.
+    async fn server_over_real_files(files: &[(&str, &[u8])]) -> (Router, ServerInfo, String, std::path::PathBuf, tempfile::TempDir) {
+        use photodedup_core::model::{FileRecord, MediaClassSerde};
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let mut records = Vec::new();
+        for (i, (rel, body)) in files.iter().enumerate() {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+            let meta = std::fs::metadata(&p).unwrap();
+            records.push(FileRecord {
+                id: i as u32,
+                path: p.clone(),
+                file_name: p.file_name().unwrap().to_string_lossy().into(),
+                media_class: MediaClassSerde::Image,
+                size_bytes: meta.len(),
+                mtime_unix: meta.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64,
+                is_placeholder: false,
+            });
+        }
+        let result = photodedup_core::pipeline::PipelineResult {
+            clusters: vec![photodedup_core::pipeline::Cluster {
+                tier: "T1",
+                members: (0..files.len() as u32).collect(),
+                keeper: 0,
+                reasons: vec![],
+            }],
+            files: records,
+            analyzed: Default::default(),
+            review_pairs: vec![],
+            burst_runs: vec![],
+            video_matches: vec![],
+            orphan_videos: vec![],
+            unknown_provenance_videos: vec![],
+            placeholder_count: 0,
+            placeholder_bytes: 0,
+            refused_managed_libraries: vec![],
+            sibling_sets: vec![],
+        };
+        // The database lives OUTSIDE the scanned folder, as it must.
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let scan_id = photodedup_core::store::Store::open(db.path()).unwrap().save_scan(&root, &result).unwrap();
+        let (_l, router, info) = build(db.path()).await.unwrap();
+        std::mem::forget(db);
+        (router, info, scan_id, root, dir)
+    }
+
+    async fn call(router: &Router, method: &str, uri: String, body: &str) -> (u16, serde_json::Value) {
+        let res = send(
+            router,
+            axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await;
+        let status = res.status().as_u16();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    }
+
+    #[tokio::test]
+    async fn preview_apply_list_and_undo_work_end_to_end_and_need_explicit_confirmation() {
+        let (router, info, scan, root, _dir) = server_over_real_files(&[("keep.jpg", b"the original"), ("dup.jpg", b"copy")]).await;
+        let t = &info.token;
+
+        // mark the duplicate for quarantine
+        let (s, _) = call(&router, "PUT", format!("/api/scans/{scan}/decisions?token={t}"), r#"{"relative_path":"dup.jpg","keep":false}"#).await;
+        assert_eq!(s, 204);
+
+        // the dry run touches nothing
+        let (s, plan) = call(&router, "GET", format!("/api/scans/{scan}/apply/plan?token={t}"), "").await;
+        assert_eq!(s, 200);
+        assert_eq!(plan["items"][0]["relative_path"], "dup.jpg");
+        assert!(root.join("dup.jpg").exists());
+
+        // no confirmation, no move
+        let (s, _) = call(&router, "POST", format!("/api/scans/{scan}/apply?token={t}"), "{}").await;
+        assert_eq!(s, 400);
+        assert!(root.join("dup.jpg").exists());
+
+        let (s, done) = call(&router, "POST", format!("/api/scans/{scan}/apply?token={t}"), r#"{"confirm":true}"#).await;
+        assert_eq!(s, 200);
+        assert_eq!(done["moved"], 1);
+        assert!(!root.join("dup.jpg").exists() && root.join("keep.jpg").exists());
+
+        let (_, batches) = call(&router, "GET", format!("/api/batches?token={t}"), "").await;
+        assert_eq!(batches[0]["state"], "done");
+        assert_eq!(batches[0]["in_quarantine"], 1);
+        let batch_id = batches[0]["id"].as_str().unwrap().to_string();
+
+        let (s, undone) = call(&router, "POST", format!("/api/batches/{batch_id}/undo?token={t}"), "").await;
+        assert_eq!(s, 200);
+        assert_eq!(undone["restored"], 1);
+        assert_eq!(std::fs::read(root.join("dup.jpg")).unwrap(), b"copy");
+
+        let (s, _) = call(&router, "POST", format!("/api/batches/{batch_id}/undo?token={t}"), "").await;
+        assert_eq!(s, 409, "already undone");
+        let (s, _) = call(&router, "POST", format!("/api/batches/not-a-uuid/undo?token={t}"), "").await;
+        assert!(s == 400 || s == 404);
+    }
+
+    #[tokio::test]
+    async fn applying_with_nothing_marked_is_a_conflict_and_moves_nothing() {
+        let (router, info, scan, root, _dir) = server_over_real_files(&[("a.jpg", b"one"), ("b.jpg", b"two")]).await;
+        let (s, _) = call(&router, "POST", format!("/api/scans/{scan}/apply?token={}", info.token), r#"{"confirm":true}"#).await;
+        assert_eq!(s, 409);
+        assert!(root.join("a.jpg").exists() && root.join("b.jpg").exists());
+    }
+
+    #[tokio::test]
+    async fn a_file_swapped_for_a_symlink_after_the_scan_cannot_be_read_through_the_server() {
+        let (router, info, scan, root, _dir) = server_over_real_files(&[("a.jpg", b"one"), ("b.jpg", b"two")]).await;
+        let secret = tempfile::tempdir().unwrap();
+        std::fs::write(secret.path().join("secret.txt"), b"top secret").unwrap();
+
+        let (_, clusters) = call(&router, "GET", format!("/api/scans/{scan}/clusters?token={}", info.token), "").await;
+        let id = clusters[0]["members"][0]["id"].as_str().unwrap().to_string(); // a.jpg
+        // a.jpg is replaced with a link to a file outside the folder
+        std::fs::remove_file(root.join("a.jpg")).unwrap();
+        std::os::unix::fs::symlink(secret.path().join("secret.txt"), root.join("a.jpg")).unwrap();
+
+        for kind in ["original", "thumb", "preview"] {
+            let res = send(&router, axum::http::Request::get(format!("/files/{id}/{kind}?token={}", info.token)).body(axum::body::Body::empty()).unwrap()).await;
+            assert_eq!(res.status(), 404, "{kind}");
+        }
+    }
+
     #[tokio::test]
     async fn a_stale_scan_id_is_not_found_everywhere_not_empty_and_not_a_server_error() {
         let (router, info, _scan_id, _root) = test_server_with_scan().await;
@@ -388,6 +533,8 @@ mod tests {
             json("GET", format!("/api/scans/{stale}/review-pairs?token={t}"), ""),
             json("GET", format!("/api/scans/{stale}/burst-runs?token={t}"), ""),
             json("GET", format!("/api/scans/{stale}/orphan-videos?token={t}"), ""),
+            json("GET", format!("/api/scans/{stale}/apply/plan?token={t}"), ""),
+            json("POST", format!("/api/scans/{stale}/apply?token={t}"), r#"{"confirm":true}"#),
             json("GET", format!("/api/scans/{stale}/decisions?token={t}"), ""),
             json("PUT", format!("/api/scans/{stale}/decisions?token={t}"), r#"{"relative_path":"a.jpg","keep":true}"#),
             json("POST", format!("/api/scans/{stale}/decisions/bulk?token={t}"), r#"[{"relative_path":"a.jpg","keep":true}]"#),

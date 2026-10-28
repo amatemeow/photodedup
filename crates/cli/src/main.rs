@@ -29,6 +29,19 @@ async fn main() -> anyhow::Result<()> {
             });
             run_scan(&PathBuf::from(path), intensity, !args.iter().any(|a| a == "--no-videos"));
         }
+        "apply" => {
+            let commit = args.iter().any(|a| a == "--commit");
+            let db = db_arg(&args, 2);
+            apply_cmd(&db, commit);
+        }
+        "undo" => {
+            let Some(id) = args.get(2) else {
+                eprintln!("usage: photodedup undo <batch-id> [db-path]");
+                std::process::exit(2);
+            };
+            undo_cmd(id, &db_arg(&args, 3));
+        }
+        "batches" => batches_cmd(&db_arg(&args, 2)),
         "serve" => {
             let db_path = args.get(2).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".photodedup-scan.sqlite3"));
             serve(db_path).await?;
@@ -46,6 +59,9 @@ fn print_usage() {
     println!("    --mode performance   every logical core, no scheduling downgrade -- fastest, most resource-hungry");
     println!("    --mode N             an explicit worker count, no automatic scheduling hint");
     println!("    --no-videos          leave videos out of the scan entirely (not listed, hashed, probed or matched)");
+    println!("  apply [db-path] [--commit]   show what applying your decisions would move (a dry run); with --commit, move it to quarantine");
+    println!("  batches [db-path]            list what has been moved to quarantine");
+    println!("  undo <batch-id> [db-path]    put a batch back where it came from");
     println!("  serve [db-path]   start the review server (browser fallback -- M4's native shell calls photodedup-server directly instead)");
     println!("(report/apply/undo land with later M1 work -- see ROADMAP.md)");
 }
@@ -56,6 +72,102 @@ fn print_usage() {
 fn find_ui_dir() -> Option<PathBuf> {
     let dir = std::env::var_os("PHOTODEDUP_UI_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("ui/dist"));
     dir.join("index.html").is_file().then_some(dir)
+}
+
+/// The database path argument at `idx`, unless it is a flag.
+fn db_arg(args: &[String], idx: usize) -> PathBuf {
+    args.get(idx)
+        .filter(|a| !a.starts_with("--"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".photodedup-scan.sqlite3"))
+}
+
+fn open_store(db: &PathBuf) -> Store {
+    if !db.exists() {
+        eprintln!("no database at {} -- run `photodedup scan <path>` first", db.display());
+        std::process::exit(2);
+    }
+    Store::open(db).unwrap_or_else(|e| {
+        eprintln!("could not open {}: {e}", db.display());
+        std::process::exit(1);
+    })
+}
+
+fn fmt_bytes(n: u64) -> String {
+    format!("{:.1} MB", n as f64 / 1_048_576.0)
+}
+
+/// Dry run unless `--commit`. Nothing is deleted either way: files move
+/// into `<folder>/.photodedup-quarantine/<time>/` and can be undone.
+fn apply_cmd(db: &PathBuf, commit: bool) {
+    let store = open_store(db);
+    let Some(scan) = store.list_scans().ok().and_then(|s| s.into_iter().next()) else {
+        eprintln!("no scan in {}", db.display());
+        std::process::exit(2);
+    };
+    let plan = match photodedup_core::apply::plan(&store, &scan.id) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    println!("folder: {}", plan.root_path);
+    println!("{} file(s), {} would move to quarantine", plan.items.len(), fmt_bytes(plan.total_bytes));
+    for i in &plan.items {
+        println!("  {}{}", i.relative_path, if i.is_sibling { "   (companion)" } else { "" });
+    }
+    for b in &plan.blocked {
+        println!("  refused: {} -- {}", b.relative_path, b.reason);
+    }
+    if !commit {
+        println!("\ndry run: nothing was moved. Re-run with --commit to move these files (nothing is deleted; `undo` puts them back).");
+        return;
+    }
+    match photodedup_core::apply::execute(&store, &scan.id) {
+        Ok(r) => {
+            println!("\nmoved {} file(s) ({})", r.moved, fmt_bytes(r.moved_bytes));
+            for s in &r.skipped {
+                println!("  left in place: {} -- {}", s.relative_path, s.reason);
+            }
+            if let Some(id) = r.batch_id {
+                println!("batch {id}\nundo with: photodedup undo {id}");
+            }
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn batches_cmd(db: &PathBuf) {
+    let store = open_store(db);
+    match photodedup_core::apply::list_batches(&store) {
+        Ok(b) if b.is_empty() => println!("no batches"),
+        Ok(batches) => {
+            for b in batches {
+                println!("{}  {}  {} file(s) in quarantine ({})  [{}]", b.id, b.created_at, b.in_quarantine, fmt_bytes(b.in_quarantine_bytes), b.state);
+            }
+        }
+        Err(e) => eprintln!("{e}"),
+    }
+}
+
+fn undo_cmd(id: &str, db: &PathBuf) {
+    let store = open_store(db);
+    match photodedup_core::apply::undo(&store, id) {
+        Ok(r) => {
+            println!("restored {} file(s)", r.restored);
+            for s in &r.skipped {
+                println!("  still in quarantine: {} -- {}", s.relative_path, s.reason);
+            }
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 async fn serve(db_path: PathBuf) -> anyhow::Result<()> {

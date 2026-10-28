@@ -10,7 +10,7 @@ use crate::exacthash::find_exact_duplicates;
 use crate::hash::{phash256, sharpness, Hash256};
 use crate::keeper::{pick_keeper, score as keeper_score};
 use crate::metadata::{extract_image, extract_video};
-use crate::model::{FileId, FileRecord, MediaClassSerde};
+use crate::model::{FileId, FileRecord, MediaClassSerde, SiblingSet};
 use crate::provenance::{evaluate, Origin, Provenance};
 use crate::resolve::{detect_burst_runs, resolve_t1_edges, resolve_t1b_edges, split_runs_by_similarity, BurstRun, BURST_VISUAL_MAX_DIST};
 use crate::scan::scan;
@@ -112,6 +112,9 @@ pub struct PipelineResult {
     pub placeholder_count: u32,
     pub placeholder_bytes: u64,
     pub refused_managed_libraries: Vec<PathBuf>,
+    /// RAW/sidecar/Live-Photo companions of each primary file. Saved so
+    /// that applying a decision to a photo moves its companions with it.
+    pub sibling_sets: Vec<SiblingSet>,
 }
 
 /// Entry point. Builds a worker pool sized per `opts.intensity`, lowers OS
@@ -421,6 +424,7 @@ fn run_inner(root: &Path, opts: &PipelineOptions, on_progress: &(dyn Fn(Progress
         placeholder_count: scan_report.placeholder_count,
         placeholder_bytes: scan_report.placeholder_bytes,
         refused_managed_libraries: scan_report.refused_managed_libraries,
+        sibling_sets: scan_report.sibling_sets,
     })
 }
 

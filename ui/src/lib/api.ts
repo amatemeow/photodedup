@@ -97,6 +97,47 @@ export interface DecisionRow {
   keep: boolean;
 }
 
+export interface PlanItem {
+  relative_path: string;
+  size_bytes: number;
+  is_sibling: boolean;
+}
+export interface Blocked {
+  relative_path: string;
+  reason: string;
+}
+export interface Plan {
+  root_path: string;
+  items: PlanItem[];
+  blocked: Blocked[];
+  total_bytes: number;
+}
+export interface Skipped {
+  relative_path: string;
+  reason: string;
+}
+export interface ApplyResult {
+  batch_id: string | null;
+  moved: number;
+  moved_bytes: number;
+  skipped: Skipped[];
+  blocked: Blocked[];
+}
+export interface UndoResult {
+  restored: number;
+  skipped: Skipped[];
+}
+export interface Batch {
+  id: string;
+  created_at: string;
+  state: 'running' | 'done' | 'partially_undone' | 'undone';
+  quarantine_dir: string;
+  root_path: string;
+  in_quarantine: number;
+  in_quarantine_bytes: number;
+  restored: number;
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -136,6 +177,12 @@ export const api = {
     call<void>(`/api/scans/${scanId}/decisions/bulk`, { method: 'POST', body: JSON.stringify(rows) }),
   clearDecision: (scanId: string, relativePath: string) =>
     call<void>(`/api/scans/${scanId}/decisions?relative_path=${encodeURIComponent(relativePath)}`, { method: 'DELETE' }),
+
+  applyPlan: (scanId: string) => call<Plan>(`/api/scans/${scanId}/apply/plan`),
+  apply: (scanId: string) =>
+    call<ApplyResult>(`/api/scans/${scanId}/apply`, { method: 'POST', body: JSON.stringify({ confirm: true }) }),
+  batches: () => call<Batch[]>('/api/batches'),
+  undoBatch: (batchId: string) => call<UndoResult>(`/api/batches/${batchId}/undo`, { method: 'POST' }),
 
   /** For `<img>`/`<video>` `src`, which can't send an Authorization header. */
   fileUrl: (fileId: string, kind: 'thumb' | 'preview' | 'original') =>

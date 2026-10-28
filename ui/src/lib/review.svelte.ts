@@ -204,6 +204,10 @@ export class Review {
 
   counts = $derived(this.countsByTab[this.tab]);
 
+  /** Files the user has marked Quarantine, so far (a rough count: the exact
+   * plan, with companions and refusals, comes from the server). */
+  markedCount = $derived(Object.values(this.decisions).filter((keep) => keep === false).length);
+
   tabCount(t: Tab): number {
     return this.countsByTab[t].all;
   }

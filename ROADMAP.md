@@ -281,8 +281,7 @@ as a choice.
     them.
   - New API: `POST /api/scans/{id}/decisions/bulk` (one transaction) and
     `DELETE /api/scans/{id}/decisions?relative_path=` (back to undecided,
-    for undo). Quarantine itself is not built: decisions are only
-    recorded; applying them (move to quarantine, with undo) is M3.
+    for undo). Applying them (move to quarantine, with undo) is M3, below.
   - The decision logic has unit tests (`npm test`); **the screen itself is
     not yet verified in a real browser.** Still to build: the Options tab,
     and virtualizing the overview grid for libraries much larger than the 182 clusters tested.
@@ -425,4 +424,93 @@ as a choice.
     `analyzing_videos`, then `videos` (matching); the screen says "N of M
     photos" or "N of M videos" accordingly, and when videos are excluded
     neither video phase is announced.
+
+## M3: applying decisions (quarantine, undo)
+
+The first thing in this project that moves a user's files, built around two
+promises the user asked for explicitly: **the app never leaves the folder it
+was pointed at, and never makes a change that can't be undone.**
+
+- **One guarded door** (`core/src/fsguard.rs`). Nothing else in the engine
+  changes the filesystem. A `Workspace` is a canonicalized root; every path
+  is a *validated relative path* (plain names only: no `..`, no root or
+  drive prefix, no empty or NUL, nothing inside a managed library, `.git`
+  or our own quarantine) checked component by component to contain no
+  symlink. The only operations: move a file into the quarantine folder,
+  move it back, create folders, write a manifest inside a batch folder.
+  **There is no delete and no overwrite**: a move onto an existing path is
+  refused in both directions. The one `remove_file` is the tail of a
+  cross-volume move, after the copy is verified by hash, so the net effect
+  is still a move. Journal rows are re-validated on every use, so a
+  tampered database can't redirect a move or an undo.
+- **Quarantine layout:** `<root>/.photodedup-quarantine/<UTC timestamp>/`,
+  preserving each file's relative path, with `manifest.csv` and
+  `manifest.json` beside the files so a batch can be understood and undone
+  by hand. The scanner skips this folder, so a re-scan never mistakes
+  quarantined copies for library files.
+- **Dry run first** (`apply::plan`): read-only. Only files the user
+  explicitly marked Quarantine are candidates; undecided files and anything
+  marked Keep are never planned. Companions (RAW, XMP, the video of a Live
+  Photo) are planned with their photo; sibling sets are now saved in the
+  database for that. Refused, with a reason shown: a group of two or more
+  where every member is marked (the UI prevents it, the engine doesn't
+  trust the UI), cloud-only placeholders, unsafe paths.
+- **Journalled apply** (`apply::execute`): each file is re-checked against
+  what the scan saw (size and modification time; a changed, vanished or
+  link-swapped file is skipped and reported, not moved), the **whole batch
+  is written to the journal before anything moves**, then files move one at
+  a time, each marked `moved` as it lands. Needs `{"confirm": true}` over
+  HTTP. Applying twice moves nothing twice and leaves no empty batch.
+- **Undo** (`apply::undo`): restores a batch, never overwriting; if
+  something now sits at a file's original place that file stays in
+  quarantine and is reported, and undo can be repeated. It works after a
+  re-scan, because the journal tables (`apply_batches`, `apply_items`)
+  deliberately have no link to scans.
+- **Crash recovery** (`apply::recover`, run at server start): a batch left
+  `running` is reconciled with what is actually on disk (in quarantine and
+  gone from its place = moved; still in place = not moved; anything else is
+  flagged for a human, not guessed at).
+- **Reads are contained too:** the thumbnail, preview and original routes
+  open files through the same guard, so a file replaced by a link to
+  somewhere else after the scan can't be used to read outside the folder
+  (tested over HTTP). A scan is refused if the database's thumbnail cache
+  would sit inside the folder being scanned.
+- **UI:** an *Apply (N)…* button opens a panel with the dry-run list (and
+  anything refused), an explicit "Move N files to quarantine" confirmation,
+  and a list of previous batches with Undo. After a move the review shows a
+  notice that it no longer matches the folder; scan again to refresh.
+  **CLI:** `apply [db] [--commit]` (dry run by default), `batches`, `undo`.
+- **How it was tested:** adversarial unit tests (traversal strings,
+  symlinked folders and files, a symlinked quarantine folder, forged
+  journal rows, pre-existing destinations, changed/vanished files, a
+  simulated crash, 20 randomized apply/undo round trips that must restore
+  the folder exactly) -- and the tests were themselves checked by
+  deliberately breaking three guards (allowing `..`, allowing overwrite,
+  following symlinks) and confirming tests fail; one test that passed for
+  the wrong reason was found that way and fixed. Plus a real round trip on
+  a scratch copy of 28 reference photos (including a re-scan between apply
+  and undo): sha256 and modification time identical afterwards, reference
+  dataset untouched.
+
+**Known limits, not hidden:**
+- *Windows:* the plan's long-path (`\\?\`) prefix, reserved device names and
+  trailing dots/spaces are **not implemented**, and none of this has been
+  run on Windows. The symlink tests are Unix-only.
+- *The cross-volume copy-verify-delete path* is unit-tested on one volume
+  (copy, hash check, cleanup on failure) but has not run across two real
+  volumes. In practice the quarantine folder lives inside the scanned
+  folder, so it is rarely needed.
+- *Verification is size + modification time, not a re-hash.* The plan said
+  "re-hash if cheap"; a same-size, same-second edit would not be noticed.
+- *A time-of-check/time-of-use race* (a folder swapped for a link between
+  the check and the rename) is not defended against; each check is repeated
+  immediately before the operation it guards. Single-user tool, own folder.
+- *Apply holds the database lock while it moves files*, so other requests
+  wait for the batch; fine for renames, slow for a huge cross-volume copy.
+  No progress is reported during an apply.
+- After a full undo the batch folder keeps its two manifests. Harmless, and
+  a record of what happened, but it does leave a small folder behind.
+- Re-scanning replaces the scan and the decisions made on it (see the
+  single-live-scan entry), so files still in quarantine from a batch can
+  be undone but any decisions not yet applied are lost.
 
