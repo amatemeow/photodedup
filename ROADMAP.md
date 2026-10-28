@@ -20,7 +20,7 @@ shaped these decisions.
 | **Windows code signing (SmartScreen)** | OV certs now require hardware tokens/HSM; real cost | SignPath.io's free OSS tier is the planned path if users report friction; artifact build is already reproducible via GitHub Actions, which SignPath needs |
 | **Windows background-scheduling equivalent** (`SetPriorityClass(..., BELOW_NORMAL_PRIORITY_CLASS)`, `THREAD_MODE_BACKGROUND_BEGIN`) | No Windows target to verify against yet; didn't want a `windows-sys` dependency added speculatively | `platform::noop::NoopScheduler` is the only thing that needs replacing — every caller already goes through the `PlatformScheduler` trait (`crates/core/src/platform/`), untouched by adding a real Windows impl |
 | **Resume-recognition beyond exact path match** | `Store::find_latest_scan_for_root` (see "Resolved during M2" below) currently matches on canonicalized path only — a folder renamed, moved to a new parent directory, or re-synced to a new local path by a cloud client (OneDrive/Dropbox/iCloud routinely do this) no longer matches its own prior scan at all, even though every file inside is identical. Not fixed now because it needs a real design decision, not just more code — **explicit user requirement, recorded here so it isn't lost**: recognize the same logical folder by content, not just path | The exact-hash pass (`exacthash.rs`) already computes a blake3 digest for every size-collision bucket, and `files` already stores `(size, mtime)` per file from day one — a content fingerprint (e.g. the multiset of `(size, blake3)` for a sample of files, or file count + total size as a cheap first-pass filter before a full comparison) is additive, not a schema change. The harder part is UX, not storage — **see the suggested prompt copy right below the table.** |
-| **More tunable settings, and seeing a setting's effect before re-scanning** | The three matching knobs shipped (see "Options tab"). Still deferred: the video-matching distances (duration tolerance, frame-match distance); a live preview of what a new value would do (the sequence split could re-run over stored hashes, but only the post-split groups are saved, not the raw time-runs it starts from); and recording which values each scan used, so an old scan can say so (needs a column on `scans`) | The thresholds are one `Thresholds` struct with named ranges (`core/src/thresholds.rs`) passed explicitly through the engine, and the `settings` table is a plain key/value store, so another knob is a field, a range and a row in the UI |
+| **More tunable settings, and seeing a setting's effect without re-scanning** | The three matching knobs shipped (see "Options tab"). Still deferred: the video-matching distances (duration tolerance, frame-match distance), and re-grouping in place. The settings take effect on the next scan, and the review now says when its results are out of date and offers a one-click re-scan that keeps your choices -- but a true "regroup without re-scanning" would recompute groups from the stored analysis (capture time, camera, fingerprint, provenance are all saved) and needs the pipeline's second half split out and the exact-duplicate and video edges persisted | The thresholds are one `Thresholds` struct with named ranges (`core/src/thresholds.rs`) passed explicitly through the engine, and the `settings` table is a plain key/value store, so another knob is a field, a range and a row in the UI |
 | **Several scans alive at once** (per-folder history, switching between scans, comparing two) | For now exactly one scan is live: saving a new one deletes the previous scan, including its decisions (user's call). Needs a real design decision about when a scan may be discarded, and what a re-scan of the same folder does with the decisions already made on it (carry over by relative path?) | Every database id is a UUID, so nothing in the API assumes there is only one scan. `save_scan` is the single place that deletes the old one (`delete_all_scans`), and decisions are already keyed by relative path rather than file id, so carrying them across a re-scan is additive |
 
 **Suggested UX for the resume-recognition item above (don't lose this when it gets built):**
@@ -581,4 +581,42 @@ than its `library/` folder) works, and creates the quarantine folder one
 level up. That is the guard doing what it should, since the "workspace" is
 whichever folder you scan. It happened during first use: 18 files moved,
 all accounted for in the manifest, 34 + 18 = the 52 that were created.
+
+### Making the sliders testable (after first use)
+
+First feedback: "hard to tell if sliders work on the test dataset". The cause
+was the loop, not the sliders: nothing on screen changed when a slider moved,
+re-scanning threw away your choices, and on a 51-file folder the swings are
+small. Fixed on three fronts:
+
+- **Each scan records what it was made with** (`scan_settings` table, one row
+  per scan; `GET /api/scans/{id}/info`). The review shows, under each tab's
+  description, the settings that shaped that tab ("Found with sequence
+  similarity 80 and sequence time gap 3 s."). When the saved settings differ
+  from the scan's, a banner lists exactly what moved ("sequence time gap:
+  3 s -> 10 s") and offers **Scan again**, which repeats the scan on the same
+  folder with the same include-videos choice.
+- **Re-scanning keeps your choices.** A re-scan of the same folder carries
+  over each keep/quarantine decision whose file is still there and looks
+  exactly as it did (same size and modification time). A file that was edited
+  or removed, or a different folder, inherits nothing, because the choice was
+  about a file that is no longer that file. This also removes the earlier
+  wart that "Scan again" threw away a review in progress. (It reverses one
+  line of the single-live-scan entry above: decisions are no longer lost on a
+  re-scan of the same folder.)
+- **A second test folder built to show the sliders**, `~/photodedup-slider-demo/`
+  (46 real photos, `reset.sh`, README). Its README has a table of what each
+  tab should read at each slider position, measured with the engine on those
+  exact files: e.g. Same-device review goes 0 / 5 / 7 / 12 / 14 as copy match
+  distance goes 25 / 35 / 45 / 55 / 60, and the photos in Quick sequences go
+  14 / 24 / 28 / 30 as similarity goes 40 / 60 / 80 / 100.
+- **Finding the right test photos was itself informative:** real same-device
+  look-alike pairs are 4-30 seconds apart (none within 70 fingerprint bits
+  are further apart than that), i.e. just outside the default 3 s sequence
+  gap. So the time-gap slider is also what moves a pair between "look-alike"
+  and "in a sequence" (10 look-alike pairs at a 1 s gap, 0 at 30 s).
+- A near-miss, caught before it ran: my first version of recording the scan
+  settings locked the database twice inside one `match`, which would have
+  deadlocked every scan at its end. The save is now a small function that
+  takes and releases the lock per step.
 

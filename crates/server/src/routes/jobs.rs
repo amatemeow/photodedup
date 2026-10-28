@@ -114,7 +114,7 @@ pub async fn start_scan(State(state): State<AppState>, Json(body): Json<StartBod
             // Nothing is saved for a cancelled scan: a half-analyzed
             // result isn't a scan anyone could meaningfully resume.
             Ok(None) => JobStatus::Cancelled,
-            Ok(Some(result)) => match store.lock().unwrap().save_scan(&root, &result) {
+            Ok(Some(result)) => match save_and_record(&store, &root, &result, &opts) {
                 Ok(scan_id) => {
                     // The previous scan is gone; so are its thumbnails.
                     super::files::clear_cache(&cache_dir);
@@ -128,6 +128,23 @@ pub async fn start_scan(State(state): State<AppState>, Json(body): Json<StartBod
     });
 
     Ok((StatusCode::ACCEPTED, Json(StartDto { job_id })))
+}
+
+/// Saves the scan, then notes what it was made with so the review can say
+/// so and notice when the saved settings move on. The lock is taken and
+/// released per step (never held across both). A failure to record the
+/// settings costs only that note, not the scan.
+fn save_and_record(
+    store: &std::sync::Mutex<photodedup_core::store::Store>,
+    root: &std::path::Path,
+    result: &photodedup_core::pipeline::PipelineResult,
+    opts: &PipelineOptions,
+) -> rusqlite::Result<String> {
+    let scan_id = store.lock().unwrap().save_scan(root, result)?;
+    if let Err(e) = store.lock().unwrap().record_scan_settings(&scan_id, &opts.thresholds, opts.include_videos) {
+        eprintln!("server error: could not record scan settings: {e}");
+    }
+    Ok(scan_id)
 }
 
 fn find_job(state: &AppState, id: u64) -> Result<tokio::sync::watch::Receiver<JobStatus>, StatusCode> {
@@ -277,6 +294,10 @@ mod tests {
         let JobStatus::Done { scan_id } = events.last().unwrap().clone() else {
             panic!("expected done, got {:?}", events.last());
         };
+        // the scan remembers what it was made with
+        let (used, with_videos) = state.store.lock().unwrap().get_scan_settings(&scan_id).unwrap().expect("settings recorded");
+        assert_eq!(used, photodedup_core::thresholds::Thresholds::default());
+        assert!(with_videos);
         assert!(state.store.lock().unwrap().get_scan(&scan_id).unwrap().is_some());
         assert!(matches!(&*job_status(State(state), AxPath(dto.job_id)).await.unwrap(), JobStatus::Done { .. }));
     }

@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { Review, tabInfo, tabs, type Filter, type Sort, type Tab } from './lib/review.svelte';
+  import { api, type ScanInfo, type Settings } from './lib/api';
+  import { changedSince, usedLine } from './lib/knobs';
   import Overview from './Overview.svelte';
   import Detail from './Detail.svelte';
   import Apply from './Apply.svelte';
 
-  let { scanId, onExit }: { scanId: string; onExit: () => void } = $props();
+  let { scanId, onExit, onRescan }: { scanId: string; onExit: () => void; onRescan: (root: string, includeVideos: boolean) => void } = $props();
 
   // Constructed once per mounted scan. The shell is re-created if the user
   // opens another scan, so capturing the initial id is intended.
@@ -22,8 +24,20 @@
 
   const undoKey = /Mac|iPhone|iPad/i.test(navigator.userAgent) ? '⌘Z' : 'Ctrl+Z';
 
+  // What this scan was made with, and what is saved now: when they differ
+  // the results are out of date, and the banner says how.
+  let info = $state<ScanInfo | null>(null);
+  let saved = $state<Settings | null>(null);
+  const changes = $derived(changedSince(info?.used ?? null, saved));
+
   onMount(() => {
     review.load();
+    Promise.all([api.scanInfo(scanId), api.settings()])
+      .then(([i, s]) => {
+        info = i;
+        saved = s;
+      })
+      .catch(() => {}); // the banner is a convenience; the review works without it
   });
 
   const current = $derived(currentId === null ? null : (review.groups.find((g) => g.id === currentId) ?? null));
@@ -134,6 +148,14 @@
     <p class="error" role="alert">{review.error} <button class="link" onclick={() => (review.error = '')}>Dismiss</button></p>
   {/if}
 
+  {#if changes.length && info?.used}
+    <p class="stale" role="status">
+      Matching settings changed since this scan ({changes.join('; ')}), so what you see was found with the old values.
+      Scanning again applies them; your keep/quarantine choices on files that haven't changed are kept.
+      <button class="link" onclick={() => onRescan(info!.root_path, info!.used!.include_videos)}>Scan again</button>
+    </p>
+  {/if}
+
   {#if moved}
     <p class="stale" role="status">
       Files were moved to quarantine, so what you see below no longer matches the folder. Go back and scan it again to refresh.
@@ -164,7 +186,10 @@
         onAccept={acceptAndNext}
       />
     {:else}
-      <p class="blurb">{tabInfo[review.tab].blurb}</p>
+      <p class="blurb">
+        {tabInfo[review.tab].blurb}
+        {#if usedLine(review.tab, info?.used ?? null)}<span class="used">{usedLine(review.tab, info?.used ?? null)}</span>{/if}
+      </p>
 
       <nav class="filters" aria-label="Filter">
         {#each [['all', 'All', review.counts.all], ['undecided', 'Undecided', review.counts.undecided], ['changed', 'Changed', review.counts.changed]] as const as [key, label, n]}
@@ -255,6 +280,10 @@
     border-radius: 8px;
     padding: 0.5rem 0.8rem;
     margin: 0 0 0.75rem;
+  }
+  .used {
+    white-space: nowrap;
+    opacity: 0.85;
   }
   .tabs {
     display: flex;

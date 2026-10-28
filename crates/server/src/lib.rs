@@ -68,6 +68,7 @@ pub async fn build_with_ui(
 
     let protected = Router::new()
         .route("/api/scans", get(routes::scans::list_scans))
+        .route("/api/scans/{id}/info", get(routes::scans::scan_info))
         .route("/api/scans/{id}/clusters", get(routes::scans::list_clusters))
         .route("/api/scans/{id}/review-pairs", get(routes::scans::list_review_pairs))
         .route("/api/scans/{id}/burst-runs", get(routes::scans::list_burst_runs))
@@ -605,6 +606,7 @@ mod tests {
                 .unwrap()
         };
         let cases = [
+            json("GET", format!("/api/scans/{stale}/info?token={t}"), ""),
             json("GET", format!("/api/scans/{stale}/clusters?token={t}"), ""),
             json("GET", format!("/api/scans/{stale}/review-pairs?token={t}"), ""),
             json("GET", format!("/api/scans/{stale}/burst-runs?token={t}"), ""),
