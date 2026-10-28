@@ -150,7 +150,7 @@
             {#if group.suggested.has(m.id) && !isBurst}<span class="badge overlay accent"><Icon name="check" size={11} /> Suggested</span>{/if}
             {#if isBurst && group.suggested.has(m.id)}<span class="badge overlay accent"><Icon name="sparkles" size={11} /> Sharpest</span>{/if}
           </span>
-          {#if !keep}<span class="veil"><span class="badge overlay warning">Will be quarantined</span></span>{/if}
+          {#if !keep}<span class="dim" aria-hidden="true"></span><span class="veil"><span class="badge overlay warning">Will be quarantined</span></span>{/if}
         </button>
 
         <div class="info">
@@ -294,9 +294,6 @@
   .photo img.high:global(.in) {
     opacity: 1;
   }
-  article.aside .photo img {
-    filter: grayscale(0.7) brightness(0.8);
-  }
   .loading {
     position: absolute;
     left: 50%;
@@ -336,6 +333,16 @@
     right: var(--s2);
     display: flex;
     gap: var(--s1);
+  }
+  /* A quarantined photo is dimmed by an overlay that leaves the DOM when you
+     choose Keep. (A class-toggled CSS filter on the image stayed applied in
+     WebKit, the desktop app's engine, after the class was removed.) */
+  .dim {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: rgb(70 70 78 / 0.5);
+    pointer-events: none;
   }
   .veil {
     position: absolute;
