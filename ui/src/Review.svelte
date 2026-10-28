@@ -48,6 +48,15 @@
 
   const current = $derived(currentId === null ? null : (review.groups.find((g) => g.id === currentId) ?? null));
   const ids = $derived(review.visible.map((g) => g.id));
+  // The photos of the next two groups, so the detail view can fetch them ahead.
+  const upcoming = $derived.by(() => {
+    if (!current) return [];
+    const at = ids.indexOf(current.id);
+    return ids
+      .slice(at + 1, at + 3)
+      .flatMap((id) => review.groups.find((g) => g.id === id)?.members ?? [])
+      .slice(0, 8);
+  });
 
   const icons: Record<Tab, Name> = { exact: 'layers', true: 'compare', burst: 'burst', similar: 'photo', orphans: 'film' };
   const overall = $derived.by(() => {
@@ -237,6 +246,7 @@
           onPrev={() => step(-1)}
           onNext={() => step(1)}
           onAccept={acceptAndNext}
+          {upcoming}
         />
       {:else}
         <div class="head">

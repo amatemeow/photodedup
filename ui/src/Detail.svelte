@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api } from './lib/api';
+  import { api, type FileDto } from './lib/api';
   import { formatBytes, formatWhen, type Group, type Review } from './lib/review.svelte';
   import Lightbox from './Lightbox.svelte';
   import Icon from './Icon.svelte';
@@ -14,6 +14,7 @@
     onPrev,
     onNext,
     onAccept,
+    upcoming = [],
   }: {
     review: Review;
     /** A dialog is open elsewhere: ignore keys. */
@@ -25,6 +26,8 @@
     onPrev: () => void;
     onNext: () => void;
     onAccept: () => void;
+    /** Photos of the next groups: fetched quietly now so they are ready when you get there. */
+    upcoming?: FileDto[];
   } = $props();
 
   let active = $state(0); // highlighted member: target of Space
@@ -60,8 +63,30 @@
     }
   }
 
+  // The server makes a sharp preview the first time it is asked for one (a few
+  // seconds for a big HEIC), so ask for the next groups' previews while the
+  // current one is being looked at. Skipped on a slow connection or when the
+  // browser has asked to save data.
+  const warmed = new Set<string>();
+  $effect(() => {
+    const save = (navigator as unknown as { connection?: { saveData?: boolean } }).connection?.saveData;
+    if (save) return;
+    const timer = setTimeout(() => {
+      for (const f of upcoming) {
+        if (f.media_class === 'Video' || warmed.has(f.id)) continue;
+        warmed.add(f.id);
+        new Image().src = api.fileUrl(f.id, 'preview');
+      }
+    }, 600); // let the photos in front of you load first
+    return () => clearTimeout(timer);
+  });
+
   /** The segmented control sets a side; clicking the side already chosen does nothing. */
-  function choose(i: number, wantKeep: boolean) {
+  function choose(i: number, wantKeep: boolean, e: MouseEvent) {
+    // A mouse click gives up the focus it took, so Enter and the number keys
+    // keep working as shortcuts afterwards; a keyboard "click" (detail 0)
+    // keeps focus where the person is.
+    if (e.detail > 0) (e.currentTarget as HTMLElement).blur();
     active = i;
     const m = group.members[i];
     if (review.effective(group, m) !== wantKeep) review.toggle(group, m);
@@ -69,9 +94,17 @@
 
   const dims = (a: { width: number | null; height: number | null } | null) => (a?.width && a?.height ? `${a.width} × ${a.height}` : '');
   const minutes = (s: number) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
-  const loaded = (e: Event) => (e.currentTarget as HTMLImageElement).classList.add('in');
-  const ready = (node: HTMLImageElement) => {
-    if (node.complete) node.classList.add('in');
+  // Which photos' sharp previews have arrived (until then a small spinner says why it looks soft).
+  let sharp = $state<Record<string, boolean>>({});
+  const loaded = (id: string) => (e: Event) => {
+    (e.currentTarget as HTMLImageElement).classList.add('in');
+    sharp[id] = true;
+  };
+  const ready = (node: HTMLImageElement, id: string) => {
+    if (node.complete && node.naturalWidth) {
+      node.classList.add('in');
+      sharp[id] = true;
+    }
   };
 </script>
 
@@ -105,12 +138,13 @@
     {#each group.members as m, i (m.id)}
       {@const keep = review.effective(group, m)}
       <article class:aside={!keep} class:active={active === i}>
-        <button class="photo" onclick={() => { active = i; previewing = i; }} title="Large preview (Space)" aria-label="Preview {m.file_name}">
+        <button class="photo" onclick={() => { active = i; previewing = i; }}  title="Large preview (Space)">
           <span class="backdrop" style="background-image:url({api.fileUrl(m.id, 'thumb')})" aria-hidden="true"></span>
           <!-- the small thumbnail is already cached (the overview used it), so the view opens at once;
                the sharp preview fades in over it when it arrives -->
           <img class="low" src={api.fileUrl(m.id, 'thumb')} alt="" decoding="async" aria-hidden="true" />
-          <img class="high" src={api.fileUrl(m.id, 'preview')} alt={m.file_name} decoding="async" onload={loaded} use:ready />
+          <img class="high" src={api.fileUrl(m.id, 'preview')} alt={m.file_name} decoding="async" onload={loaded(m.id)} use:ready={m.id} />
+          {#if !sharp[m.id] && m.media_class !== 'Video'}<span class="loading" role="status"><span class="spinner"></span> Loading full resolution…</span>{/if}
           {#if i < 9}<kbd class="idx">{i + 1}</kbd>{/if}
           <span class="flags">
             {#if group.suggested.has(m.id) && !isBurst}<span class="badge overlay accent"><Icon name="check" size={11} /> Suggested</span>{/if}
@@ -134,8 +168,8 @@
         </div>
 
         <div class="seg block" role="group" aria-label="Decision for {m.file_name}">
-          <button class="keep" aria-pressed={keep} onclick={() => choose(i, true)}>{#if keep}<Icon name="check" size={14} />{/if} Keep</button>
-          <button class="aside" aria-pressed={!keep} onclick={() => choose(i, false)}>Quarantine</button>
+          <button class="keep" aria-pressed={keep} onclick={(e) => choose(i, true, e)}>{#if keep}<Icon name="check" size={14} />{/if} Keep</button>
+          <button class="aside" aria-pressed={!keep} onclick={(e) => choose(i, false, e)}>Quarantine</button>
         </div>
       </article>
     {/each}
@@ -262,6 +296,30 @@
   }
   article.aside .photo img {
     filter: grayscale(0.7) brightness(0.8);
+  }
+  .loading {
+    position: absolute;
+    left: 50%;
+    bottom: var(--s2);
+    translate: -50% 0;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s2);
+    padding: 3px 10px 3px 8px;
+    border-radius: 999px;
+    background: rgb(20 20 22 / 0.72);
+    color: #fff;
+    font-size: var(--fs-caption);
+    font-weight: 600;
+    white-space: nowrap;
+    backdrop-filter: blur(8px);
+  }
+  .loading .spinner {
+    width: 11px;
+    height: 11px;
+    border-width: 1.5px;
+    border-color: rgb(255 255 255 / 0.35);
+    border-top-color: #fff;
   }
   .idx {
     position: absolute;

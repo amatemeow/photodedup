@@ -1,0 +1,12 @@
+{
+  "name": "photodedup-ui-audit",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Dev tooling: screenshots, an accessibility audit and an interaction-timing probe for the UI. Not part of the product build.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "axe-core": "4.14.0",
+    "playwright-core": "1.64.1"
+  }
+}

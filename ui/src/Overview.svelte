@@ -18,8 +18,6 @@
     if (focusId !== null) grid?.querySelector<HTMLElement>(`[data-id="${focusId}"]`)?.focus({ preventScroll: false });
   });
 
-  const statusText = { undecided: 'To review', partial: 'Partly decided', accepted: 'Accepted', changed: 'Edited' } as const;
-
   function columns(): number {
     return grid ? Math.max(1, getComputedStyle(grid).gridTemplateColumns.split(' ').length) : 1;
   }
@@ -57,7 +55,6 @@
     <button
       class="tile {status}"
       data-id={c.id}
-      aria-label="{formatWhen(c.capturedAt)}, {c.label}, {c.members.length} files, {statusText[status]}"
       onclick={() => onOpen(c.id)}
       onfocus={() => onFocus(c.id)}
     >
