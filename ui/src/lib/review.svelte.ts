@@ -292,8 +292,9 @@ export const tabInfo: Record<Tab, { title: string; blurb: string }> = {
     blurb: 'The same photo or video saved again, such as messenger copies and re-saves. The original is suggested.',
   },
   burst: {
-    title: 'Burst sequences',
-    blurb: 'Rapid-fire shots. Only the sharpest frame of each run is suggested; keep as many frames as you like.',
+    title: 'Quick sequences',
+    blurb:
+      'Photos of the same shot taken seconds apart on one camera, found by timestamp and by how alike they look (not by your camera\'s burst mode). Only the sharpest of each sequence is suggested; keep as many as you like.',
   },
   similar: {
     title: 'Same-device review',
