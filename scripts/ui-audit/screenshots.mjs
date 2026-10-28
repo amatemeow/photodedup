@@ -23,7 +23,7 @@ async function run(scheme, sizeName) {
   await page.waitForSelector('#root');
   await shot('01-start');
 
-  await page.getByRole('button', { name: 'Options' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
   await page.waitForSelector('text=Scan speed');
   await shot('02-options');
   await page.locator('summary').click();

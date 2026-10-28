@@ -514,7 +514,7 @@ was pointed at, and never makes a change that can't be undone.**
   single-live-scan entry), so files still in quarantine from a batch can
   be undone but any decisions not yet applied are lost.
 
-## Options tab
+## Settings tab (called Options until the UI pass)
 
 Only *permanent* preferences live here (user's decision): per-scan choices
 (**Include videos**, on the start screen) and view choices (**sort order**,
