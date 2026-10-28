@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# REUSE (https://reuse.software) licensing metadata: everything in this
+# repository is Apache-2.0 unless a more specific annotation says otherwise,
+# so the files do not each need a header.
+version = 1
+
+[[annotations]]
+path = "**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "photodedup contributors"
+SPDX-License-Identifier = "Apache-2.0"
+
+# The licence text we ship with the bundled ffmpeg, verbatim from ffmpeg's own
+# source tree. Tagged with the licence it is the text of, which is also what
+# makes REUSE consider LICENSES/LGPL-2.1-or-later.txt "used".
+[[annotations]]
+path = "sidecar/lgpl-2.1-text.txt"
+precedence = "override"
+SPDX-FileCopyrightText = "Free Software Foundation, Inc. (licence text, distributed verbatim)"
+SPDX-License-Identifier = "LGPL-2.1-or-later"
+

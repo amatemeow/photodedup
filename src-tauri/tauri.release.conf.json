@@ -1,0 +1,13 @@
+{
+  "bundle": {
+    "externalBin": [
+      "../sidecar/ffmpeg",
+      "../sidecar/ffprobe"
+    ],
+    "resources": {
+      "../sidecar/SOURCE.txt": "ffmpeg-SOURCE.txt",
+      "../sidecar/lgpl-2.1-text.txt": "ffmpeg-LICENSE.txt",
+      "../THIRD-PARTY-LICENSES.md": "THIRD-PARTY-LICENSES.md"
+    }
+  }
+}

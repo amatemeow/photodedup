@@ -1,0 +1,31 @@
+[package]
+name = "photodedup-app"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "photodedup desktop app: a native window around the local review server"
+default-run = "photodedup-app"
+
+# Its own workspace, on purpose: Tauri's dependency tree is large and only
+# the desktop app needs it, so ordinary `cargo build`/`cargo test` of the
+# engine stay fast and never see it. CI builds and gates both.
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+photodedup-core = { path = "../crates/core" }
+# `embed-ui` compiles ui/dist into the binary, so the packaged app needs no
+# files beside it. Build the UI first (the Tauri config does).
+photodedup-server = { path = "../crates/server", features = ["embed-ui"] }
+anyhow = "1"
+
+[profile.release]
+# A desktop app that ships: smaller and a little faster, at the cost of
+# build time.
+lto = "thin"
+codegen-units = 4
+strip = true

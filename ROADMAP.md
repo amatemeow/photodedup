@@ -627,3 +627,94 @@ priority after M4; the groundwork is in place (settings recorded per scan,
 stale-results banner, choices kept across a re-scan, per-slider ranges),
 and the stored analysis already holds what a regroup needs.
 
+## M4: desktop shell and packaging
+
+Built and checked on **macOS/arm64 only**. What was and wasn't verified is
+spelled out, because several parts could only be partly tested from here.
+
+### Built
+
+- **The shell** (`src-tauri/`, Tauri v2, its own Cargo workspace so its
+  dependency tree stays out of engine builds). It starts the server
+  in-process (database in the per-user app-data folder, UI compiled in via the
+  server's `embed-ui` feature), opens a native window on it, and **refuses to
+  navigate that window anywhere but its own loopback address**. The menu is
+  hand-built without the stock Undo item, because the system "Undo" binds
+  Cmd+Z and swallows the keystroke before the page's own undo can see it.
+- **Native folder picker without leaving the HTTP boundary.** The plan had the
+  UI import a Tauri package for this. Instead the shell hands the server a
+  callback, `GET /api/shell` says whether one exists, and `POST /api/pick-folder`
+  asks for it; the UI shows *Browse...* only when offered. The UI still knows
+  nothing about which shell it is in, so swapping the shell (the plan's
+  Electron/CEF escape hatch) needs no UI change, and a web page never gets
+  access to Tauri's internals.
+- **Bundled ffmpeg, as an LGPL build we make ourselves**
+  (`scripts/build-sidecar.sh`): pinned 9.0.2 source, SHA-256 verified,
+  `--disable-gpl --disable-nonfree --disable-autodetect`, static; installed as
+  `sidecar/ffmpeg-<triple>` (what Tauri's `externalBin` expects); then
+  `photodedup check-sidecar` refuses anything built with `--enable-gpl` or
+  `--enable-nonfree` (it correctly refuses this machine's Homebrew ffmpeg).
+  `sidecar/SOURCE.txt` records the exact version, source URL, checksum and
+  configure line, and ships in the app with the LGPL text.
+  - **Checked against real files:** all 8 real-photo/video tests pass on it
+    (HEIC decode and thumbnails, EXIF, ffprobe on the iPhone and OnePlus
+    videos, fingerprint parity with the Python original), and a full scan of a
+    51-file set gives results identical to the system ffmpeg's.
+  - **The engine finds it** next to the executable (`core::tools`), with
+    `PHOTODEDUP_FFMPEG` / `PHOTODEDUP_FFPROBE` overrides and `PATH` as the last
+    resort. Verified in the packaged app: with no ffmpeg on `PATH` it used its
+    own, scanned real HEIC and video files, and produced the expected groups.
+  - The start screen **warns when ffmpeg or ffprobe is missing** (before this,
+    HEIC photos and videos failed silently).
+- **Bundle, ad-hoc signed.** Found while checking: the first bundle was only
+  *linker*-signed and `codesign --verify --strict` failed ("code has no
+  resources but signature indicates they must be present"), which on Apple
+  Silicon can show as "damaged" after download. Fixed with
+  `signingIdentity: "-"`; it now verifies (identifier, sealed resources, valid
+  on disk). 11 MB without ffmpeg, 52 MB with it.
+- **Gates:** `cargo deny` passes for both the engine and the shell's tree (two
+  documented exceptions in `deny.toml`: `Apache-2.0 WITH LLVM-exception`, and
+  RUSTSEC-2024-0370, an *unmaintained* compile-time macro crate reached only
+  through the Linux GTK bindings). `reuse lint` passes on a clean checkout
+  (116 files). `cargo about` generates the attribution file (166 licence
+  texts) plus the three npm runtime packages compiled into the UI; it ships
+  inside the app. Two things these runs caught: a REUSE rule that silently
+  ignores any file with `LICENSE` in its name, and my own `.gitignore` pattern
+  for the ffmpeg binaries also ignoring the licence text beside them (it would
+  never have been committed and the release build would have failed).
+- **Docs:** `docs/INSTALL.md` (first-launch steps per OS, including the macOS 15
+  "Open Anyway" route, since right-click Open no longer works), README rewritten.
+
+### Not verified, or not done
+
+- **I have not seen the window.** No screen-recording or accessibility access
+  from here. Confirmed by other means: the app launches, serves the embedded UI
+  on a random loopback port, rejects the API without the token, and isn't
+  reachable from another interface. **Unconfirmed, needs a person:** that the
+  window opens and looks right, that *Browse...* shows the native dialog,
+  that Cmd+Z reaches the page, that the navigation guard blocks external
+  links, and what closing the window does on macOS (the app may stay running).
+- **CI and release workflows have never run.** They parse as YAML and use the
+  commands that were run locally, nothing more. The Windows and Linux legs and
+  the Intel macOS leg are untested (the `macos-13` runner label may be retired).
+  `scripts/build-sidecar.sh` has only been run on macOS/arm64; Windows needs an
+  MSYS2 shell.
+- **Windows WebView2:** the plan says detect it and link to Microsoft's
+  installer if missing. Not implemented; Tauri's installer default is to
+  download the bootstrapper, which achieves the same thing but is unverified.
+- **Distribution:** no Homebrew cask, winget manifest, Scoop bucket or Flathub
+  entry; no auto-updater; no notarisation (paid) or SignPath (Windows) setup.
+- **ffmpeg provenance:** the tarball is pinned by a SHA-256 taken from its
+  first download, which guards against change but not against a bad first
+  download. The PGP signature was not checked (no `gpg` here).
+- **The ffmpeg build is the full default LGPL feature set** (21 MB per binary).
+  A `--disable-everything` build with only the decoders we use would be much
+  smaller, but needs careful testing for each format and wasn't attempted.
+- **`check-sidecar` reads the build's configure flags.** It cannot prove no GPL
+  code is statically linked; `--disable-autodetect` is what prevents that.
+- **Placeholders:** the app icon (generated by `scripts/make-icon.py`), the
+  bundle identifier `org.photodedup.desktop`, and the repository URL in
+  `Cargo.toml` (`REPLACE_ME`) all need real values.
+- **UI/UX polish** is still to do and waits on first-hand feedback from using
+  the app.
+

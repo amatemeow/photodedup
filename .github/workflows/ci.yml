@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: Apache-2.0
+# Checks on every push and pull request. NOTE: written to match the commands
+# that were run locally, but this workflow itself has not been run on GitHub yet.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    name: engine and UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: UI checks and build
+        working-directory: ui
+        run: |
+          npm ci
+          npm run check
+          npm test
+          npm run build
+      - name: Engine and server tests
+        run: cargo test --workspace
+      - name: Server tests with the UI compiled in
+        run: cargo test -p photodedup-server --features embed-ui
+
+  licences:
+    name: licences, advisories, reuse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo-deny (engine workspace)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: ./Cargo.toml
+      - name: cargo-deny (desktop shell)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: ./src-tauri/Cargo.toml
+          arguments: --config ./deny.toml
+      - name: REUSE compliance
+        uses: fsfe/reuse-action@v5
+
+  shell:
+    name: desktop shell compiles
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Linux system libraries for Tauri
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Build the UI (it is compiled into the app)
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+      - name: Compile the shell
+        working-directory: src-tauri
+        run: cargo build
