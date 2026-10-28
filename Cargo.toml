@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "crates/core",
     "crates/cli",
-    # crates/server joins once M2 starts (loopback HTTP + SSE)
+    "crates/server",
     # src-tauri joins once M4 starts (native shell)
 ]
 exclude = ["spikes"]
@@ -45,3 +45,12 @@ walkdir = "2"
 # POSIX setpriority() for background-friendly scanning (see
 # core::throttle) -- ubiquitous, tiny, MIT/Apache-2.0.
 libc = "0.2"
+
+# --- M2: crates/server (loopback HTTP + SSE review UI backend) ---
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "signal"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+# Session token generation only -- not used for anything cryptographic
+# beyond "hard to guess", so getrandom-backed OsRng via `rand` is plenty.
+rand = "0.8"

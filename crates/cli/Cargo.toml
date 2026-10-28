@@ -10,4 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 photodedup-core = { path = "../core" }
+photodedup-server = { path = "../server" }
 anyhow = { workspace = true }
+tokio = { workspace = true }

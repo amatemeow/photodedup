@@ -23,4 +23,5 @@ pub mod scan;
 pub mod search;
 pub mod store;
 pub mod throttle;
+pub mod thumbnail;
 pub mod video_match;

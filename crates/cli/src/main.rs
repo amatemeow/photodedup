@@ -10,7 +10,8 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Instant;
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let Some(cmd) = args.get(1) else {
         print_usage();
@@ -29,6 +30,10 @@ fn main() -> anyhow::Result<()> {
             });
             run_scan(&PathBuf::from(path), intensity);
         }
+        "serve" => {
+            let db_path = args.get(2).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".photodedup-scan.sqlite3"));
+            serve(db_path).await?;
+        }
         _ => print_usage(),
     }
     Ok(())
@@ -41,7 +46,41 @@ fn print_usage() {
     println!("    --mode default       (default) efficiency-core-targeted workers, moderate scheduling priority -- can still use performance cores when it needs to");
     println!("    --mode performance   every logical core, no scheduling downgrade -- fastest, most resource-hungry");
     println!("    --mode N             an explicit worker count, no automatic scheduling hint");
+    println!("  serve [db-path]   start the review server (browser fallback -- M4's native shell calls photodedup-server directly instead)");
     println!("(report/apply/undo land with later M1 work -- see ROADMAP.md)");
+}
+
+async fn serve(db_path: PathBuf) -> anyhow::Result<()> {
+    if !db_path.exists() {
+        eprintln!("no scan database at {} -- run `photodedup scan <path>` first", db_path.display());
+        std::process::exit(2);
+    }
+    let info = photodedup_server::run(db_path).await?;
+    let url = info.url();
+    println!("review server running at {url}");
+    println!("(Ctrl+C to stop)");
+    open_browser(&url);
+
+    tokio::signal::ctrl_c().await?;
+    println!("\nstopping.");
+    Ok(())
+}
+
+/// Best-effort: opens the system browser. A failure here (no GUI, unknown
+/// platform, no default browser configured) is never fatal -- the URL is
+/// already printed above, so the user can always open it by hand.
+fn open_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let cmd = ("open", vec![url]);
+    #[cfg(target_os = "linux")]
+    let cmd = ("xdg-open", vec![url]);
+    #[cfg(windows)]
+    let cmd = ("cmd", vec!["/C", "start", "", url]);
+
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    {
+        let _ = std::process::Command::new(cmd.0).args(cmd.1).status();
+    }
 }
 
 /// Parses `--mode <value>` out of the CLI args. Returns `Ok(None)` if no
