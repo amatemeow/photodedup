@@ -20,6 +20,7 @@ shaped these decisions.
 | **Windows code signing (SmartScreen)** | OV certs now require hardware tokens/HSM; real cost | SignPath.io's free OSS tier is the planned path if users report friction; artifact build is already reproducible via GitHub Actions, which SignPath needs |
 | **Windows background-scheduling equivalent** (`SetPriorityClass(..., BELOW_NORMAL_PRIORITY_CLASS)`, `THREAD_MODE_BACKGROUND_BEGIN`) | No Windows target to verify against yet; didn't want a `windows-sys` dependency added speculatively | `platform::noop::NoopScheduler` is the only thing that needs replacing — every caller already goes through the `PlatformScheduler` trait (`crates/core/src/platform/`), untouched by adding a real Windows impl |
 | **Scan-intensity (Efficient/Default/Performance) as a persistent app setting** | No UI exists yet (M2+) — currently a `--mode` CLI flag, set fresh per invocation | `ScanIntensity` (`throttle.rs`) is a small `Copy` enum with no state of its own; M2's settings/options surface needs only to read a stored value and pass it into `PipelineOptions`, not touch the scheduling logic itself. **Explicit user requirement, recorded here so it isn't lost before M2 design starts:** this belongs in the app's persistent Options/Settings tab (a standing preference the user sets once), not a per-scan prompt or CLI-only flag — the `--mode` flag stays for scripting/testing, but isn't the primary UX once a UI exists |
+| **Resume-recognition beyond exact path match** | `Store::find_latest_scan_for_root` (see "Resolved during M2" below) currently matches on canonicalized path only — a folder renamed, moved to a new parent directory, or re-synced to a new local path by a cloud client (OneDrive/Dropbox/iCloud routinely do this) no longer matches its own prior scan at all, even though every file inside is identical. Not fixed now because it needs a real design decision, not just more code — **explicit user requirement, recorded here so it isn't lost**: recognize the same logical folder by content, not just path | The exact-hash pass (`exacthash.rs`) already computes a blake3 digest for every size-collision bucket, and `files` already stores `(size, mtime)` per file from day one — a content fingerprint (e.g. the multiset of `(size, blake3)` for a sample of files, or file count + total size as a cheap first-pass filter before a full comparison) is additive, not a schema change. The harder part is UX, not storage: silently auto-matching on content risks a real false positive *in a dedup tool specifically* (two genuinely different folders can share a lot of overlapping photos) — this should surface as "this looks like your previous scan of `<old path>`, moved to `<new path>` — resume it?" for the user to confirm, not a silent assumption, consistent with this project's never-auto-decide-without-evidence posture elsewhere (the native-native burst rule, `T1b`'s guard, "never delete") |
 
 ## Resolved during M0 (moved out of "deferred", not into the table above)
 
@@ -117,7 +118,10 @@ shaped these decisions.
   with no way to recognize "this folder was already scanned." Fixed:
   - `Store::find_latest_scan_for_root` -- the lookup behind resuming:
     matches on a canonicalized root path, so a trailing slash or a path
-    reached through a symlink still finds the same scan.
+    reached through a symlink still finds the same scan. **Known limit,
+    tracked in the deferred table above:** path-only, so a folder that
+    gets renamed or moved (a cloud sync client re-pathing it, say) won't
+    be recognized even though its contents are identical.
   - `Store::load_decisions` -- bulk read of everything recorded for a
     scan, for restoring UI state in one round trip rather than one file
     at a time.
