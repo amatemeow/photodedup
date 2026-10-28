@@ -20,6 +20,7 @@ shaped these decisions.
 | **Windows code signing (SmartScreen)** | OV certs now require hardware tokens/HSM; real cost | SignPath.io's free OSS tier is the planned path if users report friction; artifact build is already reproducible via GitHub Actions, which SignPath needs |
 | **Windows background-scheduling equivalent** (`SetPriorityClass(..., BELOW_NORMAL_PRIORITY_CLASS)`, `THREAD_MODE_BACKGROUND_BEGIN`) | No Windows target to verify against yet; didn't want a `windows-sys` dependency added speculatively | `platform::noop::NoopScheduler` is the only thing that needs replacing — every caller already goes through the `PlatformScheduler` trait (`crates/core/src/platform/`), untouched by adding a real Windows impl |
 | **T1 cluster / same-device-review-pair count, off by one vs. the MVP** | 179 vs MVP's 180 T1 clusters, 126 vs 125 review pairs, consistently reproducible on the reference dataset but not yet root-caused | Not yet — needs a direct diff against the MVP's `t1_groups.json`/`pairs_t2.json` to find which single pair classifies differently and why, before M1 can claim exact parity rather than "very close" |
+| **Scan-intensity (Efficient/Default/Performance) as a persistent app setting** | No UI exists yet (M2+) — currently a `--mode` CLI flag, set fresh per invocation | `ScanIntensity` (`throttle.rs`) is a small `Copy` enum with no state of its own; M2's settings/options surface needs only to read a stored value and pass it into `PipelineOptions`, not touch the scheduling logic itself. **Explicit user requirement, recorded here so it isn't lost before M2 design starts:** this belongs in the app's persistent Options/Settings tab (a standing preference the user sets once), not a per-scan prompt or CLI-only flag — the `--mode` flag stays for scripting/testing, but isn't the primary UX once a UI exists |
 
 ## Resolved during M0 (moved out of "deferred", not into the table above)
 
@@ -63,8 +64,9 @@ shaped these decisions.
      `QOS_CLASS_BACKGROUND` measurably did (P-cores parked at 0MHz,
      E-cluster saturated, ~8x lower CPU package power: 26-28W → 3.4W) —
      at real, substantial wall-clock cost.
-  Net design: `ScanIntensity::Economy`/`Default`/`AllIn` (user-facing
-  `--mode` flag) map to `Background`/`Utility`/no-hint respectively
+  Net design: `ScanIntensity::Efficient`/`Default`/`Performance` (user-
+  facing `--mode` flag; named to match the convention most apps already
+  use for this tradeoff) map to `Background`/`Utility`/no-hint respectively
   (`throttle.rs`), via a `PlatformScheduler` trait with one implementation
   per OS resolved once at startup (`platform/`) rather than scattered
   `#[cfg(...)]` blocks. Windows has no scheduling impl yet (see the

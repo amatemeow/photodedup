@@ -20,7 +20,7 @@ fn main() -> anyhow::Result<()> {
     match cmd.as_str() {
         "scan" => {
             let Some(path) = args.get(2) else {
-                eprintln!("usage: photodedup scan <path> [--mode economy|default|all-in|N]");
+                eprintln!("usage: photodedup scan <path> [--mode efficient|default|performance|N]");
                 std::process::exit(2);
             };
             let intensity = parse_mode(&args).unwrap_or_else(|msg| {
@@ -36,11 +36,11 @@ fn main() -> anyhow::Result<()> {
 
 fn print_usage() {
     println!("photodedup — commands:");
-    println!("  scan <path> [--mode economy|default|all-in|N]   scan a folder, print a summary");
-    println!("    --mode economy   fewest workers + strongest E-core bias -- quietest, slowest (measured ~8x lower CPU power than default)");
-    println!("    --mode default   (default) efficiency-core-targeted workers, moderate scheduling priority -- can still use performance cores when it needs to");
-    println!("    --mode all-in    every logical core, no scheduling downgrade -- fastest, most resource-hungry");
-    println!("    --mode N         an explicit worker count, no automatic scheduling hint");
+    println!("  scan <path> [--mode efficient|default|performance|N]   scan a folder, print a summary");
+    println!("    --mode efficient     fewest workers + strongest E-core bias -- quietest, slowest (measured ~8x lower CPU power than default)");
+    println!("    --mode default       (default) efficiency-core-targeted workers, moderate scheduling priority -- can still use performance cores when it needs to");
+    println!("    --mode performance   every logical core, no scheduling downgrade -- fastest, most resource-hungry");
+    println!("    --mode N             an explicit worker count, no automatic scheduling hint");
     println!("(report/apply/undo land with later M1 work -- see ROADMAP.md)");
 }
 
@@ -51,18 +51,18 @@ fn parse_mode(args: &[String]) -> Result<ScanIntensity, String> {
         return Ok(ScanIntensity::default());
     };
     let Some(value) = args.get(idx + 1) else {
-        return Err("--mode requires a value: economy, default, all-in, or a number".to_string());
+        return Err("--mode requires a value: efficient, default, performance, or a number".to_string());
     };
     match value.as_str() {
-        "economy" => Ok(ScanIntensity::Economy),
+        "efficient" => Ok(ScanIntensity::Efficient),
         "default" => Ok(ScanIntensity::Default),
-        "all-in" => Ok(ScanIntensity::AllIn),
+        "performance" => Ok(ScanIntensity::Performance),
         n => n
             .parse::<usize>()
             .ok()
             .and_then(NonZeroUsize::new)
             .map(ScanIntensity::Custom)
-            .ok_or_else(|| format!("invalid --mode value '{n}': expected economy, default, all-in, or a positive integer")),
+            .ok_or_else(|| format!("invalid --mode value '{n}': expected efficient, default, performance, or a positive integer")),
     }
 }
 
