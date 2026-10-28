@@ -51,6 +51,8 @@ export interface Cluster {
   id: string;
   tier: string;
   keeper_file_id: string;
+  /** From the original, `YYYY-MM-DD HH:MM:SS`; null when no member has one. */
+  captured_at: string | null;
   reasons: string[];
   members: FileDto[];
 }
@@ -60,6 +62,7 @@ export interface BurstRun {
   camera_model: string;
   /** In capture-time order. */
   frames: FileDto[];
+  captured_at: string | null;
   sharpness: Record<string, number>;
   suggested_file_id: string | null;
 }
@@ -69,12 +72,14 @@ export interface ReviewPair {
   tier: string;
   reason: string;
   phash_dist: number;
+  captured_at: string | null;
   file_a: FileDto | null;
   file_b: FileDto | null;
 }
 
 export interface OrphanVideo {
   file: FileDto;
+  captured_at: string | null;
   reason: 'no_match' | 'unknown_origin';
 }
 

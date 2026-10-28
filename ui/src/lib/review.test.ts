@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { BurstRun, Cluster, FileDto, ReviewPair } from './api';
+import type { BurstRun, Cluster, FileDto, OrphanVideo, ReviewPair } from './api';
 
 // The backend, faked in memory: what matters here is the client-side
 // decision logic, not HTTP.
@@ -9,6 +9,7 @@ const server = vi.hoisted(() => ({
   clusters: [] as Cluster[],
   bursts: [] as BurstRun[],
   pairs: [] as ReviewPair[],
+  orphans: [] as OrphanVideo[],
 }));
 
 vi.mock('./api', () => ({
@@ -16,7 +17,7 @@ vi.mock('./api', () => ({
     clusters: async () => server.clusters,
     burstRuns: async () => server.bursts,
     reviewPairs: async () => server.pairs,
-    orphanVideos: async () => [],
+    orphanVideos: async () => server.orphans,
     decisions: async () => ({ ...server.decisions }),
     putDecisions: async (_: string, rows: { relative_path: string; keep: boolean }[]) => {
       if (server.failNextWrite) {
@@ -40,10 +41,11 @@ const file = (id: string, path: string): FileDto => ({
   size_bytes: 1,
   is_placeholder: false,
 });
-const cluster = (id: string, tier: string, keeper: string, members: FileDto[]): Cluster => ({
+const cluster = (id: string, tier: string, keeper: string, members: FileDto[], captured_at: string | null = null): Cluster => ({
   id,
   tier,
   keeper_file_id: keeper,
+  captured_at,
   reasons: [],
   members,
 });
@@ -61,6 +63,7 @@ function seed() {
   server.clusters = [cluster('c1', 'T1', 'fa', [A, B, C]), cluster('c2', 'T0', 'fd', [D, E])];
   server.bursts = [];
   server.pairs = [];
+  server.orphans = [];
 }
 
 async function loaded() {
@@ -75,7 +78,7 @@ beforeEach(seed);
 
 describe('categories', () => {
   it('puts exact copies, true duplicates and bursts in their own tabs, with per-tab counts', async () => {
-    server.bursts = [{ id: 'b1', camera_model: 'Cam', frames: [file('f1', '1.jpg'), file('f2', '2.jpg')], sharpness: { f1: 5, f2: 9 }, suggested_file_id: 'f2' }];
+    server.bursts = [{ id: 'b1', camera_model: 'Cam', captured_at: null, frames: [file('f1', '1.jpg'), file('f2', '2.jpg')], sharpness: { f1: 5, f2: 9 }, suggested_file_id: 'f2' }];
     const r = await loaded();
     expect(r.groups.filter((g) => g.tab === 'exact').map((g) => g.id)).toEqual(['c2']);
     expect(r.groups.filter((g) => g.tab === 'true').map((g) => g.id)).toEqual(['c1']);
@@ -88,7 +91,7 @@ describe('categories', () => {
     server.clusters = [cluster('c1', 'T1', 'fa', [A, B])];
     expect((await loaded()).tab).toBe('true');
     server.clusters = [];
-    server.bursts = [{ id: 'b1', camera_model: 'Cam', frames: [A, B], sharpness: {}, suggested_file_id: 'fa' }];
+    server.bursts = [{ id: 'b1', camera_model: 'Cam', captured_at: null, frames: [A, B], sharpness: {}, suggested_file_id: 'fa' }];
     expect((await loaded()).tab).toBe('burst');
   });
 
@@ -97,19 +100,118 @@ describe('categories', () => {
     const f2 = file('f2', '2.jpg');
     const f3 = file('f3', '3.jpg');
     server.clusters = [cluster('c1', 'T1', 'f1', [f1, A])]; // f1 is c1's suggested keeper
-    server.bursts = [{ id: 'b1', camera_model: 'Cam', frames: [f1, f2, f3], sharpness: { f1: 1, f2: 9, f3: 4 }, suggested_file_id: 'f2' }];
+    server.bursts = [{ id: 'b1', camera_model: 'Cam', captured_at: null, frames: [f1, f2, f3], sharpness: { f1: 1, f2: 9, f3: 4 }, suggested_file_id: 'f2' }];
     const r = await loaded();
     expect([...group(r, 'b1').suggested].sort()).toEqual(['f1', 'f2']);
   });
 });
 
-describe('browse-only tabs', () => {
-  it('leaves burst-tier pairs to the Burst tab, so Same-device review counts only the others', async () => {
-    const pair = (id: string, tier: string): ReviewPair => ({ id, tier, reason: 'r', phash_dist: 30, file_a: A, file_b: B });
-    server.pairs = [pair('p1', 'T2Burst'), pair('p2', 'T2NativeReview'), pair('p3', 'T2Burst'), pair('p4', 'T3CrossDevice')];
+const pair = (id: string, tier: string, a: FileDto, b: FileDto, captured_at: string | null = null): ReviewPair => ({
+  id,
+  tier,
+  reason: 'native_native_review',
+  phash_dist: 30,
+  captured_at,
+  file_a: a,
+  file_b: b,
+});
+
+describe('look-alikes and orphan videos are decided too, with everything kept by default', () => {
+  it('leaves burst-tier pairs to the Quick sequences tab', async () => {
+    server.pairs = [pair('p1', 'T2Burst', A, B), pair('p2', 'T2NativeReview', A, C), pair('p3', 'T2Burst', B, C), pair('p4', 'T3CrossDevice', D, E)];
     const r = await loaded();
-    expect(r.pairs.map((p) => p.id)).toEqual(['p2', 'p4']);
+    expect(r.groups.filter((g) => g.tab === 'similar').map((g) => g.id)).toEqual(['p2', 'p4']);
     expect(r.tabCount('similar')).toBe(2);
+  });
+
+  it('suggests keeping both photos of a pair, so accepting changes nothing but marks it reviewed', async () => {
+    server.clusters = [];
+    server.pairs = [pair('p1', 'T2NativeReview', A, B)];
+    const r = await loaded();
+    const g = group(r, 'p1');
+    expect(r.effective(g, A) && r.effective(g, B)).toBe(true);
+    await r.accept([g]);
+    expect(server.decisions).toEqual({ 'a.jpg': true, 'b.jpg': true });
+    expect(r.statuses.get('p1')).toBe('accepted');
+  });
+
+  it('lets the user dismiss one photo of a pair but never both', async () => {
+    server.clusters = [];
+    server.pairs = [pair('p1', 'T2NativeReview', A, B)];
+    const r = await loaded();
+    const g = group(r, 'p1');
+    await r.toggle(g, B);
+    expect(server.decisions).toEqual({ 'a.jpg': true, 'b.jpg': false });
+    expect(r.statuses.get('p1')).toBe('changed');
+    await r.toggle(g, A);
+    expect(r.error).toMatch(/at least one/i);
+    expect(server.decisions).toEqual({ 'a.jpg': true, 'b.jpg': false });
+  });
+
+  it('lets the user dismiss a lone orphan video, since it has no other copy to keep', async () => {
+    server.clusters = [];
+    const v = { ...file('fv', 'v.mp4'), media_class: 'Video' };
+    server.orphans = [{ file: v, captured_at: null, reason: 'no_match' }];
+    const r = await loaded();
+    const g = group(r, 'fv');
+    expect(r.effective(g, v)).toBe(true);
+    await r.toggle(g, v);
+    expect(r.error).toBe('');
+    expect(server.decisions).toEqual({ 'v.mp4': false });
+  });
+
+  it('labels orphans by why they are orphans', async () => {
+    server.clusters = [];
+    server.orphans = [
+      { file: file('f1', '1.mp4'), captured_at: null, reason: 'no_match' },
+      { file: file('f2', '2.mov'), captured_at: null, reason: 'unknown_origin' },
+    ];
+    const r = await loaded();
+    expect(r.groups.map((g) => g.label)).toEqual(['No original found', 'Source not identified']);
+  });
+});
+
+describe('sorting', () => {
+  const dated = async () => {
+    server.clusters = [
+      cluster('c-mid', 'T1', 'fa', [A, B], '2026-10-15 09:00:00'),
+      cluster('c-old', 'T1', 'fc', [C, D], '2026-10-14 08:00:00'),
+      cluster('c-none', 'T1', 'fe', [E, file('fg', 'g.jpg')], null),
+      cluster('c-new', 'T1', 'fh', [file('fh', 'h.jpg'), file('fi', 'i.jpg')], '2026-10-16 10:00:00'),
+    ];
+    const r = await loaded();
+    r.tab = 'true';
+    return r;
+  };
+
+  it('puts the oldest first by default, with undated groups last', async () => {
+    const r = await dated();
+    expect(r.sort).toBe('oldest');
+    expect(r.visible.map((g) => g.id)).toEqual(['c-old', 'c-mid', 'c-new', 'c-none']);
+  });
+
+  it('reverses to newest first, still with undated groups last', async () => {
+    const r = await dated();
+    r.setSort('newest');
+    expect(r.visible.map((g) => g.id)).toEqual(['c-new', 'c-mid', 'c-old', 'c-none']);
+  });
+
+  it('keeps the engine order between groups with the same date', async () => {
+    server.clusters = [cluster('x1', 'T1', 'fa', [A, B]), cluster('x2', 'T1', 'fc', [C, D]), cluster('x3', 'T1', 'fe', [E, file('fg', 'g.jpg')])];
+    const r = await loaded();
+    r.tab = 'true';
+    expect(r.visible.map((g) => g.id)).toEqual(['x1', 'x2', 'x3']);
+  });
+
+  it('applies to every category, filters included', async () => {
+    server.clusters = [];
+    server.pairs = [pair('p-new', 'T2NativeReview', A, B, '2026-10-16 10:00:00'), pair('p-old', 'T2NativeReview', C, D, '2026-10-14 08:00:00')];
+    const r = await loaded();
+    expect(r.tab).toBe('similar');
+    expect(r.visible.map((g) => g.id)).toEqual(['p-old', 'p-new']);
+    await r.toggle(group(r, 'p-new'), B);
+    r.filter = 'changed';
+    expect(r.visible.map((g) => g.id)).toEqual(['p-new']);
   });
 });
 
@@ -182,7 +284,7 @@ describe('deciding', () => {
   });
 
   it('keep-all marks every frame kept', async () => {
-    server.bursts = [{ id: 'b1', camera_model: 'Cam', frames: [A, B, C], sharpness: {}, suggested_file_id: 'fa' }];
+    server.bursts = [{ id: 'b1', camera_model: 'Cam', captured_at: null, frames: [A, B, C], sharpness: {}, suggested_file_id: 'fa' }];
     server.clusters = [];
     const r = await loaded();
     await r.keepAll(group(r, 'b1'));

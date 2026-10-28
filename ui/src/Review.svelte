@@ -1,10 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { isDecisionTab, Review, tabInfo, tabs, type Filter, type Tab } from './lib/review.svelte';
+  import { Review, tabInfo, tabs, type Filter, type Sort, type Tab } from './lib/review.svelte';
   import Overview from './Overview.svelte';
   import Detail from './Detail.svelte';
-  import Pairs from './Pairs.svelte';
-  import Orphans from './Orphans.svelte';
 
   let { scanId, onExit }: { scanId: string; onExit: () => void } = $props();
 
@@ -112,14 +110,10 @@
 <div class="shell">
   <header>
     <button class="link" onclick={onExit}>← Folders</button>
-    {#if isDecisionTab(review.tab)}
-      <span class="progress">
-        {review.counts.reviewed} of {review.counts.all} reviewed
-        <progress max={review.counts.all || 1} value={review.counts.reviewed}></progress>
-      </span>
-    {:else}
-      <span class="progress"></span>
-    {/if}
+    <span class="progress">
+      {review.counts.reviewed} of {review.counts.all} reviewed
+      <progress max={review.counts.all || 1} value={review.counts.reviewed}></progress>
+    </span>
     <button class="secondary" onclick={() => review.undo()} disabled={!review.canUndo} title="Undo ({undoKey})">Undo</button>
     <button class="secondary" onclick={() => (helpOpen = true)} title="Keyboard shortcuts (?)">?</button>
   </header>
@@ -154,32 +148,33 @@
     {:else}
       <p class="blurb">{tabInfo[review.tab].blurb}</p>
 
-      {#if review.tab === 'similar'}
-        <Pairs pairs={review.pairs} />
-      {:else if review.tab === 'orphans'}
-        <Orphans orphans={review.orphans} />
-      {:else}
-        <nav class="filters" aria-label="Filter">
-          {#each [['all', 'All', review.counts.all], ['undecided', 'Undecided', review.counts.undecided], ['changed', 'Changed', review.counts.changed]] as const as [key, label, n]}
-            <button class="chip" class:on={review.filter === key} onclick={() => setFilter(key)}>{label} <span>{n}</span></button>
-          {/each}
-          <span class="spacer"></span>
-          {#if plan}
-            <span>
-              Accept {plan.groups} suggestion{plan.groups === 1 ? '' : 's'}?
-              {plan.quarantine} file{plan.quarantine === 1 ? '' : 's'} would be marked for quarantine (nothing moves until you apply).
-            </span>
-            <button onclick={doAcceptAll}>Yes, accept</button>
-            <button class="secondary" onclick={() => (plan = null)}>Cancel</button>
-          {:else}
-            <button class="secondary" disabled={review.counts.undecided === 0} onclick={askAcceptAll}>Accept all suggestions</button>
-          {/if}
-        </nav>
-        {#if review.visible.length === 0}
-          <p class="hint">{review.counts.all === 0 ? 'Nothing in this category.' : 'Nothing here — all done.'}</p>
+      <nav class="filters" aria-label="Filter">
+        {#each [['all', 'All', review.counts.all], ['undecided', 'Undecided', review.counts.undecided], ['changed', 'Changed', review.counts.changed]] as const as [key, label, n]}
+          <button class="chip" class:on={review.filter === key} onclick={() => setFilter(key)}>{label} <span>{n}</span></button>
+        {/each}
+        <span class="spacer"></span>
+        <label class="sort">
+          Sort
+          <select value={review.sort} onchange={(e) => review.setSort(e.currentTarget.value as Sort)}>
+            <option value="oldest">Oldest first</option>
+            <option value="newest">Newest first</option>
+          </select>
+        </label>
+        {#if plan}
+          <span>
+            Accept {plan.groups} suggestion{plan.groups === 1 ? '' : 's'}?
+            {plan.quarantine} file{plan.quarantine === 1 ? '' : 's'} would be marked for quarantine (nothing moves until you apply).
+          </span>
+          <button onclick={doAcceptAll}>Yes, accept</button>
+          <button class="secondary" onclick={() => (plan = null)}>Cancel</button>
         {:else}
-          <Overview {review} {focusId} onOpen={open} onFocus={(id) => (focusId = id)} />
+          <button class="secondary" disabled={review.counts.undecided === 0} onclick={askAcceptAll}>Accept all suggestions</button>
         {/if}
+      </nav>
+      {#if review.visible.length === 0}
+        <p class="hint">{review.counts.all === 0 ? 'Nothing in this category.' : 'Nothing here — all done.'}</p>
+      {:else}
+        <Overview {review} {focusId} onOpen={open} onFocus={(id) => (focusId = id)} />
       {/if}
     {/if}
   {/if}
@@ -265,6 +260,20 @@
   }
   .spacer {
     flex: 1;
+  }
+  .sort {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--muted);
+  }
+  .sort select {
+    font: inherit;
+    padding: 0.25rem 0.4rem;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--fg);
   }
   .chip {
     background: transparent;

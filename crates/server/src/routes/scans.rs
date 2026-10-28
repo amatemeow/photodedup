@@ -100,6 +100,10 @@ pub struct ClusterDto {
     pub id: String,
     pub tier: String,
     pub keeper_file_id: String,
+    /// When the photo was taken, from the original: the suggested keeper's
+    /// capture time, else the earliest any member has. A copy that was
+    /// re-saved or forwarded carries the date of that save, not of the shot.
+    pub captured_at: Option<String>,
     pub reasons: Vec<String>,
     pub members: Vec<FileDto>,
 }
@@ -113,16 +117,22 @@ pub async fn list_clusters(
     let clusters = store.load_clusters(&scan_id).map_err(internal)?;
     let files = file_lookup(&store, &scan_id).map_err(internal)?;
 
-    let out = clusters
-        .into_iter()
-        .map(|c| ClusterDto {
+    let mut out = Vec::with_capacity(clusters.len());
+    for c in clusters {
+        let keeper_time = store.load_analysis(&c.keeper_file_id).map_err(internal)?.and_then(|a| a.capture_time);
+        let captured_at = match keeper_time {
+            Some(t) => Some(t),
+            None => earliest_capture(&store, &c.member_file_ids).map_err(internal)?,
+        };
+        out.push(ClusterDto {
             id: c.id,
             tier: c.tier,
             keeper_file_id: c.keeper_file_id,
+            captured_at,
             reasons: c.reasons,
             members: c.member_file_ids.iter().filter_map(|id| files.get(id)).map(FileDto::from).collect(),
-        })
-        .collect();
+        });
+    }
     Ok(Json(out))
 }
 
@@ -132,6 +142,8 @@ pub struct ReviewPairDto {
     pub tier: String,
     pub reason: String,
     pub phash_dist: i64,
+    /// Earliest capture time of the two photos.
+    pub captured_at: Option<String>,
     pub file_a: Option<FileDto>,
     pub file_b: Option<FileDto>,
 }
@@ -145,17 +157,19 @@ pub async fn list_review_pairs(
     let pairs = store.load_review_pairs(&scan_id).map_err(internal)?;
     let files = file_lookup(&store, &scan_id).map_err(internal)?;
 
-    let out = pairs
-        .into_iter()
-        .map(|p| ReviewPairDto {
+    let mut out = Vec::with_capacity(pairs.len());
+    for p in pairs {
+        let captured_at = earliest_capture(&store, &[p.file_a_id.clone(), p.file_b_id.clone()]).map_err(internal)?;
+        out.push(ReviewPairDto {
             id: p.id,
             tier: p.tier,
             reason: p.reason,
             phash_dist: p.phash_dist,
+            captured_at,
             file_a: files.get(&p.file_a_id).map(FileDto::from),
             file_b: files.get(&p.file_b_id).map(FileDto::from),
-        })
-        .collect();
+        });
+    }
     Ok(Json(out))
 }
 
@@ -165,6 +179,8 @@ pub struct BurstRunDto {
     pub camera_model: String,
     /// In capture-time order.
     pub frames: Vec<FileDto>,
+    /// The first frame's capture time.
+    pub captured_at: Option<String>,
     /// Laplacian-variance sharpness per frame id (where analysis exists).
     pub sharpness: HashMap<String, f64>,
     /// The frame suggested to keep when thinning the run: the sharpest.
@@ -184,18 +200,23 @@ pub async fn list_burst_runs(
     for r in runs {
         let frames: Vec<FileDto> = r.member_file_ids.iter().filter_map(|id| files.get(id)).map(FileDto::from).collect();
         let mut sharpness = HashMap::new();
+        let mut times = Vec::new();
         for f in &frames {
-            if let Some(sh) = store.load_analysis(&f.id).map_err(internal)?.and_then(|a| a.sharpness) {
-                sharpness.insert(f.id.clone(), sh);
+            if let Some(a) = store.load_analysis(&f.id).map_err(internal)? {
+                if let Some(sh) = a.sharpness {
+                    sharpness.insert(f.id.clone(), sh);
+                }
+                times.extend(a.capture_time);
             }
         }
+        let captured_at = times.into_iter().min();
         let suggested_file_id = frames
             .iter()
             .filter_map(|f| sharpness.get(&f.id).map(|&sh| (f, sh)))
             .max_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(f, _)| f.id.clone())
             .or_else(|| frames.first().map(|f| f.id.clone()));
-        out.push(BurstRunDto { id: r.id, camera_model: r.camera_model, frames, sharpness, suggested_file_id });
+        out.push(BurstRunDto { id: r.id, camera_model: r.camera_model, frames, captured_at, sharpness, suggested_file_id });
     }
     Ok(Json(out))
 }
@@ -203,11 +224,13 @@ pub async fn list_burst_runs(
 #[derive(Serialize)]
 pub struct OrphanVideoDto {
     pub file: FileDto,
+    pub captured_at: Option<String>,
     /// `no_match` or `unknown_origin`.
     pub reason: String,
 }
 
-/// Videos with no counterpart to compare against -- browse only.
+/// Videos with no counterpart to compare against. Decided like everything
+/// else, with everything kept by default.
 pub async fn list_orphan_videos(
     State(state): State<AppState>,
     AxPath(scan_id): AxPath<String>,
@@ -216,12 +239,13 @@ pub async fn list_orphan_videos(
     super::require_scan(&store, &scan_id)?;
     let orphans = store.load_orphan_videos(&scan_id).map_err(internal)?;
     let files = file_lookup(&store, &scan_id).map_err(internal)?;
-    Ok(Json(
-        orphans
-            .into_iter()
-            .filter_map(|o| files.get(&o.file_id).map(|f| OrphanVideoDto { file: FileDto::from(f), reason: o.reason }))
-            .collect(),
-    ))
+    let mut out = Vec::with_capacity(orphans.len());
+    for o in orphans {
+        let Some(f) = files.get(&o.file_id) else { continue };
+        let captured_at = earliest_capture(&store, std::slice::from_ref(&o.file_id)).map_err(internal)?;
+        out.push(OrphanVideoDto { file: FileDto::from(f), captured_at, reason: o.reason });
+    }
+    Ok(Json(out))
 }
 
 pub async fn get_analysis(
@@ -234,6 +258,20 @@ pub async fn get_analysis(
         .map_err(internal)?
         .map(|a| Json(a.into()))
         .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// Earliest capture time among these files. Capture times are stored as
+/// `YYYY-MM-DD HH:MM:SS`, which sorts correctly as text.
+fn earliest_capture(store: &photodedup_core::store::Store, file_ids: &[String]) -> rusqlite::Result<Option<String>> {
+    let mut best: Option<String> = None;
+    for id in file_ids {
+        if let Some(t) = store.load_analysis(id)?.and_then(|a| a.capture_time) {
+            if best.as_ref().is_none_or(|b| t < *b) {
+                best = Some(t);
+            }
+        }
+    }
+    Ok(best)
 }
 
 fn file_lookup(store: &photodedup_core::store::Store, scan_id: &str) -> rusqlite::Result<HashMap<String, StoredFile>> {

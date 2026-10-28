@@ -120,8 +120,8 @@ as a choice.
   bands**, not bit-exact hashes (Pillow's and the `image` crate's Lanczos3
   resize aren't bit-identical implementations -- see `/SPIKES.md` §3).
   Unlike the `T1b` case, this has no safety implication: `T2NativeReview`
-  is browse-only, nothing auto-merges or auto-quarantines based on
-  membership in it, so a pair landing on one side of a fixed threshold
+  never auto-merges or auto-quarantines anything (the review UI lets the
+  user decide on these pairs, with everything kept by default), so a pair landing on one side of a fixed threshold
   instead of the other is cosmetic, not a correctness bug. Not planned to
   be "fixed" -- doing so would require bit-identical resize filters between
   Rust and Python, which M0 already judged not worth pursuing.
@@ -283,16 +283,14 @@ as a choice.
     for undo). Quarantine itself is not built: decisions are only
     recorded; applying them (move to quarantine, with undo) is M3.
   - The decision logic has unit tests (`npm test`); **the screen itself is
-    not yet verified in a real browser.** Still to build: review pairs and
-    burst runs as browse-only views, the Options tab, and virtualizing the
-    overview grid for libraries much larger than the 182 clusters tested.
+    not yet verified in a real browser.** Still to build: the Options tab,
+    and virtualizing the overview grid for libraries much larger than the 182 clusters tested.
 
 - **Review split into the MVP's categories** (tabs, each with its own
   count and one-line explanation): *Exact duplicates* (T0 clusters),
   *True duplicates* (T1/T1b clusters, video matches included), *Quick
-  sequences*, *Same-device review* (browse only) and *Orphan videos*
-  (browse only). The first three are decided; the last two never offer a
-  way to mark anything. Checked against the reference dataset: 2 / 180 /
+  sequences*, *Same-device review* and *Orphan videos* (all five are
+  decided the same way; see "Every category is editable" below). Checked against the reference dataset: 2 / 180 /
   269 sequences over 902 frames (was 368 time-only runs over 1332, the
   MVP's number; see below), 126 same-device pairs (the known 126-vs-125
   difference), 2 orphan videos.
@@ -388,4 +386,34 @@ as a choice.
   - Timing is not claimed: the 179 s no-video run is only comparable to a
     run with videos made on an otherwise idle machine, and the one I have
     (250 s) wasn't.
+
+- **Every category is editable, and the overview is sortable by date.**
+  - *Editable:* Same-device review and Orphan videos used to be browse-only
+    (as in the MVP). They are now decided like the rest, with **everything
+    kept by default**: nothing in them is suggested for removal, so
+    "Accept suggestion" there means "keep all". A pair is one group of two
+    (both photos shown on its card); an orphan video is a group of one.
+  - *The keep-at-least-one rule* applies to groups of two or more, so one
+    photo of a pair can be dismissed but not both. A lone orphan video has
+    no other copy, so quarantining it is simply the user's explicit call.
+    Nothing is deleted either way; quarantine is a move, applied in M3.
+  - *Sorting:* oldest first (default) or newest first, remembered in the
+    browser, applied to every tab and to prev/next in the detail view.
+    Groups with no date go last in both directions, and groups with the
+    same date keep the engine's order. The date is derived from the
+    **original**: a cluster takes its suggested keeper's capture time
+    (falling back to the earliest any member has), a sequence its earliest
+    frame, a pair the earlier of its two, because a re-saved or forwarded
+    copy carries the date of that save, not of the shot. Checked on the
+    reference dataset: all 182 clusters, 269 sequences and 660 pairs are
+    dated; the 2 orphan videos (re-encoded clips) have no capture time and
+    sort last.
+  - **Known imprecision:** image times are camera-local wall-clock time
+    with no zone, while video times come from UTC `creation_time`, so a
+    video and a photo from the same moment can differ by the time-zone
+    offset (9 h in Japan) when sorted together. Within one kind, order is
+    exact. Normalizing needs the offset of the shot (GPS or the Apple
+    `creationdate` offset); not done.
+  - Cards and the detail header show the date. The sort choice and the
+    "include videos" checkbox are both candidates for the Options tab.
 

@@ -312,7 +312,7 @@ mod tests {
             mtime_unix: 0,
             is_placeholder: false,
         };
-        let analysis = |sharpness| Analyzed {
+        let analysis = |sharpness, hour: u32| Analyzed {
             provenance: Provenance { origin: Origin::CameraOriginal, confidence: 1.0, evidence: vec![] },
             phash: None,
             sharpness: Some(sharpness),
@@ -320,7 +320,7 @@ mod tests {
             height: None,
             size_bytes: 10,
             camera_model: None,
-            capture_time: None,
+            capture_time: chrono::NaiveDate::from_ymd_opt(2026, 10, 15).unwrap().and_hms_opt(hour, 0, 0),
             duration_seconds: None,
         };
         let result = photodedup_core::pipeline::PipelineResult {
@@ -330,7 +330,7 @@ mod tests {
                 rec(2, "f2.jpg", MediaClassSerde::Image),
                 rec(3, "v.mp4", MediaClassSerde::Video),
             ],
-            analyzed: [(0, analysis(10.0)), (1, analysis(99.0)), (2, analysis(50.0))].into_iter().collect(),
+            analyzed: [(0, analysis(10.0, 9)), (1, analysis(99.0, 8)), (2, analysis(50.0, 10))].into_iter().collect(),
             clusters: vec![],
             review_pairs: vec![],
             burst_runs: vec![photodedup_core::resolve::BurstRun { camera_model: "Cam".into(), files: vec![0, 1, 2] }],
@@ -363,6 +363,7 @@ mod tests {
         let sharpest_name = run["frames"].as_array().unwrap().iter().find(|f| f["id"] == sharpest).unwrap()["file_name"].clone();
         assert_eq!(sharpest_name, "f1.jpg");
         assert_eq!(run["sharpness"].as_object().unwrap().len(), 3);
+        assert_eq!(run["captured_at"], "2026-10-15 08:00:00", "a sequence is dated by its earliest frame");
 
         let orphans = get(format!("/api/scans/{scan_id}/orphan-videos?token={}", info.token)).await;
         assert_eq!(orphans[0]["file"]["file_name"], "v.mp4");
