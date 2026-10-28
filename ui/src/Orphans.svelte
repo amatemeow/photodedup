@@ -35,7 +35,7 @@
 {/snippet}
 
 {#if orphans.length === 0}
-  <p class="hint">Every copy-like video found its original.</p>
+  <p class="hint">No orphan videos.</p>
 {:else}
   {#each sections as sec (sec.reason)}
     {#if sec.items.length}

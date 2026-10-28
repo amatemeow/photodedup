@@ -37,6 +37,8 @@ pub struct StartBody {
     /// `efficient` | `default` | `performance` | a worker count. Omitted
     /// means the default tier.
     pub mode: Option<String>,
+    /// Scan videos too. Omitted means yes.
+    pub include_videos: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -49,6 +51,7 @@ pub async fn start_scan(State(state): State<AppState>, Json(body): Json<StartBod
         Some(m) => m.parse().map_err(|e: String| (StatusCode::BAD_REQUEST, e))?,
         None => ScanIntensity::default(),
     };
+    let include_videos = body.include_videos.unwrap_or(true);
     let root = std::fs::canonicalize(&body.root)
         .ok()
         .filter(|p| p.is_dir())
@@ -71,7 +74,7 @@ pub async fn start_scan(State(state): State<AppState>, Json(body): Json<StartBod
     let store = state.store.clone();
     let cache_dir = state.cache_dir.clone();
     tokio::task::spawn_blocking(move || {
-        let opts = PipelineOptions { intensity, ..Default::default() };
+        let opts = PipelineOptions { intensity, include_videos, ..Default::default() };
         // `send_replace`, not `send`: it never fails when no one is
         // listening, and watch keeps only the latest value -- exactly the
         // coalescing a per-file callback needs.
@@ -170,7 +173,7 @@ mod tests {
     }
 
     fn body(root: &std::path::Path, mode: Option<&str>) -> Json<StartBody> {
-        Json(StartBody { root: root.to_path_buf(), mode: mode.map(String::from) })
+        Json(StartBody { root: root.to_path_buf(), mode: mode.map(String::from), include_videos: None })
     }
 
     #[tokio::test]

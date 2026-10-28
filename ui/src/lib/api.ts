@@ -114,8 +114,11 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
 export const api = {
   hasToken: token !== '',
   resume: (root: string) => call<Resume>(`/api/resume?root=${encodeURIComponent(root)}`),
-  startScan: (root: string, mode?: string) =>
-    call<{ job_id: number }>('/api/scans/start', { method: 'POST', body: JSON.stringify({ root, mode }) }),
+  startScan: (root: string, opts: { mode?: string; includeVideos?: boolean } = {}) =>
+    call<{ job_id: number }>('/api/scans/start', {
+      method: 'POST',
+      body: JSON.stringify({ root, mode: opts.mode, include_videos: opts.includeVideos }),
+    }),
   cancel: (jobId: number) => call<void>(`/api/jobs/${jobId}/cancel`, { method: 'POST' }),
   jobStatus: (jobId: number) => call<JobStatus>(`/api/jobs/${jobId}`),
   clusters: (scanId: string) => call<Cluster[]>(`/api/scans/${scanId}/clusters`),
