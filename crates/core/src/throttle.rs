@@ -79,6 +79,27 @@ impl Default for ScanIntensity {
     }
 }
 
+/// Parses the same spellings the CLI's `--mode` flag and the server's scan
+/// request accept: `efficient`, `default`, `performance`, or a positive
+/// integer worker count.
+impl std::str::FromStr for ScanIntensity {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "efficient" => Ok(ScanIntensity::Efficient),
+            "default" => Ok(ScanIntensity::Default),
+            "performance" => Ok(ScanIntensity::Performance),
+            n => n
+                .parse::<usize>()
+                .ok()
+                .and_then(NonZeroUsize::new)
+                .map(ScanIntensity::Custom)
+                .ok_or_else(|| format!("invalid mode '{n}': expected efficient, default, performance, or a positive integer")),
+        }
+    }
+}
+
 impl ScanIntensity {
     pub fn worker_count(&self) -> usize {
         match self {

@@ -11,7 +11,7 @@ pub mod auth;
 mod routes;
 mod state;
 
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use state::AppState;
 use std::path::PathBuf;
@@ -43,6 +43,7 @@ pub async fn build(db_path: &std::path::Path) -> anyhow::Result<(TcpListener, Ro
         store: Arc::new(Mutex::new(store)),
         token: Arc::from(token.as_str()),
         cache_dir: Arc::new(cache_dir),
+        job: Arc::new(Mutex::new(None)),
     };
 
     let protected = Router::new()
@@ -50,6 +51,10 @@ pub async fn build(db_path: &std::path::Path) -> anyhow::Result<(TcpListener, Ro
         .route("/api/scans/{id}/clusters", get(routes::scans::list_clusters))
         .route("/api/scans/{id}/review-pairs", get(routes::scans::list_review_pairs))
         .route("/api/scans/{id}/burst-runs", get(routes::scans::list_burst_runs))
+        .route("/api/scans/start", post(routes::jobs::start_scan))
+        .route("/api/jobs/{id}", get(routes::jobs::job_status))
+        .route("/api/jobs/{id}/cancel", post(routes::jobs::cancel_job))
+        .route("/api/jobs/{id}/events", get(routes::jobs::job_events))
         .route("/api/files/{id}/analysis", get(routes::scans::get_analysis))
         .route(
             "/api/scans/{id}/decisions",

@@ -145,8 +145,8 @@ as a choice.
     at a time.
   - `GET`/`PUT /api/scans/{id}/decisions` and `GET /api/resume?root=...`
     (`routes/decisions.rs`) -- the actual HTTP surface; `resume` is
-    deliberately read-only/side-effect-free, it only looks, a future
-    scan-trigger endpoint is what actually runs the pipeline.
+    deliberately read-only/side-effect-free, it only looks, the
+    scan-trigger endpoint (below) is what actually runs the pipeline.
   - Design decision (user's call, given three options): opening the app
     on a recognized folder **auto-resumes the last scan** rather than
     silently rescanning or asking the user to pick from a list. An
@@ -157,3 +157,47 @@ as a choice.
   in-memory state carried over), started a fresh server instance, and
   confirmed both the resume lookup and all three decisions survived
   intact. 7 new tests (4 store, 3 server) alongside that live check.
+
+- **Scan trigger, progress streaming, cancel** (`routes/jobs.rs`).
+  - `POST /api/scans/start {root, mode?}` runs the pipeline on a blocking
+    thread and returns `202 {job_id}`. `mode` takes the same spellings as
+    the CLI's `--mode` (`ScanIntensity` implements `FromStr`, so there is
+    one parser). 400 for a bad folder or mode; 409 if a scan is already
+    running.
+  - **One scan at a time, deliberately:** the pipeline is throttled to be
+    a polite background citizen, and two concurrent scans would defeat
+    that. Only the latest job is kept in memory -- a finished scan's real
+    record is its row in the store. Job ids increase, so a stale client
+    can't read a newer job as its own.
+  - `GET /api/jobs/{id}/events` (SSE) sends the current status at once,
+    then every change, and closes right after the terminal event.
+    `GET /api/jobs/{id}` returns the same status as a snapshot, for a UI
+    that reconnects or reloads (`EventSource` can't replay what it
+    missed). Status is `running` + phase (`scanning`, `analyzing
+    {done,total}`, `exact_duplicates`, `matching`, `videos`,
+    `clustering`), `done {scan_id}`, `cancelled`, or `failed {message}`.
+    Progress rides a `tokio::sync::watch` channel, which keeps only the
+    latest value, so a per-file callback can't flood a slow client.
+  - `POST /api/jobs/{id}/cancel` sets a flag the pipeline polls
+    (`pipeline::run_cancellable`); it returns 202 at once and the status
+    flips to `cancelled` at the next checkpoint. 409 if the job already
+    finished, 404 if it isn't the current job. A cancelled scan saves
+    nothing: a half-analyzed result isn't a scan anyone could resume.
+    Measured on the reference dataset: cancel took effect in under a
+    second mid-`analyzing`. **Known limit:** the flag is checked per file
+    during `analyzing` and between later phases, but the exact-hash pass
+    and video matching have no internal checkpoints, so a cancel landing
+    inside one waits for that phase to end (video matching is the slow
+    one). Add checkpoints there if it proves noticeable.
+  - **Path exception:** `root` is the one filesystem path that comes from
+    a request (picking a folder is the point). It is still behind the
+    session token, canonicalized, and must be an existing directory; file
+    *serving* still resolves only through the database.
+  - `photodedup serve` no longer requires an existing database: with a
+    scan trigger, a UI can start from an empty one.
+  - Verified live on the reference dataset (2718 files, release build,
+    default tier): all six phases streamed, the stream closed on `done`,
+    the saved scan has 182 clusters (matching the M1 parity result), and
+    `/api/resume` found it. Debug builds are unusable for real-dataset
+    runs (30 files in 15 minutes versus about two minutes for the whole
+    set in release), so always use `--release` for those.

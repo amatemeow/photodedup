@@ -6,7 +6,6 @@
 use photodedup_core::pipeline::{run, PipelineOptions};
 use photodedup_core::store::Store;
 use photodedup_core::throttle::ScanIntensity;
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -51,10 +50,6 @@ fn print_usage() {
 }
 
 async fn serve(db_path: PathBuf) -> anyhow::Result<()> {
-    if !db_path.exists() {
-        eprintln!("no scan database at {} -- run `photodedup scan <path>` first", db_path.display());
-        std::process::exit(2);
-    }
     let info = photodedup_server::run(db_path).await?;
     let url = info.url();
     println!("review server running at {url}");
@@ -92,17 +87,7 @@ fn parse_mode(args: &[String]) -> Result<ScanIntensity, String> {
     let Some(value) = args.get(idx + 1) else {
         return Err("--mode requires a value: efficient, default, performance, or a number".to_string());
     };
-    match value.as_str() {
-        "efficient" => Ok(ScanIntensity::Efficient),
-        "default" => Ok(ScanIntensity::Default),
-        "performance" => Ok(ScanIntensity::Performance),
-        n => n
-            .parse::<usize>()
-            .ok()
-            .and_then(NonZeroUsize::new)
-            .map(ScanIntensity::Custom)
-            .ok_or_else(|| format!("invalid --mode value '{n}': expected efficient, default, performance, or a positive integer")),
-    }
+    value.parse().map_err(|e| format!("--mode: {e}"))
 }
 
 fn run_scan(path: &PathBuf, intensity: ScanIntensity) {

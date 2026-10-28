@@ -48,7 +48,8 @@ libc = "0.2"
 
 # --- M2: crates/server (loopback HTTP + SSE review UI backend) ---
 axum = { version = "0.8", features = ["macros"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "signal", "sync"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 # Session token generation only -- not used for anything cryptographic

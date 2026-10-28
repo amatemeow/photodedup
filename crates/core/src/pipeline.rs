@@ -18,8 +18,10 @@ use crate::throttle::{build_pool, lower_process_priority, ScanIntensity};
 use crate::video_match::{find_video_matches, VideoCandidate, VideoMatch};
 use chrono::NaiveDateTime;
 use rayon::prelude::*;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub struct PipelineOptions {
     pub ffmpeg_bin: String,
@@ -63,6 +65,22 @@ pub struct Cluster {
     pub reasons: Vec<&'static str>,
 }
 
+/// Coarse progress of a running pipeline, reported through the callback
+/// given to `run_with_progress`. Only `Analyzing` carries a count -- it's
+/// the one phase that dominates wall-clock time on a real library (decode
+/// + hash per file); every other phase is short enough, or has no natural
+/// unit, that "which phase" is all a progress display can usefully say.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum Progress {
+    Scanning,
+    Analyzing { done: usize, total: usize },
+    ExactDuplicates,
+    Matching,
+    Videos,
+    Clustering,
+}
+
 pub struct PipelineResult {
     pub files: Vec<FileRecord>,
     pub analyzed: HashMap<FileId, Analyzed>,
@@ -88,12 +106,37 @@ pub struct PipelineResult {
 /// never on `rayon`'s ambient global pool, which has no throttle of its
 /// own (see `throttle.rs`).
 pub fn run(root: &Path, opts: &PipelineOptions) -> PipelineResult {
-    lower_process_priority();
-    let pool = build_pool(opts.intensity);
-    pool.install(|| run_inner(root, opts))
+    run_with_progress(root, opts, &|_| {})
 }
 
-fn run_inner(root: &Path, opts: &PipelineOptions) -> PipelineResult {
+/// Like `run`, reporting coarse progress through `on_progress`. The
+/// callback is invoked from worker threads (once per analyzed file during
+/// `Analyzing`), so it must be cheap and non-blocking -- a consumer that
+/// wants to rate-limit should keep only the latest value, not queue.
+pub fn run_with_progress(root: &Path, opts: &PipelineOptions, on_progress: &(dyn Fn(Progress) + Sync)) -> PipelineResult {
+    run_cancellable(root, opts, on_progress, &AtomicBool::new(false)).expect("never cancelled")
+}
+
+/// Like `run_with_progress`, but stops early and returns `None` once
+/// `cancel` is set. Cancellation is cooperative: it's checked per file
+/// during `Analyzing` (so the long phase stops within one file's work per
+/// worker) and between the later phases. The exact-hash pass and video
+/// matching have no internal checkpoints, so a cancel that lands inside
+/// one of them takes effect when that phase ends.
+pub fn run_cancellable(
+    root: &Path,
+    opts: &PipelineOptions,
+    on_progress: &(dyn Fn(Progress) + Sync),
+    cancel: &AtomicBool,
+) -> Option<PipelineResult> {
+    lower_process_priority();
+    let pool = build_pool(opts.intensity);
+    pool.install(|| run_inner(root, opts, on_progress, cancel))
+}
+
+fn run_inner(root: &Path, opts: &PipelineOptions, on_progress: &(dyn Fn(Progress) + Sync), cancel: &AtomicBool) -> Option<PipelineResult> {
+    let cancelled = || cancel.load(Ordering::Relaxed);
+    on_progress(Progress::Scanning);
     let scan_report = scan(root);
     let file_by_id: HashMap<FileId, &FileRecord> = scan_report.files.iter().map(|f| (f.id, f)).collect();
 
@@ -101,23 +144,38 @@ fn run_inner(root: &Path, opts: &PipelineOptions) -> PipelineResult {
     // siblings (RAW/XMP/etc.) ride along with their primary's decision.
     let primary_ids: Vec<FileId> = scan_report.sibling_sets.iter().map(|s| s.primary).collect();
 
+    let total = primary_ids.len();
+    let done = AtomicUsize::new(0);
+    on_progress(Progress::Analyzing { done: 0, total });
     let analyzed: HashMap<FileId, Analyzed> = primary_ids
         .par_iter()
         .filter_map(|&id| {
+            if cancelled() {
+                return None;
+            }
             let rec = file_by_id[&id];
-            analyze_one(rec, opts).map(|a| (id, a))
+            let a = analyze_one(rec, opts).map(|a| (id, a));
+            on_progress(Progress::Analyzing { done: done.fetch_add(1, Ordering::Relaxed) + 1, total });
+            a
         })
         .collect();
+    if cancelled() {
+        return None;
+    }
 
     // --- T0: exact byte duplicates, across ALL files (not just primaries;
     // a sync-conflict duplicate can exist between any two files on disk,
     // and this is cheap -- see exacthash.rs's size-bucketing). ---
+    on_progress(Progress::ExactDuplicates);
     let file_tuples: Vec<(FileId, &Path, u64)> = scan_report
         .files
         .iter()
         .map(|f| (f.id, f.path.as_path(), f.size_bytes))
         .collect();
     let exact_groups = find_exact_duplicates(&file_tuples);
+    if cancelled() {
+        return None;
+    }
     let mut t0_edges: Vec<(FileId, FileId)> = Vec::new();
     let mut exact_group_of: HashMap<FileId, usize> = HashMap::new();
     for (gi, g) in exact_groups.iter().enumerate() {
@@ -130,6 +188,7 @@ fn run_inner(root: &Path, opts: &PipelineOptions) -> PipelineResult {
     }
 
     // --- Candidate search + classification, images only. ---
+    on_progress(Progress::Matching);
     let image_hash_entries: Vec<(FileId, Hash256)> = primary_ids
         .iter()
         .filter(|&&id| file_by_id[&id].media_class == MediaClassSerde::Image)
@@ -176,6 +235,7 @@ fn run_inner(root: &Path, opts: &PipelineOptions) -> PipelineResult {
 
     // --- Video matching (separate mechanism: duration-blocked + frame
     // sequence, not phash-matrix candidate search). ---
+    on_progress(Progress::Videos);
     let video_candidates: Vec<VideoCandidate> = primary_ids
         .iter()
         .filter(|&&id| file_by_id[&id].media_class == MediaClassSerde::Video)
@@ -190,6 +250,9 @@ fn run_inner(root: &Path, opts: &PipelineOptions) -> PipelineResult {
         })
         .collect();
     let video_matches = find_video_matches(&video_candidates, &opts.ffmpeg_bin, opts.intensity.scheduling_hint());
+    if cancelled() {
+        return None;
+    }
     let matched_derived_videos: std::collections::HashSet<FileId> =
         video_matches.iter().map(|m| m.derived).collect();
     let orphan_videos: Vec<FileId> = video_candidates
@@ -213,6 +276,7 @@ fn run_inner(root: &Path, opts: &PipelineOptions) -> PipelineResult {
     // --- Union-find merge across every edge source, then keeper scoring
     // per cluster. See cluster.rs for why this must happen across ALL
     // edges together, not tier-by-tier. ---
+    on_progress(Progress::Clustering);
     let mut tier_of_edge: HashMap<(FileId, FileId), &'static str> = HashMap::new();
     for &(a, b) in &t0_edges {
         tier_of_edge.insert(norm(a, b), "T0");
@@ -297,7 +361,7 @@ fn run_inner(root: &Path, opts: &PipelineOptions) -> PipelineResult {
         .filter(|p| !p.tier.is_auto_selectable())
         .collect();
 
-    PipelineResult {
+    Some(PipelineResult {
         files: scan_report.files,
         analyzed,
         clusters,
@@ -309,7 +373,7 @@ fn run_inner(root: &Path, opts: &PipelineOptions) -> PipelineResult {
         placeholder_count: scan_report.placeholder_count,
         placeholder_bytes: scan_report.placeholder_bytes,
         refused_managed_libraries: scan_report.refused_managed_libraries,
-    }
+    })
 }
 
 /// Picks a cluster's display tier (T0 > T1 > T1b) from whichever of its
@@ -349,6 +413,22 @@ fn norm(a: FileId, b: FileId) -> (FileId, FileId) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pre_set_cancel_flag_stops_the_run_before_any_result_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.jpg"), b"x").unwrap();
+        let cancel = AtomicBool::new(true);
+        let result = run_cancellable(tmp.path(), &PipelineOptions::default(), &|_| {}, &cancel);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn an_unset_cancel_flag_runs_to_completion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        assert!(run_cancellable(tmp.path(), &PipelineOptions::default(), &|_| {}, &cancel).is_some());
+    }
 
     #[test]
     fn cluster_tier_finds_t0_edge_regardless_of_sort_order() {
