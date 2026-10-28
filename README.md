@@ -83,6 +83,9 @@ cargo deny --manifest-path src-tauri/Cargo.toml check
 cd ui && npm ci && npm run check && npm test
 ```
 
+`scripts/ui-audit/` has screenshot, accessibility (axe-core, WCAG 2.2 AA) and
+interaction-timing tools for the UI (see its README).
+
 `cargo test --workspace -- --ignored` additionally runs the tests that need the
 personal reference photo set and ffmpeg. The desktop shell is a separate Cargo
 workspace so its large dependency tree stays out of engine builds.

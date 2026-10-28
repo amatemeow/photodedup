@@ -725,3 +725,84 @@ spelled out, because several parts could only be partly tested from here.
 - **UI/UX polish** is still to do and waits on first-hand feedback from using
   the app.
 
+## UI/UX pass
+
+User verdict on the first desktop build: it worked, but "not really good"
+looking, and it needed to be more responsive and nicer. Rather than invent a
+look, the UI now follows **Apple's Human Interface Guidelines** (the app is
+macOS-first and the user wanted a native feel) with **WCAG 2.2 AA** as the
+accessibility bar; both degrade sensibly on Windows and Linux (system font
+stack, no platform-specific chrome).
+
+Done by first *looking* at the real screens (headless Chrome, light and dark,
+three window sizes) with real data. What that showed: a 1440px window that was
+mostly empty, tiny cards, state shown only as small bold text, a cluttered
+header with a bright "Apply" competing with the real primary action, grey
+letterbox bars in the detail view, and a start screen that was a bare form.
+
+- **One design system** (`ui/src/app.css`, `Icon.svelte`): the macOS type scale
+  (13px body) on the system font, a 4px spacing grid, semantic colour roles for
+  light and dark, and a single set of controls (buttons, segmented controls,
+  switch, sliders with filled tracks, badges, sheets, skeleton loaders), with
+  visible focus rings and `prefers-reduced-motion` honoured. Colour is never the
+  only signal: every state also carries a word or an icon.
+- **Structure follows the guidelines:** a toolbar, and a *sidebar* for the five
+  categories, each with its own count and progress, plus overall progress. Photos
+  are tiles with state overlays (Accepted / Edited / "3 files" / "1 of 4 kept");
+  dialogs are sheets; a lone primary action per screen.
+- **Detail view:** photos large over a soft blurred backdrop of their own colours
+  (no grey bars), a Keep / Quarantine segmented control with meaning-coloured
+  sides, quarantined photos desaturated with a "Will be quarantined" label, and a
+  sharp preview that fades in over the instant thumbnail.
+- **Start screen:** a welcome, a "Continue where you left off" card (from data the
+  resume feature already had), a switch for videos, and during a scan a phase
+  checklist (photos, then video details, then matching) with the live counts.
+- **Narrow windows (720px and up, the shell's minimum):** the sidebar becomes a
+  scrolling strip, the toolbar reflows, detail stacks, and overall progress moves
+  into the content header.
+
+**Measured, not assumed** (`scripts/ui-audit/`, re-runnable):
+
+- *Accessibility:* axe-core with the WCAG 2.0/2.1/2.2 A and AA rules, on all 15
+  screens and states, in light and dark: **0 violations**. The first run found
+  real ones, now fixed: tile and photo buttons whose label didn't contain the
+  text they show (a screen reader would say something different from what is
+  read), dark-mode badge text at 3.53:1 and tertiary text at 4.49:1 against 4.5:1.
+  *Automated checks catch only part of this:* reading order, focus order, and
+  screen-reader wording still need a person with a screen reader.
+- *Responsiveness, on the 2718-file reference set* (451 groups, the biggest
+  category 269 groups): open the review 119 ms; switch to the biggest category
+  44 ms to the DOM, photos loaded in 84 ms warm or about 1 s cold; **scrolling the
+  whole grid at 60 fps with no dropped frame**, cold or warm; open a group 45-56
+  ms; a decision shown on screen in 32-37 ms; Enter (accept and next) 22 ms.
+  Tiles use `content-visibility: auto`, so a long list costs little (7 MB JS heap
+  for 269 tiles).
+- *The one slow thing, and what was done about it:* the first sharp preview of a
+  photo nobody has asked for yet takes about 5 s (the server makes it on first
+  request). The next two groups' previews are now fetched quietly while you look
+  at the current one (the next group then appears in about 30 ms instead of
+  about 800 ms), and a small "Loading full resolution…" note says why a photo is
+  soft in the meantime.
+- *A bug the timing probe exposed:* after clicking Keep or Quarantine with the
+  mouse, focus stayed on that button, so Enter re-pressed it instead of "accept
+  and next". A mouse click now releases focus; a keyboard activation keeps it.
+
+**Not done, or not verified:**
+
+- **I have still not seen the desktop window itself.** Everything above is the
+  same UI in headless Chrome. WKWebView (the macOS shell's engine) can differ in
+  small ways: `backdrop-filter`, `:has()`, `color-mix()`, `content-visibility`.
+  If something looks wrong in the app but not in the screenshots, that is where
+  to look.
+- No design review by a person with a designer's eye: this follows the
+  guidelines faithfully but it is an engineer's reading of them.
+- Not done: native macOS window vibrancy and a real title-bar toolbar (needs
+  window-effects configuration in Tauri); Windows/Linux visual passes; a
+  forced-colours (high-contrast) pass; touch layouts (targets are 26-30px, above
+  WCAG's 24px minimum but below Apple's 44pt touch guidance); translations.
+- **Next performance improvement:** pre-generate previews in the background after
+  a scan (low priority), so even the first photo you open is sharp at once.
+- The user-facing wording ("Quarantine", "Apply", "Same-device review", "Orphan
+  videos") is unchanged and is still jargon in places; a copy pass belongs with
+  the design review.
+

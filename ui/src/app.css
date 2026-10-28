@@ -51,6 +51,7 @@
   --separator: rgb(0 0 0 / 0.12);
   --accent: #0a5fd6;
   --accent-fg: #ffffff;
+  --accent-ink: #0a5fd6; /* accent as TEXT on a soft accent background */
   --accent-soft: rgb(10 95 214 / 0.1);
   --success: #17722f;
   --success-soft: rgb(23 114 47 / 0.12);
@@ -74,10 +75,11 @@
     --sidebar: #242427;
     --label: #f5f5f7;
     --label-2: #cfcfd4;
-    --label-3: #a0a0a8;
+    --label-3: #aaaab2;
     --separator: rgb(255 255 255 / 0.14);
     --accent: #4c9aff;
     --accent-fg: #07111f;
+    --accent-ink: #9cc7ff;
     --accent-soft: rgb(76 154 255 / 0.16);
     --success: #4ccb70;
     --success-soft: rgb(76 203 112 / 0.16);
@@ -456,7 +458,7 @@ progress::-moz-progress-bar {
 }
 .badge.accent {
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 /* badges that sit on top of a photo need their own backing to stay readable */
 .badge.overlay {
@@ -602,5 +604,5 @@ kbd {
   background: var(--accent-soft);
 }
 .notice.accent > :first-child {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
