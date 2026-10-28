@@ -27,4 +27,5 @@ pub mod store;
 pub mod throttle;
 pub mod thresholds;
 pub mod thumbnail;
+pub mod tools;
 pub mod video_match;

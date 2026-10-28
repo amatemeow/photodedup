@@ -163,6 +163,11 @@ export interface ScanInfo {
   used: { match_distance: number; sequence_similarity: number; sequence_gap_seconds: number; include_videos: boolean } | null;
 }
 
+export interface Shell {
+  native_folder_picker: boolean;
+  tools: { name: string; found: boolean; version: string | null }[];
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -203,6 +208,9 @@ export const api = {
   clearDecision: (scanId: string, relativePath: string) =>
     call<void>(`/api/scans/${scanId}/decisions?relative_path=${encodeURIComponent(relativePath)}`, { method: 'DELETE' }),
 
+  shell: () => call<Shell>('/api/shell'),
+  /** The shell's native folder dialog; null if the user cancels it. */
+  pickFolder: () => call<{ path: string | null }>('/api/pick-folder', { method: 'POST' }),
   scanInfo: (scanId: string) => call<ScanInfo>(`/api/scans/${scanId}/info`),
   settings: () => call<Settings>('/api/settings'),
   saveSettings: (patch: SettingsPatch) => call<Settings>('/api/settings', { method: 'PUT', body: JSON.stringify(patch) }),

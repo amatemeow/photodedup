@@ -41,6 +41,26 @@ async fn main() -> anyhow::Result<()> {
             };
             undo_cmd(id, &db_arg(&args, 3));
         }
+        "check-sidecar" => {
+            let bins: Vec<&String> = args[2..].iter().collect();
+            if bins.is_empty() {
+                eprintln!("usage: photodedup check-sidecar <ffmpeg-or-ffprobe-binary>...");
+                std::process::exit(2);
+            }
+            let mut bad = false;
+            for b in bins {
+                match photodedup_core::tools::check_redistributable(std::path::Path::new(b)) {
+                    Ok(()) => println!("ok: {b} is an LGPL-compatible build"),
+                    Err(why) => {
+                        eprintln!("NOT REDISTRIBUTABLE: {why}");
+                        bad = true;
+                    }
+                }
+            }
+            if bad {
+                std::process::exit(1);
+            }
+        }
         "batches" => batches_cmd(&db_arg(&args, 2)),
         "serve" => {
             let db_path = args.get(2).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".photodedup-scan.sqlite3"));
@@ -60,6 +80,7 @@ fn print_usage() {
     println!("    --mode N             an explicit worker count, no automatic scheduling hint");
     println!("    --no-videos          leave videos out of the scan entirely (not listed, hashed, probed or matched)");
     println!("  apply [db-path] [--commit]   show what applying your decisions would move (a dry run); with --commit, move it to quarantine");
+    println!("  check-sidecar <binary>...    refuse a GPL/non-free ffmpeg or ffprobe (the gate for anything we bundle)");
     println!("  batches [db-path]            list what has been moved to quarantine");
     println!("  undo <batch-id> [db-path]    put a batch back where it came from");
     println!("  serve [db-path]   start the review server (browser fallback -- M4's native shell calls photodedup-server directly instead)");

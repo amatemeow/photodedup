@@ -4,6 +4,7 @@ pub mod files;
 pub mod jobs;
 pub mod scans;
 pub mod settings;
+pub mod shell;
 
 use axum::http::StatusCode;
 use photodedup_core::store::Store;

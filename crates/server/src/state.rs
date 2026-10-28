@@ -10,6 +10,10 @@ use tokio::sync::watch;
 /// which isn't `Sync` -- a `Mutex` serializes access across concurrent
 /// axum handlers. Fine for this scale: a single-user local loopback
 /// server doing occasional reads/writes, not a high-concurrency service.
+/// Asks the surrounding shell for a folder, with its native dialog. `None`
+/// means the dialog was cancelled. Blocks until the user answers.
+pub type FolderPicker = Arc<dyn Fn() -> Option<PathBuf> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<Mutex<Store>>,
@@ -32,6 +36,8 @@ pub struct AppState {
     /// `routes/jobs.rs`. Only one runs at a time, and only the latest is
     /// kept: a finished scan's real record is its row in the store.
     pub job: Arc<Mutex<Option<Job>>>,
+    /// Present only when running inside a shell that can show a native dialog.
+    pub folder_picker: Option<FolderPicker>,
 }
 
 pub struct Job {
