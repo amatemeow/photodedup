@@ -20,7 +20,7 @@ shaped these decisions.
 | **Windows code signing (SmartScreen)** | OV certs now require hardware tokens/HSM; real cost | SignPath.io's free OSS tier is the planned path if users report friction; artifact build is already reproducible via GitHub Actions, which SignPath needs |
 | **Windows background-scheduling equivalent** (`SetPriorityClass(..., BELOW_NORMAL_PRIORITY_CLASS)`, `THREAD_MODE_BACKGROUND_BEGIN`) | No Windows target to verify against yet; didn't want a `windows-sys` dependency added speculatively | `platform::noop::NoopScheduler` is the only thing that needs replacing — every caller already goes through the `PlatformScheduler` trait (`crates/core/src/platform/`), untouched by adding a real Windows impl |
 | **Resume-recognition beyond exact path match** | `Store::find_latest_scan_for_root` (see "Resolved during M2" below) currently matches on canonicalized path only — a folder renamed, moved to a new parent directory, or re-synced to a new local path by a cloud client (OneDrive/Dropbox/iCloud routinely do this) no longer matches its own prior scan at all, even though every file inside is identical. Not fixed now because it needs a real design decision, not just more code — **explicit user requirement, recorded here so it isn't lost**: recognize the same logical folder by content, not just path | The exact-hash pass (`exacthash.rs`) already computes a blake3 digest for every size-collision bucket, and `files` already stores `(size, mtime)` per file from day one — a content fingerprint (e.g. the multiset of `(size, blake3)` for a sample of files, or file count + total size as a cheap first-pass filter before a full comparison) is additive, not a schema change. The harder part is UX, not storage — **see the suggested prompt copy right below the table.** |
-| **User-tunable matching settings** (the pHash distance for splitting quick sequences, the candidate-match distance, the same-sequence time gap, and similar engine thresholds) | Today these are constants chosen by eye or from calibration on one dataset (`BURST_VISUAL_MAX_DIST`, `CANDIDATE_MAX_DIST`, `BURST_GAP_SECONDS`); the right values depend on the person's shooting style, and no single number is correct for everyone. Needs a design decision: which knobs are worth exposing, sensible limits, and a way to preview the effect (re-grouping from stored hashes needs no re-scan) so tuning isn't blind | Each is already a named constant with its calibration recorded beside it, and the sequence split runs over stored hashes, so a setting could re-group instantly without touching the rest of the pipeline. Belongs in the same Options tab as the scan-intensity setting, as a clearly marked "advanced" section |
+| **More tunable settings, and seeing a setting's effect before re-scanning** | The three matching knobs shipped (see "Options tab"). Still deferred: the video-matching distances (duration tolerance, frame-match distance); a live preview of what a new value would do (the sequence split could re-run over stored hashes, but only the post-split groups are saved, not the raw time-runs it starts from); and recording which values each scan used, so an old scan can say so (needs a column on `scans`) | The thresholds are one `Thresholds` struct with named ranges (`core/src/thresholds.rs`) passed explicitly through the engine, and the `settings` table is a plain key/value store, so another knob is a field, a range and a row in the UI |
 | **Several scans alive at once** (per-folder history, switching between scans, comparing two) | For now exactly one scan is live: saving a new one deletes the previous scan, including its decisions (user's call). Needs a real design decision about when a scan may be discarded, and what a re-scan of the same folder does with the decisions already made on it (carry over by relative path?) | Every database id is a UUID, so nothing in the API assumes there is only one scan. `save_scan` is the single place that deletes the old one (`delete_all_scans`), and decisions are already keyed by relative path rather than file id, so carrying them across a re-scan is additive |
 
 **Suggested UX for the resume-recognition item above (don't lose this when it gets built):**
@@ -534,9 +534,38 @@ on the review screen) stay where they are used.
   value is ignored, never trusted. The CLI `--mode` flag is unchanged.
 - The start screen shows which speed the next scan will use, with a link to
   Options.
-- **Still deferred, and meant to live here later** as an "advanced" section:
-  the matching thresholds (see the deferred table). The `settings` table is
-  a plain key/value store, so adding one is a new key and a row in the UI.
+- **Advanced matching** (a collapsed group of three sliders, each with its
+  own range, a "reset to default", and "reset all"; changes apply to the
+  **next scan**, which the screen says):
+  - *Sequence similarity* (pHash distance, 40-100, default 80): how alike
+    shots must look to stay in one quick sequence.
+  - *Sequence time gap* (1-30 s, default 3): how close in time shots must
+    be to start a sequence. It also decides whether two similar shots are
+    "in a sequence" or listed under Same-device review.
+  - *Copy match distance* (25-60, default 45): how different two photos may
+    look and still be checked as possible copies. The riskier one: a higher
+    value finds more copies and can suggest wrong ones, so its range stops
+    well short of where unrelated photos begin (100+ of 256 bits), and the
+    screen says so. **No setting can weaken the structural rule that two
+    untouched camera photos are never suggested as copies of each other** --
+    that is not a number.
+  - **Safety of the values themselves:** limits live in one place
+    (`thresholds.rs`) and are enforced on every request; a request is
+    checked as a whole (a refused request saves none of its fields), and a
+    stored value that is missing, unparseable or out of range falls back to
+    its default rather than being trusted.
+  - **Wiring is not optional:** the old global constants were removed and
+    the values are required parameters (`classify_pair`,
+    `detect_burst_runs`, `PipelineOptions::thresholds`), so no code path can
+    quietly ignore a setting.
+  - **Checked on a pristine copy of the test library** (the 51 files from
+    `files.txt`): defaults give 3 sequences over 11 frames, 9 look-alike
+    pairs and 10 duplicate groups; strictest similarity gives 2 sequences
+    over 7 frames; a 1 s gap gives 2 over 5 frames; a 30 s gap gives 7 over
+    21 frames and moves every pair into a sequence; match distance 25 leaves
+    2 look-alike pairs and 60 gives 11. **Duplicate groups stayed at 10
+    throughout**, and restoring the defaults reproduced the first result
+    exactly.
 
 ## Test folder
 
@@ -546,4 +575,10 @@ on the review screen) stay where they are used.
 steps. Scan result for the folder: 2 exact, 8 true duplicates (7 photo
 groups + 1 video group), 3 sequences over 11 frames, 9 look-alike pairs, 2
 orphan videos, 1 companion sidecar.
+
+*Test-folder note:* pointing the app at `~/photodedup-test` itself (rather
+than its `library/` folder) works, and creates the quarantine folder one
+level up. That is the guard doing what it should, since the "workspace" is
+whichever folder you scan. It happened during first use: 18 files moved,
+all accounted for in the manifest, 34 + 18 = the 52 that were created.
 

@@ -17,8 +17,6 @@ use crate::model::FileId;
 use crate::provenance::Origin;
 use chrono::NaiveDateTime;
 
-pub const CANDIDATE_MAX_DIST: u32 = 45; // generous net; true dupes ~20, noise ~100+
-pub const BURST_GAP_SECONDS: i64 = 3;
 pub const SAME_DERIVED_MAX_SECONDS: i64 = 30; // mirrors MVP's CROSS_DEVICE_MAX_SECONDS name/value
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,7 +78,9 @@ fn dt_seconds(a: &ClassifyInput, b: &ClassifyInput) -> Option<i64> {
     }
 }
 
-pub fn classify_pair(a: &ClassifyInput, b: &ClassifyInput, phash_dist: u32) -> PairClassification {
+/// `burst_gap_seconds` is the time window within which two shots from one
+/// camera count as part of a quick sequence (a tunable, see `thresholds`).
+pub fn classify_pair(a: &ClassifyInput, b: &ClassifyInput, phash_dist: u32, burst_gap_seconds: i64) -> PairClassification {
     let dt = dt_seconds(a, b);
     let same_camera = matches!((&a.camera_model, &b.camera_model), (Some(x), Some(y)) if x == y);
 
@@ -90,7 +90,7 @@ pub fn classify_pair(a: &ClassifyInput, b: &ClassifyInput, phash_dist: u32) -> P
         // Never auto-collapse two camera-originals, regardless of distance
         // -- see module docs for why this must be structural, not a
         // tighter threshold.
-        if same_camera && dt.is_some_and(|d| d <= BURST_GAP_SECONDS) {
+        if same_camera && dt.is_some_and(|d| d <= burst_gap_seconds) {
             (Tier::T2Burst, "burst_same_camera")
         } else if same_camera {
             (Tier::T2NativeReview, "native_native_review")
@@ -123,6 +123,7 @@ pub fn classify_pair(a: &ClassifyInput, b: &ClassifyInput, phash_dist: u32) -> P
 #[cfg(test)]
 mod tests {
     use super::*;
+    const GAP: i64 = 3;
 
     fn input(id: FileId, origin: Origin, camera: &str, t: Option<NaiveDateTime>) -> ClassifyInput {
         ClassifyInput {
@@ -143,7 +144,7 @@ mod tests {
         // files must still land in a review-only tier.
         let a = input(0, Origin::CameraOriginal, "OnePlus 15", Some(ts("2026-10-19 10:14:41")));
         let b = input(1, Origin::CameraOriginal, "OnePlus 15", Some(ts("2026-10-19 10:14:42")));
-        let c = classify_pair(&a, &b, 0);
+        let c = classify_pair(&a, &b, 0, GAP);
         assert!(!c.tier.is_auto_selectable());
         assert_eq!(c.tier, Tier::T2Burst);
     }
@@ -152,14 +153,25 @@ mod tests {
     fn burst_sibling_one_second_apart_same_camera_is_burst_tier() {
         let a = input(0, Origin::CameraOriginal, "OnePlus 15", Some(ts("2026-10-19 10:14:41")));
         let b = input(1, Origin::CameraOriginal, "OnePlus 15", Some(ts("2026-10-19 10:14:42")));
-        assert_eq!(classify_pair(&a, &b, 30).tier, Tier::T2Burst);
+        assert_eq!(classify_pair(&a, &b, 30, GAP).tier, Tier::T2Burst);
+    }
+
+    #[test]
+    fn the_time_gap_setting_moves_a_pair_between_sequence_and_same_device_review() {
+        let a = input(0, Origin::CameraOriginal, "OnePlus 15", Some(ts("2026-10-19 10:14:40")));
+        let b = input(1, Origin::CameraOriginal, "OnePlus 15", Some(ts("2026-10-19 10:14:46")));
+        assert_eq!(classify_pair(&a, &b, 30, 3).tier, Tier::T2NativeReview, "6 s apart: outside a 3 s sequence");
+        assert_eq!(classify_pair(&a, &b, 30, 10).tier, Tier::T2Burst, "inside a 10 s sequence");
+        // and never auto-collapsed whichever way the setting goes
+        assert!(!classify_pair(&a, &b, 0, 10).tier.is_auto_selectable());
+        assert!(!classify_pair(&a, &b, 0, 30).tier.is_auto_selectable());
     }
 
     #[test]
     fn native_vs_derived_is_t1_auto_selectable() {
         let a = input(0, Origin::CameraOriginal, "OnePlus 15", None);
         let b = input(1, Origin::Derived, "OnePlus 15", None);
-        let c = classify_pair(&a, &b, 5);
+        let c = classify_pair(&a, &b, 5, GAP);
         assert_eq!(c.tier, Tier::T1);
         assert!(c.tier.is_auto_selectable());
     }
@@ -168,7 +180,7 @@ mod tests {
     fn two_derived_files_close_in_time_are_t1b() {
         let a = input(0, Origin::Derived, "unknown", Some(ts("2026-10-19 10:14:41")));
         let b = input(1, Origin::Derived, "unknown", Some(ts("2026-10-19 10:14:45")));
-        let c = classify_pair(&a, &b, 5);
+        let c = classify_pair(&a, &b, 5, GAP);
         assert_eq!(c.tier, Tier::T1b);
         assert!(c.tier.is_auto_selectable());
     }
@@ -182,14 +194,14 @@ mod tests {
         // here since there's no original left to protect either way.
         let a = input(0, Origin::Derived, "unknown", None);
         let b = input(1, Origin::Derived, "unknown", None);
-        assert_eq!(classify_pair(&a, &b, 5).tier, Tier::T1b);
+        assert_eq!(classify_pair(&a, &b, 5, GAP).tier, Tier::T1b);
     }
 
     #[test]
     fn unknown_provenance_never_auto_classifies() {
         let a = input(0, Origin::Unknown, "x", None);
         let b = input(1, Origin::CameraOriginal, "x", None);
-        let c = classify_pair(&a, &b, 5);
+        let c = classify_pair(&a, &b, 5, GAP);
         assert!(!c.tier.is_auto_selectable());
         assert_eq!(c.tier, Tier::T2UnknownReview);
     }
@@ -198,7 +210,7 @@ mod tests {
     fn cross_device_native_pair_is_its_own_tier() {
         let a = input(0, Origin::CameraOriginal, "OnePlus 15", None);
         let b = input(1, Origin::CameraOriginal, "iPhone Air", None);
-        let c = classify_pair(&a, &b, 40);
+        let c = classify_pair(&a, &b, 40, GAP);
         assert_eq!(c.tier, Tier::T3CrossDevice);
         assert!(!c.tier.is_auto_selectable());
     }

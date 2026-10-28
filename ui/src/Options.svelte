@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api, ApiError, type IntensityId, type Settings } from './lib/api';
+  import { api, ApiError, type IntensityId, type KnobId, type Settings, type SettingsPatch } from './lib/api';
 
   let { onBack }: { onBack: () => void } = $props();
 
@@ -31,6 +31,47 @@
     },
   ];
 
+  // The three matching thresholds, as sliders. `low`/`high` label the two
+  // ends; `unit` is shown after the value; `step` keeps the slider easy to
+  // land on a sensible number (the limits themselves come from the server).
+  const knobs: { id: KnobId; title: string; blurb: string; low: string; high: string; unit: string; step: number; caution?: string }[] = [
+    {
+      id: 'sequence_similarity',
+      title: 'Sequence similarity',
+      blurb:
+        'How alike shots must look to stay in one quick sequence. Shots that differ by more than this are split into separate groups, so a lower value gives smaller, tighter sequences.',
+      low: 'Stricter',
+      high: 'Looser',
+      unit: '',
+      step: 5,
+    },
+    {
+      id: 'sequence_gap_seconds',
+      title: 'Sequence time gap',
+      blurb:
+        'Shots from one camera taken within this many seconds of each other can belong to the same quick sequence. It also decides whether two similar shots are listed as a sequence or under Same-device review.',
+      low: 'Shorter',
+      high: 'Longer',
+      unit: ' s',
+      step: 1,
+    },
+    {
+      id: 'match_distance',
+      title: 'Copy match distance',
+      blurb: 'How different two photos may look and still be checked as possible copies of each other.',
+      low: 'Stricter',
+      high: 'More permissive',
+      unit: '',
+      step: 5,
+      caution:
+        'A higher value finds more copies but can also suggest wrong ones. Two untouched camera photos are never suggested as copies of each other, whatever you choose here.',
+    },
+  ];
+
+  // What a slider shows while it is being dragged, before it is saved.
+  let drag = $state<Partial<Record<KnobId, number>>>({});
+  const shown = (id: KnobId) => drag[id] ?? settings?.advanced[id].value ?? 0;
+
   const say = (e: unknown) => (e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e));
 
   onMount(async () => {
@@ -41,17 +82,25 @@
     }
   });
 
-  async function choose(id: IntensityId) {
-    if (!settings || settings.scan_intensity === id) return;
+  async function save(patch: SettingsPatch) {
     error = '';
     saved = false;
     try {
-      settings = await api.saveSettings(id);
+      settings = await api.saveSettings(patch);
       saved = true;
     } catch (e) {
       error = say(e);
+    } finally {
+      drag = {};
     }
   }
+
+  const choose = (id: IntensityId) => (settings && settings.scan_intensity !== id ? save({ scan_intensity: id }) : undefined);
+
+  const allDefault = $derived(settings ? knobs.every((k) => settings!.advanced[k.id].value === settings!.advanced[k.id].default) : true);
+  const resetAll = () =>
+    settings &&
+    save(Object.fromEntries(knobs.map((k) => [k.id, settings!.advanced[k.id].default])) as SettingsPatch);
 
   const workers = (id: IntensityId) => settings?.tiers.find((t) => t.id === id)?.workers;
 </script>
@@ -87,6 +136,43 @@
       </div>
       <p class="status" aria-live="polite">{saved ? 'Saved.' : ' '}</p>
     </section>
+
+    <details class="advanced">
+      <summary><h2>Advanced matching</h2></summary>
+      <p class="hint">
+        How strictly the scan groups photos. The defaults were tuned on real libraries and suit most people. Changes apply to the <strong>next
+        scan</strong>; scan the folder again to see them.
+      </p>
+      {#each knobs as k (k.id)}
+        {@const kn = settings.advanced[k.id]}
+        <div class="knob">
+          <div class="knob-head">
+            <label for={k.id}><strong>{k.title}</strong></label>
+            <span class="value">{shown(k.id)}{k.unit}</span>
+            {#if kn.value !== kn.default}
+              <button class="link" onclick={() => save({ [k.id]: kn.default })}>Reset to {kn.default}{k.unit}</button>
+            {/if}
+          </div>
+          <p class="hint">{k.blurb}</p>
+          <div class="slider">
+            <span class="hint">{k.low}</span>
+            <input
+              id={k.id}
+              type="range"
+              min={kn.min}
+              max={kn.max}
+              step={k.step}
+              value={kn.value}
+              oninput={(e) => (drag[k.id] = Number(e.currentTarget.value))}
+              onchange={(e) => save({ [k.id]: Number(e.currentTarget.value) })}
+            />
+            <span class="hint">{k.high}</span>
+          </div>
+          {#if k.caution}<p class="caution">{k.caution}</p>{/if}
+        </div>
+      {/each}
+      <button class="secondary" disabled={allDefault} onclick={resetAll}>Reset all to defaults</button>
+    </details>
 
     <p class="hint">
       Choices that belong to one scan or one screen live there instead: "Include videos" is on the start screen, and the sort order is on the
@@ -133,6 +219,49 @@
   .body {
     display: grid;
     gap: 0.2rem;
+  }
+  .advanced {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 0.75rem 1rem;
+    margin: 0 0 1.25rem;
+  }
+  .advanced summary {
+    cursor: pointer;
+  }
+  .advanced summary h2 {
+    display: inline;
+  }
+  .knob {
+    padding: 0.75rem 0;
+    border-top: 1px solid var(--line);
+  }
+  .knob-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+  }
+  .knob-head .value {
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .knob p {
+    margin: 0.25rem 0;
+  }
+  .slider {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .slider input {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+  .caution {
+    font-size: 0.85em;
+    color: var(--danger);
   }
   .status {
     color: var(--ok);

@@ -139,11 +139,21 @@ export interface Batch {
 }
 
 export type IntensityId = 'efficient' | 'default' | 'performance';
+export interface Knob {
+  value: number;
+  default: number;
+  min: number;
+  max: number;
+}
+export type KnobId = 'sequence_similarity' | 'sequence_gap_seconds' | 'match_distance';
 export interface Settings {
   scan_intensity: IntensityId;
   tiers: { id: IntensityId; workers: number }[];
   logical_cores: number;
+  advanced: Record<KnobId, Knob>;
 }
+/** Send only what changed. */
+export type SettingsPatch = Partial<{ scan_intensity: IntensityId } & Record<KnobId, number>>;
 
 export class ApiError extends Error {
   constructor(
@@ -186,8 +196,7 @@ export const api = {
     call<void>(`/api/scans/${scanId}/decisions?relative_path=${encodeURIComponent(relativePath)}`, { method: 'DELETE' }),
 
   settings: () => call<Settings>('/api/settings'),
-  saveSettings: (scan_intensity: IntensityId) =>
-    call<Settings>('/api/settings', { method: 'PUT', body: JSON.stringify({ scan_intensity }) }),
+  saveSettings: (patch: SettingsPatch) => call<Settings>('/api/settings', { method: 'PUT', body: JSON.stringify(patch) }),
 
   applyPlan: (scanId: string) => call<Plan>(`/api/scans/${scanId}/apply/plan`),
   apply: (scanId: string) =>

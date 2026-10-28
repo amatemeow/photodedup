@@ -3,7 +3,8 @@
 //! This is the thing `crates/cli` calls, and the thing M1's end-to-end
 //! parity test runs against the reference Japan-trip dataset.
 
-use crate::classify::{classify_pair, ClassifyInput, PairClassification, CANDIDATE_MAX_DIST};
+use crate::classify::{classify_pair, ClassifyInput, PairClassification};
+use crate::thresholds::Thresholds;
 use crate::cluster::merge_edges;
 use crate::decode::decode_image;
 use crate::exacthash::find_exact_duplicates;
@@ -12,7 +13,7 @@ use crate::keeper::{pick_keeper, score as keeper_score};
 use crate::metadata::{extract_image, extract_video};
 use crate::model::{FileId, FileRecord, MediaClassSerde, SiblingSet};
 use crate::provenance::{evaluate, Origin, Provenance};
-use crate::resolve::{detect_burst_runs, resolve_t1_edges, resolve_t1b_edges, split_runs_by_similarity, BurstRun, BURST_VISUAL_MAX_DIST};
+use crate::resolve::{detect_burst_runs, resolve_t1_edges, resolve_t1b_edges, split_runs_by_similarity, BurstRun};
 use crate::scan::scan;
 use crate::throttle::{build_pool, lower_process_priority, ScanIntensity};
 use crate::video_match::{find_video_matches, VideoCandidate, VideoMatch};
@@ -37,6 +38,8 @@ pub struct PipelineOptions {
     /// ones), not probed, not matched -- as if the folder had none. On by
     /// default.
     pub include_videos: bool,
+    /// The tunable matching distances and time gap (see `thresholds`).
+    pub thresholds: Thresholds,
 }
 
 impl Default for PipelineOptions {
@@ -46,6 +49,7 @@ impl Default for PipelineOptions {
             ffprobe_bin: "ffprobe".to_string(),
             intensity: ScanIntensity::default(),
             include_videos: true,
+            thresholds: Thresholds::default(),
         }
     }
 }
@@ -232,7 +236,7 @@ fn run_inner(root: &Path, opts: &PipelineOptions, on_progress: &(dyn Fn(Progress
         .filter_map(|&id| analyzed.get(&id).and_then(|a| a.phash).map(|h| (id, h)))
         .collect();
     let index = crate::search::BruteForceIndex::build(image_hash_entries);
-    let candidate_pairs = index.all_pairs_within(CANDIDATE_MAX_DIST);
+    let candidate_pairs = index.all_pairs_within(opts.thresholds.match_distance);
 
     let pair_classifications: Vec<PairClassification> = candidate_pairs
         .into_iter()
@@ -256,7 +260,7 @@ fn run_inner(root: &Path, opts: &PipelineOptions, on_progress: &(dyn Fn(Progress
                 camera_model: b.camera_model.clone(),
                 capture_time: b.capture_time,
             };
-            classify_pair(&ai, &bi, dist)
+            classify_pair(&ai, &bi, dist, opts.thresholds.sequence_gap_seconds)
         })
         .collect();
 
@@ -402,10 +406,14 @@ fn run_inner(root: &Path, opts: &PipelineOptions, on_progress: &(dyn Fn(Progress
             Some((id, a.camera_model.clone()?, a.capture_time?))
         })
         .collect();
-    // Time alone over-groups (see `BURST_VISUAL_MAX_DIST`): keep only the
+    // Time alone over-groups (see `thresholds::SEQUENCE_SIMILARITY`): keep only the
     // frames that also look like the same shot.
     let frame_hashes: HashMap<FileId, Hash256> = analyzed.iter().filter_map(|(&id, a)| a.phash.map(|h| (id, h))).collect();
-    let burst_runs = split_runs_by_similarity(detect_burst_runs(&burst_input), &frame_hashes, BURST_VISUAL_MAX_DIST);
+    let burst_runs = split_runs_by_similarity(
+        detect_burst_runs(&burst_input, opts.thresholds.sequence_gap_seconds),
+        &frame_hashes,
+        opts.thresholds.sequence_similarity,
+    );
 
     let review_pairs: Vec<PairClassification> = pair_classifications
         .into_iter()
