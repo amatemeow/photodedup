@@ -3,6 +3,7 @@ pub mod decisions;
 pub mod files;
 pub mod jobs;
 pub mod scans;
+pub mod settings;
 
 use axum::http::StatusCode;
 use photodedup_core::store::Store;

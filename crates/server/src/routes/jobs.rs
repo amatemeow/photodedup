@@ -46,11 +46,17 @@ pub struct StartDto {
     pub job_id: u64,
 }
 
+/// An explicit mode in the request wins (scripts, tests); otherwise the
+/// person's standing preference from Options; otherwise the default.
+fn resolve_intensity(requested: Option<&str>, store: &photodedup_core::store::Store) -> Result<ScanIntensity, String> {
+    match requested {
+        Some(m) => m.parse(),
+        None => Ok(super::settings::stored_intensity(store)),
+    }
+}
+
 pub async fn start_scan(State(state): State<AppState>, Json(body): Json<StartBody>) -> Result<(StatusCode, Json<StartDto>), (StatusCode, String)> {
-    let intensity: ScanIntensity = match body.mode.as_deref() {
-        Some(m) => m.parse().map_err(|e: String| (StatusCode::BAD_REQUEST, e))?,
-        None => ScanIntensity::default(),
-    };
+    let intensity = resolve_intensity(body.mode.as_deref(), &state.store.lock().unwrap()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let include_videos = body.include_videos.unwrap_or(true);
     let root = std::fs::canonicalize(&body.root)
         .ok()
@@ -184,6 +190,18 @@ mod tests {
 
     fn body(root: &std::path::Path, mode: Option<&str>) -> Json<StartBody> {
         Json(StartBody { root: root.to_path_buf(), mode: mode.map(String::from), include_videos: None })
+    }
+
+    #[test]
+    fn a_scan_uses_the_saved_preference_unless_the_request_names_a_mode() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(matches!(resolve_intensity(None, &store), Ok(ScanIntensity::Default)));
+
+        store.set_setting("scan_intensity", "efficient").unwrap();
+        assert!(matches!(resolve_intensity(None, &store), Ok(ScanIntensity::Efficient)), "the saved preference is used");
+        assert!(matches!(resolve_intensity(Some("performance"), &store), Ok(ScanIntensity::Performance)), "an explicit mode wins");
+        assert!(matches!(resolve_intensity(Some("3"), &store), Ok(ScanIntensity::Custom(_))), "scripts can still pass a worker count");
+        assert!(resolve_intensity(Some("turbo"), &store).is_err());
     }
 
     #[tokio::test]

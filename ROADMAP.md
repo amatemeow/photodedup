@@ -19,7 +19,6 @@ shaped these decisions.
 | **Paid macOS notarisation** | $99/yr Apple Developer Program; a Homebrew Cask (free, strips the quarantine xattr) covers most of the same friction | CI signing step is parameterised, not hardcoded to ad-hoc-only, so flipping it on later is a config change |
 | **Windows code signing (SmartScreen)** | OV certs now require hardware tokens/HSM; real cost | SignPath.io's free OSS tier is the planned path if users report friction; artifact build is already reproducible via GitHub Actions, which SignPath needs |
 | **Windows background-scheduling equivalent** (`SetPriorityClass(..., BELOW_NORMAL_PRIORITY_CLASS)`, `THREAD_MODE_BACKGROUND_BEGIN`) | No Windows target to verify against yet; didn't want a `windows-sys` dependency added speculatively | `platform::noop::NoopScheduler` is the only thing that needs replacing — every caller already goes through the `PlatformScheduler` trait (`crates/core/src/platform/`), untouched by adding a real Windows impl |
-| **Scan-intensity (Efficient/Default/Performance) as a persistent app setting** | No UI exists yet (M2+) — currently a `--mode` CLI flag, set fresh per invocation | `ScanIntensity` (`throttle.rs`) is a small `Copy` enum with no state of its own; M2's settings/options surface needs only to read a stored value and pass it into `PipelineOptions`, not touch the scheduling logic itself. **Explicit user requirement, recorded here so it isn't lost before M2 design starts:** this belongs in the app's persistent Options/Settings tab (a standing preference the user sets once), not a per-scan prompt or CLI-only flag — the `--mode` flag stays for scripting/testing, but isn't the primary UX once a UI exists |
 | **Resume-recognition beyond exact path match** | `Store::find_latest_scan_for_root` (see "Resolved during M2" below) currently matches on canonicalized path only — a folder renamed, moved to a new parent directory, or re-synced to a new local path by a cloud client (OneDrive/Dropbox/iCloud routinely do this) no longer matches its own prior scan at all, even though every file inside is identical. Not fixed now because it needs a real design decision, not just more code — **explicit user requirement, recorded here so it isn't lost**: recognize the same logical folder by content, not just path | The exact-hash pass (`exacthash.rs`) already computes a blake3 digest for every size-collision bucket, and `files` already stores `(size, mtime)` per file from day one — a content fingerprint (e.g. the multiset of `(size, blake3)` for a sample of files, or file count + total size as a cheap first-pass filter before a full comparison) is additive, not a schema change. The harder part is UX, not storage — **see the suggested prompt copy right below the table.** |
 | **User-tunable matching settings** (the pHash distance for splitting quick sequences, the candidate-match distance, the same-sequence time gap, and similar engine thresholds) | Today these are constants chosen by eye or from calibration on one dataset (`BURST_VISUAL_MAX_DIST`, `CANDIDATE_MAX_DIST`, `BURST_GAP_SECONDS`); the right values depend on the person's shooting style, and no single number is correct for everyone. Needs a design decision: which knobs are worth exposing, sensible limits, and a way to preview the effect (re-grouping from stored hashes needs no re-scan) so tuning isn't blind | Each is already a named constant with its calibration recorded beside it, and the sequence split runs over stored hashes, so a setting could re-group instantly without touching the rest of the pipeline. Belongs in the same Options tab as the scan-intensity setting, as a clearly marked "advanced" section |
 | **Several scans alive at once** (per-folder history, switching between scans, comparing two) | For now exactly one scan is live: saving a new one deletes the previous scan, including its decisions (user's call). Needs a real design decision about when a scan may be discarded, and what a re-scan of the same folder does with the decisions already made on it (carry over by relative path?) | Every database id is a UUID, so nothing in the API assumes there is only one scan. `save_scan` is the single place that deletes the old one (`delete_all_scans`), and decisions are already keyed by relative path rather than file id, so carrying them across a re-scan is additive |
@@ -207,8 +206,8 @@ as a choice.
 - **UI scaffold** (`ui/`: Svelte 5 + Vite + TypeScript). First slice is the
   start flow only: folder path -> resume lookup (offers Resume / Scan
   again for a known folder) -> live scan progress over SSE with Cancel ->
-  "ready" with the cluster count. The review screen and the Options tab
-  (persistent scan intensity) are still to build. `photodedup serve`
+  "ready" with the cluster count (the review screen and the Options tab
+  came later; see below). `photodedup serve`
   serves `ui/dist` (or `PHOTODEDUP_UI_DIR`) at `/`; the UI takes the
   session token from the URL, keeps it in `sessionStorage`, and strips it
   from the address bar. Packaged builds will embed the UI instead (M4).
@@ -283,8 +282,7 @@ as a choice.
     `DELETE /api/scans/{id}/decisions?relative_path=` (back to undecided,
     for undo). Applying them (move to quarantine, with undo) is M3, below.
   - The decision logic has unit tests (`npm test`); **the screen itself is
-    not yet verified in a real browser.** Still to build: the Options tab,
-    and virtualizing the overview grid for libraries much larger than the 182 clusters tested.
+    not yet verified in a real browser.** Still to build: virtualizing the overview grid for libraries much larger than the 182 clusters tested.
 
 - **Review split into the MVP's categories** (tabs, each with its own
   count and one-line explanation): *Exact duplicates* (T0 clusters),
@@ -381,8 +379,9 @@ as a choice.
     videos tab just says "No orphan videos" either way. Recording it per
     scan (so the UI can say "videos weren't scanned") needs a schema
     change; not done yet.
-  - The checkbox is a stand-in: like scan intensity, it belongs in the
-    persistent Options tab once that exists.
+  - The checkbox stays on the start screen on purpose (user's call): it is
+    a choice about *this* scan, not a standing preference, so it does not
+    belong in Options.
   - Timing is not claimed: the 179 s no-video run is only comparable to a
     run with videos made on an otherwise idle machine, and the one I have
     (250 s) wasn't.
@@ -414,8 +413,9 @@ as a choice.
     offset (9 h in Japan) when sorted together. Within one kind, order is
     exact. Normalizing needs the offset of the shot (GPS or the Apple
     `creationdate` offset); not done.
-  - Cards and the detail header show the date. The sort choice and the
-    "include videos" checkbox are both candidates for the Options tab.
+  - Cards and the detail header show the date. The sort choice stays on the
+    review screen on purpose (user's call): it is a way of looking at the
+    current review, not a standing preference.
   - **Photos and videos are separate phases with separate counts.** The
     scan screen used to say "N of M photos and videos", which was wrong
     however it was worded: they aren't processed together (photos first,
@@ -513,4 +513,37 @@ was pointed at, and never makes a change that can't be undone.**
 - Re-scanning replaces the scan and the decisions made on it (see the
   single-live-scan entry), so files still in quarantine from a batch can
   be undone but any decisions not yet applied are lost.
+
+## Options tab
+
+Only *permanent* preferences live here (user's decision): per-scan choices
+(**Include videos**, on the start screen) and view choices (**sort order**,
+on the review screen) stay where they are used.
+
+- **Scan speed** (Efficient / Default / Performance) is a standing
+  preference, saved in the database's `settings` table (not in the browser,
+  so it follows the data and works however the app is opened, including the
+  future desktop shell), via `GET`/`PUT /api/settings`. Each tier shows what
+  it really does on this machine (worker counts, 2 / 4 / 12 on the 12-core
+  development Mac) with the measured trade-offs worded as measurements, not
+  promises: Efficient about 8x less processor power than Default in testing
+  on Apple Silicon but much slower; Default polite; Performance fast and
+  hot. It saves the moment a choice is made.
+- **Precedence when a scan starts:** a mode named in the request (scripts,
+  tests) wins, then the saved preference, then Default. A corrupt stored
+  value is ignored, never trusted. The CLI `--mode` flag is unchanged.
+- The start screen shows which speed the next scan will use, with a link to
+  Options.
+- **Still deferred, and meant to live here later** as an "advanced" section:
+  the matching thresholds (see the deferred table). The `settings` table is
+  a plain key/value store, so adding one is a new key and a row in the UI.
+
+## Test folder
+
+`~/photodedup-test/` (outside the repo, outside every real folder) holds a
+52-file copy of real photos and videos covering every review tab, plus
+`reset.sh` to rebuild it and clear its database, and a README with the
+steps. Scan result for the folder: 2 exact, 8 true duplicates (7 photo
+groups + 1 video group), 3 sequences over 11 frames, 9 look-alike pairs, 2
+orphan videos, 1 companion sidecar.
 
