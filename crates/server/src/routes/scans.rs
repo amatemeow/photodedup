@@ -42,6 +42,37 @@ pub async fn list_scans(State(state): State<AppState>) -> Result<Json<Vec<ScanSu
     Ok(Json(out))
 }
 
+/// What a scan was made with, so the review can show it and notice when the
+/// saved settings have moved on since.
+#[derive(Serialize)]
+pub struct UsedSettings {
+    pub match_distance: u32,
+    pub sequence_similarity: u32,
+    pub sequence_gap_seconds: i64,
+    pub include_videos: bool,
+}
+
+#[derive(Serialize)]
+pub struct ScanInfoDto {
+    pub id: String,
+    pub root_path: String,
+    pub started_at: String,
+    /// `None` for a scan saved before this was recorded.
+    pub used: Option<UsedSettings>,
+}
+
+pub async fn scan_info(State(state): State<AppState>, AxPath(scan_id): AxPath<String>) -> Result<Json<ScanInfoDto>, StatusCode> {
+    let store = state.store.lock().unwrap();
+    let scan = store.get_scan(&scan_id).map_err(internal)?.ok_or(StatusCode::NOT_FOUND)?;
+    let used = store.get_scan_settings(&scan_id).map_err(internal)?.map(|(t, include_videos)| UsedSettings {
+        match_distance: t.match_distance,
+        sequence_similarity: t.sequence_similarity,
+        sequence_gap_seconds: t.sequence_gap_seconds,
+        include_videos,
+    });
+    Ok(Json(ScanInfoDto { id: scan.id, root_path: scan.root_path, started_at: scan.started_at, used }))
+}
+
 #[derive(Serialize)]
 pub struct FileDto {
     pub id: String,

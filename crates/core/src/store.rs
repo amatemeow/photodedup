@@ -105,6 +105,16 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 
+-- The matching settings a scan was made with, so the review can say so and
+-- notice when the saved settings have since moved on. One row per scan.
+CREATE TABLE IF NOT EXISTS scan_settings (
+    scan_id TEXT PRIMARY KEY REFERENCES scans(id) ON DELETE CASCADE,
+    match_distance INTEGER NOT NULL,
+    sequence_similarity INTEGER NOT NULL,
+    sequence_gap_seconds INTEGER NOT NULL,
+    include_videos INTEGER NOT NULL
+);
+
 -- Companions of a primary file (RAW, XMP, the MOV of a Live Photo): they
 -- move with it when a decision is applied.
 CREATE TABLE IF NOT EXISTS file_siblings (
@@ -281,12 +291,32 @@ impl Store {
     pub fn save_scan(&mut self, root: &Path, result: &PipelineResult) -> rusqlite::Result<String> {
         let tx = self.conn.transaction()?;
         let scan_id = uuid::Uuid::new_v4().to_string();
+        let new_root = canonical_root_string(root);
+
+        // Choices made on the scan about to be replaced, kept so a re-scan of
+        // the same folder doesn't make the user redo their work. Read now,
+        // before the old rows are deleted; applied only to files that have
+        // not changed (see below).
+        let carried: Vec<(String, bool, String, u64, i64)> = {
+            let mut stmt = tx.prepare(
+                "SELECT d.relative_path, d.keep, d.decided_at, f.size_bytes, f.mtime_unix
+                 FROM decisions d
+                 JOIN scans s ON s.id = d.scan_id
+                 JOIN files f ON f.scan_id = d.scan_id AND f.relative_path = d.relative_path
+                 WHERE s.root_path = ?1",
+            )?;
+            let rows = stmt.query_map(params![new_root], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0, r.get::<_, String>(2)?, r.get::<_, i64>(3)? as u64, r.get::<_, i64>(4)?))
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+
         delete_all_scans(&tx)?;
         let now = chrono::Utc::now().to_rfc3339();
 
         tx.execute(
             "INSERT INTO scans (id, root_path, started_at) VALUES (?1, ?2, ?3)",
-            params![scan_id, canonical_root_string(root), now],
+            params![scan_id, new_root, now],
         )?;
 
         // pipeline FileId (u32, scan-local, in-memory only) -> the file's
@@ -361,6 +391,24 @@ impl Store {
                 "INSERT INTO review_pairs (id, scan_id, tier, file_a_id, file_b_id, phash_dist, reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![new_id(), scan_id, tier_str(p.tier), a_row, b_row, p.phash_dist, p.reason],
             )?;
+        }
+
+        // A choice is carried over only if the file is still there and looks
+        // exactly as it did when the choice was made (same size and
+        // modification time). A file that was edited or replaced since is a
+        // different file now, and the choice was about the old one.
+        let still_same: std::collections::HashMap<String, (u64, i64)> = result
+            .files
+            .iter()
+            .map(|f| (f.path.strip_prefix(root).unwrap_or(&f.path).to_string_lossy().to_string(), (f.size_bytes, f.mtime_unix)))
+            .collect();
+        for (rel, keep, decided_at, size, mtime) in carried {
+            if still_same.get(&rel) == Some(&(size, mtime)) {
+                tx.execute(
+                    "INSERT INTO decisions (scan_id, relative_path, keep, decided_at) VALUES (?1, ?2, ?3, ?4)",
+                    params![scan_id, rel, keep as i64, decided_at],
+                )?;
+            }
         }
 
         for set in &result.sibling_sets {
@@ -573,6 +621,36 @@ impl Store {
     #[cfg(test)]
     pub(crate) fn exec_for_test(&self, sql: &str) {
         self.conn.execute(sql, []).unwrap();
+    }
+
+    pub fn record_scan_settings(&self, scan_id: &str, t: &crate::thresholds::Thresholds, include_videos: bool) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO scan_settings (scan_id, match_distance, sequence_similarity, sequence_gap_seconds, include_videos)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![scan_id, t.match_distance, t.sequence_similarity, t.sequence_gap_seconds, include_videos as i64],
+        )?;
+        Ok(())
+    }
+
+    /// The settings a scan was made with; `None` for a scan saved before
+    /// they were recorded.
+    pub fn get_scan_settings(&self, scan_id: &str) -> rusqlite::Result<Option<(crate::thresholds::Thresholds, bool)>> {
+        self.conn
+            .query_row(
+                "SELECT match_distance, sequence_similarity, sequence_gap_seconds, include_videos FROM scan_settings WHERE scan_id = ?1",
+                params![scan_id],
+                |r| {
+                    Ok((
+                        crate::thresholds::Thresholds {
+                            match_distance: r.get(0)?,
+                            sequence_similarity: r.get(1)?,
+                            sequence_gap_seconds: r.get(2)?,
+                        },
+                        r.get::<_, i64>(3)? != 0,
+                    ))
+                },
+            )
+            .optional()
     }
 
     /// Primary file id -> ids of the companions that travel with it.
@@ -822,6 +900,7 @@ fn drop_legacy_schema(conn: &Connection) -> rusqlite::Result<()> {
 /// point at `files` without a cascade, so the order matters.
 fn delete_all_scans(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
     for table in [
+        "scan_settings",
         "file_siblings",
         "orphan_videos",
         "cluster_members",
@@ -1127,6 +1206,59 @@ mod tests {
     }
 
     #[test]
+    fn a_rescan_of_the_same_folder_keeps_choices_for_files_that_have_not_changed() {
+        let (root, result) = sample_result();
+        let mut store = Store::open_in_memory().unwrap();
+        let first = store.save_scan(&root, &result).unwrap();
+        store.record_decision(&first, "a.jpg", false).unwrap();
+        store.record_decision(&first, "b.jpg", true).unwrap();
+
+        let second = store.save_scan(&root, &result).unwrap();
+        let carried = store.load_decisions(&second).unwrap();
+        assert_eq!(carried.get("a.jpg"), Some(&false));
+        assert_eq!(carried.get("b.jpg"), Some(&true));
+        assert!(store.load_decisions(&first).unwrap().is_empty(), "the old scan is gone");
+    }
+
+    #[test]
+    fn a_choice_is_not_carried_to_a_file_that_changed_vanished_or_belongs_to_another_folder() {
+        let (root, result) = sample_result();
+        let mut store = Store::open_in_memory().unwrap();
+        let first = store.save_scan(&root, &result).unwrap();
+        store.record_decision(&first, "a.jpg", false).unwrap();
+        store.record_decision(&first, "b.jpg", false).unwrap();
+
+        // a.jpg was edited (size changed); b.jpg is gone
+        let (_, mut changed) = sample_result();
+        changed.files[0].size_bytes += 1;
+        changed.files.truncate(1);
+        let second = store.save_scan(&root, &changed).unwrap();
+        assert!(store.load_decisions(&second).unwrap().is_empty());
+
+        // a different folder never inherits another folder's choices
+        store.record_decision(&second, "a.jpg", false).unwrap();
+        let other = std::env::temp_dir().join("photodedup-a-different-root");
+        let third = store.save_scan(&other, &result).unwrap();
+        assert!(store.load_decisions(&third).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_settings_a_scan_was_made_with_are_recorded_and_go_with_the_scan() {
+        let (root, result) = sample_result();
+        let mut store = Store::open_in_memory().unwrap();
+        let id = store.save_scan(&root, &result).unwrap();
+        assert!(store.get_scan_settings(&id).unwrap().is_none(), "an unrecorded scan says so");
+
+        let t = crate::thresholds::Thresholds { match_distance: 30, sequence_similarity: 60, sequence_gap_seconds: 7 };
+        store.record_scan_settings(&id, &t, false).unwrap();
+        assert_eq!(store.get_scan_settings(&id).unwrap(), Some((t, false)));
+
+        let next = store.save_scan(&root, &result).unwrap();
+        assert!(store.get_scan_settings(&id).unwrap().is_none());
+        assert!(store.get_scan_settings(&next).unwrap().is_none());
+    }
+
+    #[test]
     fn a_failed_save_leaves_the_previous_scan_untouched() {
         let (root, result) = sample_result();
         let mut store = Store::open_in_memory().unwrap();
@@ -1163,10 +1295,12 @@ mod tests {
         let first = counts(&store);
         store.save_scan(&root, &result).unwrap();
         let second = counts(&store);
-        // Same content saved again: identical counts everywhere except the
-        // decision, which went with the old scan.
+        // Same content saved again: identical counts everywhere, so nothing
+        // from the old scan is left behind. The one decision made on it is
+        // present exactly once, carried to the new scan (same folder, file
+        // unchanged), not duplicated.
         assert_eq!(&first[..7], &second[..7]);
-        assert_eq!(second[7], 0);
+        assert_eq!(second[7], 1);
     }
 
     #[test]

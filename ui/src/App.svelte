@@ -69,10 +69,14 @@
     }
   }
 
-  async function scan() {
+  const scan = () => startScan(root.trim(), includeVideos);
+
+  // Also used by the review's "Scan again", which repeats a scan with the
+  // same folder and the same include-videos choice it was made with.
+  async function startScan(folder: string, withVideos: boolean) {
     error = '';
     try {
-      const { job_id } = await api.startScan(root.trim(), { includeVideos });
+      const { job_id } = await api.startScan(folder, { includeVideos: withVideos });
       view = { kind: 'scanning', jobId: job_id, status: { state: 'running', phase: 'scanning' } };
       stopWatching = api.watchJob(job_id, onStatus, onLost);
     } catch (e) {
@@ -139,7 +143,7 @@
 {#if view.kind === 'options'}
   <Options onBack={() => { view = { kind: 'start' }; loadIntensity(); }} />
 {:else if view.kind === 'review'}
-  <Review scanId={view.scanId} onExit={() => (view = { kind: 'start' })} />
+  <Review scanId={view.scanId} onExit={() => (view = { kind: 'start' })} onRescan={startScan} />
 {:else}
 <main>
   <div class="head">
@@ -166,7 +170,7 @@
     <p class="hint">Type or paste the folder path. A native folder picker arrives with the desktop shell.</p>
   {:else if view.kind === 'found'}
     <p>This folder was scanned before{view.startedAt ? ` (${new Date(view.startedAt).toLocaleString()})` : ''}.</p>
-    <p class="hint">Scanning again replaces that scan and the keep/quarantine choices you made on it.</p>
+    <p class="hint">Scanning again replaces that scan; the keep/quarantine choices you made on files that haven't changed are kept.</p>
     <div class="row">
       <button onclick={() => open((view as { scanId: string }).scanId)}>Resume</button>
       <button class="secondary" onclick={scan}>Scan again</button>
