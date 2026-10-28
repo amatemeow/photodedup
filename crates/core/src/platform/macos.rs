@@ -14,7 +14,7 @@
 //! overflow work onto P-cores under sustained demand); `Background`
 //! actually held the line (P-cores parked at 0MHz, E-cluster saturated,
 //! ~8x lower package power) -- at a real, substantial wall-clock cost,
-//! which is why it's reserved for `ScanIntensity::Economy` rather than
+//! which is why it's reserved for `ScanIntensity::Efficient` rather than
 //! applied everywhere.
 
 use super::{PlatformScheduler, SchedulingHint};

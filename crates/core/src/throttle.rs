@@ -34,6 +34,13 @@
 //! -- this module contains no `#[cfg(...)]` of its own; it only decides
 //! *how many* workers and *which* hint, then asks the platform layer to
 //! carry it out.
+//!
+//! Tier names (`Efficient`/`Default`/`Performance`) deliberately match the
+//! naming convention most apps already use for this exact tradeoff (macOS
+//! Low Power/Automatic/High Power, browser "Energy Saver" modes, etc.) --
+//! this is meant to be a recognizable choice in a settings UI later (M2+:
+//! a persistent option in the app's settings, not a one-off per-scan
+//! flag), not a label a user has to learn from scratch.
 
 use crate::platform::{platform, SchedulingHint};
 use std::num::NonZeroUsize;
@@ -46,19 +53,19 @@ pub enum ScanIntensity {
     /// be as unobtrusive as possible and is fine with it taking
     /// substantially longer in exchange (measured ~8x lower CPU package
     /// power than `Default`, at real wall-clock cost -- see module docs).
-    Economy,
+    Efficient,
     /// Targets the machine's efficiency-core count (Apple Silicon) with
     /// `SchedulingHint::Utility` applied -- lower priority than normal,
     /// but still allowed to use performance cores when it genuinely needs
     /// to, rather than being strictly confined to E-cores. Falls back to
     /// half the logical cores where efficiency-core detection isn't
     /// available. **The default** -- noticeably more polite than no
-    /// throttling at all, without `Economy`'s severe slowdown.
+    /// throttling at all, without `Efficient`'s severe slowdown.
     Default,
     /// All logical cores, normal priority, no scheduling downgrade at
     /// all. For an explicit "scan faster" choice when the user isn't
     /// using the machine for anything else right now.
-    AllIn,
+    Performance,
     /// An explicit worker count, for tests and power-user tuning. No
     /// automatic scheduling hint is applied -- an explicit worker count
     /// is itself an explicit choice, so this tier doesn't layer a second,
@@ -75,9 +82,9 @@ impl Default for ScanIntensity {
 impl ScanIntensity {
     pub fn worker_count(&self) -> usize {
         match self {
-            ScanIntensity::Economy => (default_tier_workers() / 2).max(1),
+            ScanIntensity::Efficient => (default_tier_workers() / 2).max(1),
             ScanIntensity::Default => default_tier_workers(),
-            ScanIntensity::AllIn => available_parallelism(),
+            ScanIntensity::Performance => available_parallelism(),
             ScanIntensity::Custom(n) => n.get(),
         }
     }
@@ -85,13 +92,14 @@ impl ScanIntensity {
     /// Which scheduling hint (if any) this tier applies -- to worker
     /// threads via `build_pool`, and to every ffmpeg/ffprobe child process
     /// via `platform().configure_child_process` (called from
-    /// `decode.rs`/`metadata.rs`/`video_match.rs`). `None` for `AllIn`
-    /// (chosen for speed) and `Custom` (an explicit power-user override).
+    /// `decode.rs`/`metadata.rs`/`video_match.rs`). `None` for
+    /// `Performance` (chosen for speed) and `Custom` (an explicit
+    /// power-user override).
     pub fn scheduling_hint(&self) -> Option<SchedulingHint> {
         match self {
-            ScanIntensity::Economy => Some(SchedulingHint::Background),
+            ScanIntensity::Efficient => Some(SchedulingHint::Background),
             ScanIntensity::Default => Some(SchedulingHint::Utility),
-            ScanIntensity::AllIn => None,
+            ScanIntensity::Performance => None,
             ScanIntensity::Custom(_) => None,
         }
     }
@@ -133,7 +141,7 @@ pub fn build_pool(intensity: ScanIntensity) -> rayon::ThreadPool {
 /// to `build_pool`'s per-thread hints, and (on platforms with no QoS-class
 /// equivalent, e.g. Linux) one of the only levers available at all. Safe
 /// to call regardless of intensity; a process-wide nice value doesn't
-/// meaningfully hurt an `AllIn` scan and does no harm.
+/// meaningfully hurt a `Performance` scan and does no harm.
 pub fn lower_process_priority() {
     platform().lower_process_priority();
 }
@@ -143,25 +151,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn economy_is_never_more_than_default() {
-        assert!(ScanIntensity::Economy.worker_count() <= ScanIntensity::Default.worker_count());
+    fn efficient_is_never_more_than_default() {
+        assert!(ScanIntensity::Efficient.worker_count() <= ScanIntensity::Default.worker_count());
     }
 
     #[test]
-    fn default_never_exceeds_all_in() {
-        assert!(ScanIntensity::Default.worker_count() <= ScanIntensity::AllIn.worker_count());
+    fn default_never_exceeds_performance() {
+        assert!(ScanIntensity::Default.worker_count() <= ScanIntensity::Performance.worker_count());
     }
 
     #[test]
     fn every_tier_is_at_least_one_worker() {
-        assert!(ScanIntensity::Economy.worker_count() >= 1);
+        assert!(ScanIntensity::Efficient.worker_count() >= 1);
         assert!(ScanIntensity::Default.worker_count() >= 1);
-        assert!(ScanIntensity::AllIn.worker_count() >= 1);
+        assert!(ScanIntensity::Performance.worker_count() >= 1);
     }
 
     #[test]
-    fn all_in_uses_every_logical_core() {
-        assert_eq!(ScanIntensity::AllIn.worker_count(), available_parallelism());
+    fn performance_uses_every_logical_core() {
+        assert_eq!(ScanIntensity::Performance.worker_count(), available_parallelism());
     }
 
     #[test]
@@ -180,9 +188,9 @@ mod tests {
 
     #[test]
     fn each_tier_gets_the_right_hint() {
-        assert_eq!(ScanIntensity::Economy.scheduling_hint(), Some(SchedulingHint::Background));
+        assert_eq!(ScanIntensity::Efficient.scheduling_hint(), Some(SchedulingHint::Background));
         assert_eq!(ScanIntensity::Default.scheduling_hint(), Some(SchedulingHint::Utility));
-        assert_eq!(ScanIntensity::AllIn.scheduling_hint(), None);
+        assert_eq!(ScanIntensity::Performance.scheduling_hint(), None);
         assert_eq!(ScanIntensity::Custom(NonZeroUsize::new(2).unwrap()).scheduling_hint(), None);
     }
 
@@ -200,10 +208,10 @@ mod tests {
         // "half of logical cores" heuristic would pick ~6 on a 12-core
         // (8P+4E) Mac, which the scheduler still places on P-cores by
         // default. `Default` must come out to the E-core count (4 on the
-        // reference machine), not 6 -- and `Economy` must be half of that.
+        // reference machine), not 6 -- and `Efficient` must be half of that.
         if let Some(e_cores) = platform().efficiency_core_count() {
             assert_eq!(ScanIntensity::Default.worker_count(), e_cores);
-            assert_eq!(ScanIntensity::Economy.worker_count(), (e_cores / 2).max(1));
+            assert_eq!(ScanIntensity::Efficient.worker_count(), (e_cores / 2).max(1));
         }
     }
 }
