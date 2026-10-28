@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Compile the built web UI (`ui/dist`) into the binary. Needs `npm run build`
+# first; the Tauri shell turns it on, a plain `cargo build` does not.
+embed-ui = ["dep:rust-embed"]
+
 [dependencies]
 photodedup-core = { path = "../core" }
 axum = { workspace = true }
@@ -18,6 +23,7 @@ anyhow = { workspace = true }
 rusqlite = { workspace = true }
 uuid = { workspace = true, features = ["serde"] }
 chrono = { workspace = true }
+rust-embed = { version = "8", optional = true, features = ["mime-guess"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -8,8 +8,12 @@
 //! directly.
 
 pub mod auth;
+#[cfg(feature = "embed-ui")]
+mod embedded;
 mod routes;
 mod state;
+
+pub use state::FolderPicker;
 
 use axum::routing::{get, post};
 use axum::Router;
@@ -40,15 +44,31 @@ pub async fn build(db_path: &std::path::Path) -> anyhow::Result<(TcpListener, Ro
     build_with_ui(db_path, None).await
 }
 
-/// `build`, serving the built web UI from `ui_dir` (a Vite `dist/`) at `/`
-/// when given. Without one, `/` is a plain placeholder page. The UI's
-/// files are public static assets -- no token needed to fetch them, and
-/// nothing secret in them; the token only matters for the API, and the UI
-/// picks it up from the URL the server opened.
+/// How the server is embedded.
+#[derive(Default, Clone)]
+pub struct Config {
+    /// Serve the web UI from this folder (a Vite `dist/`), which wins over
+    /// the compiled-in copy -- handy for development.
+    pub ui_dir: Option<PathBuf>,
+    /// The shell's native folder dialog, if it has one.
+    pub folder_picker: Option<FolderPicker>,
+}
+
+/// `build_with`, serving the built web UI from `ui_dir` when given.
 pub async fn build_with_ui(
     db_path: &std::path::Path,
     ui_dir: Option<PathBuf>,
 ) -> anyhow::Result<(TcpListener, Router, ServerInfo)> {
+    build_with(db_path, Config { ui_dir, ..Config::default() }).await
+}
+
+/// The full builder. The UI's files are public static assets -- no token
+/// needed to fetch them, and nothing secret in them; the token only
+/// matters for the API, and the UI picks it up from the URL the server
+/// opened. Without a UI folder or a compiled-in copy, `/` is a plain
+/// placeholder page.
+pub async fn build_with(db_path: &std::path::Path, config: Config) -> anyhow::Result<(TcpListener, Router, ServerInfo)> {
+    let Config { ui_dir, folder_picker } = config;
     let store = photodedup_core::store::Store::open(db_path)?;
     // A crash mid-apply leaves a journalled batch half-done; reconcile it
     // with what is actually on disk before serving anything.
@@ -64,6 +84,7 @@ pub async fn build_with_ui(
         token: Arc::from(token.as_str()),
         cache_dir: Arc::new(cache_dir),
         job: Arc::new(Mutex::new(None)),
+        folder_picker,
     };
 
     let protected = Router::new()
@@ -94,6 +115,8 @@ pub async fn build_with_ui(
             post(routes::decisions::put_decisions_bulk),
         )
         .route("/api/resume", get(routes::decisions::resume))
+        .route("/api/shell", get(routes::shell::status))
+        .route("/api/pick-folder", post(routes::shell::pick_folder))
         .route("/files/{id}/thumb", get(routes::files::thumbnail))
         .route("/files/{id}/preview", get(routes::files::preview))
         .route("/files/{id}/original", get(routes::files::original))
@@ -106,9 +129,7 @@ pub async fn build_with_ui(
             let index = dir.join("index.html");
             public.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index)))
         }
-        // Unauthenticated static text, so a wrong or missing token shows
-        // an explanation rather than axum's bare 404.
-        None => public.route("/", get(placeholder_page)),
+        None => embedded_or_placeholder(public),
     };
 
     let router = public.merge(protected);
@@ -117,6 +138,22 @@ pub async fn build_with_ui(
     let addr = listener.local_addr()?;
 
     Ok((listener, router, ServerInfo { addr, token }))
+}
+
+#[cfg(feature = "embed-ui")]
+fn embedded_or_placeholder(public: Router) -> Router {
+    if embedded::available() {
+        public.fallback(embedded::serve)
+    } else {
+        public.route("/", get(placeholder_page))
+    }
+}
+
+#[cfg(not(feature = "embed-ui"))]
+fn embedded_or_placeholder(public: Router) -> Router {
+    // Unauthenticated static text, so a wrong or missing token shows an
+    // explanation rather than axum's bare 404.
+    public.route("/", get(placeholder_page))
 }
 
 async fn placeholder_page() -> axum::response::Html<&'static str> {
@@ -137,7 +174,12 @@ placeholder so the URL this process opens doesn't just 404.</p>
 /// immediately (before the serve loop, which runs in the background) so
 /// the caller can print/open the URL right away.
 pub async fn run(db_path: PathBuf, ui_dir: Option<PathBuf>) -> anyhow::Result<ServerInfo> {
-    let (listener, router, info) = build_with_ui(&db_path, ui_dir).await?;
+    run_with(db_path, Config { ui_dir, ..Config::default() }).await
+}
+
+/// `run`, with a full `Config` (what a shell that embeds the server uses).
+pub async fn run_with(db_path: PathBuf, config: Config) -> anyhow::Result<ServerInfo> {
+    let (listener, router, info) = build_with(&db_path, config).await?;
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, router).await {
             eprintln!("server error: {e}");
@@ -590,6 +632,73 @@ mod tests {
         assert_eq!(again["advanced"]["match_distance"]["value"], 25);
         assert_eq!(again["advanced"]["sequence_similarity"]["value"], 100);
         assert_eq!(again["advanced"]["sequence_gap_seconds"]["value"], 10);
+    }
+
+    #[tokio::test]
+    async fn shell_status_reports_the_tools_and_whether_a_native_picker_exists() {
+        let (router, info, _scan, _root) = test_server_with_scan().await;
+        let (s, got) = call(&router, "GET", format!("/api/shell?token={}", info.token), "").await;
+        assert_eq!(s, 200);
+        assert_eq!(got["native_folder_picker"], false, "a plain browser has no native dialog");
+        let names: Vec<&str> = got["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["ffmpeg", "ffprobe"]);
+        assert!(got["tools"][0]["found"].is_boolean());
+
+        let (s, _) = call(&router, "GET", "/api/shell".to_string(), "").await;
+        assert_eq!(s, 401, "needs the token like everything else");
+    }
+
+    #[tokio::test]
+    async fn the_native_folder_picker_is_offered_only_when_a_shell_provides_one() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+
+        // no shell: the route exists but says it is not implemented
+        let (_l, plain, info) = build(tmp.path()).await.unwrap();
+        let (s, _) = call(&plain, "POST", format!("/api/pick-folder?token={}", info.token), "").await;
+        assert_eq!(s, 501);
+
+        // a shell that returns a folder
+        let chosen: FolderPicker = Arc::new(|| Some(PathBuf::from("/Users/me/Pictures")));
+        let (_l, with, info) = build_with(tmp.path(), Config { folder_picker: Some(chosen), ..Config::default() }).await.unwrap();
+        let (_, shell) = call(&with, "GET", format!("/api/shell?token={}", info.token), "").await;
+        assert_eq!(shell["native_folder_picker"], true);
+        let (s, picked) = call(&with, "POST", format!("/api/pick-folder?token={}", info.token), "").await;
+        assert_eq!(s, 200);
+        assert_eq!(picked["path"], "/Users/me/Pictures");
+
+        // the user cancels the dialog
+        let cancelled: FolderPicker = Arc::new(|| None);
+        let (_l, cancel, info) = build_with(tmp.path(), Config { folder_picker: Some(cancelled), ..Config::default() }).await.unwrap();
+        let (s, picked) = call(&cancel, "POST", format!("/api/pick-folder?token={}", info.token), "").await;
+        assert_eq!(s, 200);
+        assert!(picked["path"].is_null());
+
+        // and it is behind the token
+        let (s, _) = call(&with, "POST", "/api/pick-folder".to_string(), "").await;
+        assert_eq!(s, 401);
+    }
+
+    /// Only with `--features embed-ui` (needs `npm run build` in `ui/` first).
+    #[cfg(feature = "embed-ui")]
+    #[tokio::test]
+    async fn the_compiled_in_ui_is_served_with_a_fallback_and_the_api_stays_protected() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let (_l, router, _info) = build(tmp.path()).await.unwrap();
+        for path in ["/", "/some/client/route"] {
+            let res = send(&router, axum::http::Request::get(path).body(axum::body::Body::empty()).unwrap()).await;
+            assert_eq!(res.status(), 200, "{path}");
+            assert!(res.headers()["content-type"].to_str().unwrap().starts_with("text/html"), "{path}");
+        }
+        // a real built asset is served with its own type
+        let index = axum::body::to_bytes(send(&router, axum::http::Request::get("/").body(axum::body::Body::empty()).unwrap()).await.into_body(), usize::MAX).await.unwrap();
+        let html = String::from_utf8_lossy(&index);
+        let js = html.split("src=\"").nth(1).and_then(|r| r.split('"').next()).expect("index.html references a script");
+        let res = send(&router, axum::http::Request::get(js.trim_start_matches('.')).body(axum::body::Body::empty()).unwrap()).await;
+        assert_eq!(res.status(), 200);
+        assert!(res.headers()["content-type"].to_str().unwrap().contains("javascript"));
+
+        let res = send(&router, axum::http::Request::get("/api/scans").body(axum::body::Body::empty()).unwrap()).await;
+        assert_eq!(res.status(), 401);
     }
 
     #[tokio::test]

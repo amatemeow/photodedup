@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, ApiError, type IntensityId, type JobStatus, type Phase } from './lib/api';
+  import { api, ApiError, type IntensityId, type JobStatus, type Phase, type Shell } from './lib/api';
   import Review from './Review.svelte';
   import Options from './Options.svelte';
 
@@ -47,7 +47,23 @@
   }
   loadIntensity();
 
+  // What the surrounding app can do: a native folder dialog only exists in the
+  // desktop shell, and ffmpeg/ffprobe are needed for HEIC photos and videos.
+  let shell = $state<Shell | null>(null);
+  api.shell().then((s) => (shell = s)).catch(() => {}); // a convenience; the app works without it
+  const missingTools = $derived(shell?.tools.filter((t) => !t.found).map((t) => t.name) ?? []);
+
   let root = $state('');
+
+  async function browse() {
+    error = '';
+    try {
+      const { path } = await api.pickFolder();
+      if (path) root = path;
+    } catch (e) {
+      error = describe(e);
+    }
+  }
   let view = $state<View>({ kind: 'start' });
   let busy = $state(false);
   let error = $state('');
@@ -158,7 +174,10 @@
   {#if view.kind === 'start'}
     <form onsubmit={(e) => { e.preventDefault(); check(); }}>
       <label for="root">Folder to scan</label>
-      <input id="root" bind:value={root} placeholder="/Users/me/Pictures/Trip" autocomplete="off" spellcheck="false" />
+      <div class="pick">
+        <input id="root" bind:value={root} placeholder="/Users/me/Pictures/Trip" autocomplete="off" spellcheck="false" />
+        {#if shell?.native_folder_picker}<button type="button" class="secondary" onclick={browse}>Browse…</button>{/if}
+      </div>
       <label class="check">
         <input type="checkbox" bind:checked={includeVideos} />
         Include videos
@@ -167,7 +186,13 @@
       <button disabled={busy || !root.trim()}>{busy ? 'Checking…' : 'Scan'}</button>
       {#if intensity}<p class="hint tight">Scan speed: {intensityName[intensity]}. Change it in Options.</p>{/if}
     </form>
-    <p class="hint">Type or paste the folder path. A native folder picker arrives with the desktop shell.</p>
+    {#if !shell?.native_folder_picker}<p class="hint">Type or paste the folder path.</p>{/if}
+    {#if missingTools.length}
+      <p class="warn" role="alert">
+        {missingTools.join(' and ')} {missingTools.length > 1 ? 'were' : 'was'} not found. Without {missingTools.length > 1 ? 'them' : 'it'}, HEIC
+        photos and videos can't be read (ordinary JPEGs still work). Install ffmpeg and restart the app.
+      </p>
+    {/if}
   {:else if view.kind === 'found'}
     <p>This folder was scanned before{view.startedAt ? ` (${new Date(view.startedAt).toLocaleString()})` : ''}.</p>
     <p class="hint">Scanning again replaces that scan; the keep/quarantine choices you made on files that haven't changed are kept.</p>
@@ -211,6 +236,19 @@
   form {
     display: grid;
     gap: 0.5rem;
+  }
+  .pick {
+    display: flex;
+    gap: 0.5rem;
+  }
+  .pick input {
+    flex: 1;
+  }
+  .warn {
+    border: 1px solid var(--danger);
+    border-radius: 8px;
+    padding: 0.5rem 0.8rem;
+    color: var(--danger);
   }
   .check {
     display: flex;

@@ -102,13 +102,13 @@ fn generate(path: &std::path::Path, media_class: MediaClassSerde, size: u32) -> 
             // No duration on hand here without another DB round-trip to
             // `analysis` -- ffprobe it directly; this is a single cheap
             // metadata read, not a full decode.
-            let duration = photodedup_core::metadata::extract_video(path, "ffprobe", hint)
+            let duration = photodedup_core::metadata::extract_video(path, &photodedup_core::tools::ffprobe(), hint)
                 .ok()
                 .and_then(|m| m.duration_seconds)
                 .unwrap_or(1.0);
-            Ok(video_frame_thumbnail(path, duration, 0.1, "ffmpeg", size, hint)?)
+            Ok(video_frame_thumbnail(path, duration, 0.1, &photodedup_core::tools::ffmpeg(), size, hint)?)
         }
-        _ => Ok(image_thumbnail(path, "ffmpeg", size, hint)?),
+        _ => Ok(image_thumbnail(path, &photodedup_core::tools::ffmpeg(), size, hint)?),
     }
 }
 

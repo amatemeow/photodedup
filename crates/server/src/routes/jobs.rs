@@ -208,6 +208,7 @@ mod tests {
             token: Arc::from("t"),
             cache_dir: Arc::new(cache),
             job: Arc::new(Mutex::new(None)),
+            folder_picker: None,
         }
     }
 

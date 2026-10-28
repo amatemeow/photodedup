@@ -45,8 +45,8 @@ pub struct PipelineOptions {
 impl Default for PipelineOptions {
     fn default() -> Self {
         PipelineOptions {
-            ffmpeg_bin: "ffmpeg".to_string(),
-            ffprobe_bin: "ffprobe".to_string(),
+            ffmpeg_bin: crate::tools::ffmpeg(),
+            ffprobe_bin: crate::tools::ffprobe(),
             intensity: ScanIntensity::default(),
             include_videos: true,
             thresholds: Thresholds::default(),
