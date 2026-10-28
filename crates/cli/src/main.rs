@@ -49,8 +49,16 @@ fn print_usage() {
     println!("(report/apply/undo land with later M1 work -- see ROADMAP.md)");
 }
 
+/// Where the built web UI lives: `PHOTODEDUP_UI_DIR` if set, else
+/// `ui/dist` in the working directory (the dev checkout layout). Packaged
+/// builds will embed the UI instead (M4).
+fn find_ui_dir() -> Option<PathBuf> {
+    let dir = std::env::var_os("PHOTODEDUP_UI_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("ui/dist"));
+    dir.join("index.html").is_file().then_some(dir)
+}
+
 async fn serve(db_path: PathBuf) -> anyhow::Result<()> {
-    let info = photodedup_server::run(db_path).await?;
+    let info = photodedup_server::run(db_path, find_ui_dir()).await?;
     let url = info.url();
     println!("review server running at {url}");
     println!("(Ctrl+C to stop)");

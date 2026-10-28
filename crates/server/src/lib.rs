@@ -17,6 +17,7 @@ use state::AppState;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
+use tower_http::services::{ServeDir, ServeFile};
 
 pub struct ServerInfo {
     pub addr: std::net::SocketAddr,
@@ -36,6 +37,18 @@ impl ServerInfo {
 /// requests against the router directly (via `tower::ServiceExt::oneshot`)
 /// without a real network round-trip.
 pub async fn build(db_path: &std::path::Path) -> anyhow::Result<(TcpListener, Router, ServerInfo)> {
+    build_with_ui(db_path, None).await
+}
+
+/// `build`, serving the built web UI from `ui_dir` (a Vite `dist/`) at `/`
+/// when given. Without one, `/` is a plain placeholder page. The UI's
+/// files are public static assets -- no token needed to fetch them, and
+/// nothing secret in them; the token only matters for the API, and the UI
+/// picks it up from the URL the server opened.
+pub async fn build_with_ui(
+    db_path: &std::path::Path,
+    ui_dir: Option<PathBuf>,
+) -> anyhow::Result<(TcpListener, Router, ServerInfo)> {
     let store = photodedup_core::store::Store::open(db_path)?;
     let token = auth::new_token();
     let cache_dir = routes::files::init_cache_dir(db_path)?;
@@ -67,15 +80,16 @@ pub async fn build(db_path: &std::path::Path) -> anyhow::Result<(TcpListener, Ro
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth::require_token))
         .with_state(state);
 
-    let public = Router::new()
-        .route("/health", get(|| async { "ok" }))
-        // Placeholder until the real UI lands -- `ServerInfo::url()` points
-        // here, and auto-opening the browser at a bare 404 is a bad first
-        // impression. Unauthenticated (static text, nothing from the
-        // database) so it's never itself the thing that breaks if the
-        // token is wrong -- a wrong/missing token shows this page with a
-        // visible explanation rather than axum's bare 404.
-        .route("/", get(placeholder_page));
+    let public = Router::new().route("/health", get(|| async { "ok" }));
+    let public = match ui_dir {
+        Some(dir) => {
+            let index = dir.join("index.html");
+            public.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index)))
+        }
+        // Unauthenticated static text, so a wrong or missing token shows
+        // an explanation rather than axum's bare 404.
+        None => public.route("/", get(placeholder_page)),
+    };
 
     let router = public.merge(protected);
 
@@ -91,7 +105,8 @@ async fn placeholder_page() -> axum::response::Html<&'static str> {
 <title>photodedup</title>
 <body style="font:14px system-ui;max-width:40em;margin:4em auto;line-height:1.5">
 <h1>photodedup server is running</h1>
-<p>The review UI isn't built yet (M2 in progress) -- this is a
+<p>The web UI wasn't found (build it with <code>npm run build</code> in
+<code>ui/</code>, or set <code>PHOTODEDUP_UI_DIR</code>) -- this is a
 placeholder so the URL this process opens doesn't just 404.</p>
 <p>The API is live, e.g. <code>GET /api/scans?token=...</code>.</p>
 </body>"#,
@@ -101,8 +116,8 @@ placeholder so the URL this process opens doesn't just 404.</p>
 /// Binds and serves until the process is killed. Returns `ServerInfo`
 /// immediately (before the serve loop, which runs in the background) so
 /// the caller can print/open the URL right away.
-pub async fn run(db_path: PathBuf) -> anyhow::Result<ServerInfo> {
-    let (listener, router, info) = build(&db_path).await?;
+pub async fn run(db_path: PathBuf, ui_dir: Option<PathBuf>) -> anyhow::Result<ServerInfo> {
+    let (listener, router, info) = build_with_ui(&db_path, ui_dir).await?;
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, router).await {
             eprintln!("server error: {e}");
@@ -176,6 +191,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn ui_dir_is_served_publicly_while_the_api_stays_behind_the_token() {
+        let ui = tempfile::tempdir().unwrap();
+        std::fs::write(ui.path().join("index.html"), "<title>ui</title>").unwrap();
+        std::fs::write(ui.path().join("app.js"), "console.log(1)").unwrap();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let (_listener, router, _info) = build_with_ui(tmp.path(), Some(ui.path().to_path_buf())).await.unwrap();
+
+        for (uri, want) in [("/", "<title>ui</title>"), ("/app.js", "console.log(1)"), ("/some/client/route", "<title>ui</title>")] {
+            let res = send(&router, axum::http::Request::get(uri).body(axum::body::Body::empty()).unwrap()).await;
+            assert_eq!(res.status(), 200, "{uri}");
+            let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(body, want, "{uri}");
+        }
+        let res = send(&router, axum::http::Request::get("/api/scans").body(axum::body::Body::empty()).unwrap()).await;
+        assert_eq!(res.status(), 401);
     }
 
     #[tokio::test]

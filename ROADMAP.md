@@ -201,3 +201,23 @@ as a choice.
     `/api/resume` found it. Debug builds are unusable for real-dataset
     runs (30 files in 15 minutes versus about two minutes for the whole
     set in release), so always use `--release` for those.
+
+- **UI scaffold** (`ui/`: Svelte 5 + Vite + TypeScript). First slice is the
+  start flow only: folder path -> resume lookup (offers Resume / Scan
+  again for a known folder) -> live scan progress over SSE with Cancel ->
+  "ready" with the cluster count. The review screen and the Options tab
+  (persistent scan intensity) are still to build. `photodedup serve`
+  serves `ui/dist` (or `PHOTODEDUP_UI_DIR`) at `/`; the UI takes the
+  session token from the URL, keeps it in `sessionStorage`, and strips it
+  from the address bar. Packaged builds will embed the UI instead (M4).
+  - **No native folder picker in the browser fallback:** a web page can't
+    get a real filesystem path from a file dialog, so the path is typed or
+    pasted until the Tauri shell (M4) supplies a native dialog.
+  - **Dependency notes:** `typescript` is pinned to 6.x because
+    `svelte-check` 4.7.7 doesn't accept 7 yet -- revisit when it does.
+    `npm audit` reports two low-severity advisories (prototype pollution
+    in `deepmerge`, via `@sveltejs/vite-plugin-svelte`, no fix available).
+    Build-time only; nothing from it ships in `ui/dist`.
+  - Not yet verified in a real browser -- built, type-checked, and served
+    by the Rust server, but the click-through is still owed.
+
