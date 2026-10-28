@@ -19,14 +19,17 @@ pub struct Store {
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS scans (
-    id INTEGER PRIMARY KEY,
+    -- A random UUID, not a serial: an id is never reused, so a client
+    -- holding the id of a replaced scan (a stale tab) can only get "not
+    -- found", never land on a newer scan or write decisions into it.
+    id TEXT PRIMARY KEY,
     root_path TEXT NOT NULL,
     started_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS files (
-    id INTEGER PRIMARY KEY,
-    scan_id INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    id TEXT PRIMARY KEY,
+    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
     relative_path TEXT NOT NULL,
     file_name TEXT NOT NULL,
     media_class TEXT NOT NULL,
@@ -37,7 +40,7 @@ CREATE TABLE IF NOT EXISTS files (
 );
 
 CREATE TABLE IF NOT EXISTS analysis (
-    file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+    file_id TEXT PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
     origin TEXT NOT NULL,
     confidence REAL NOT NULL,
     evidence_json TEXT NOT NULL,
@@ -51,42 +54,46 @@ CREATE TABLE IF NOT EXISTS analysis (
 );
 
 CREATE TABLE IF NOT EXISTS clusters (
-    id INTEGER PRIMARY KEY,
-    scan_id INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    id TEXT PRIMARY KEY,
+    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
     tier TEXT NOT NULL,
-    keeper_file_id INTEGER NOT NULL REFERENCES files(id),
+    keeper_file_id TEXT NOT NULL REFERENCES files(id),
     reasons_json TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS cluster_members (
-    cluster_id INTEGER NOT NULL REFERENCES clusters(id) ON DELETE CASCADE,
-    file_id INTEGER NOT NULL REFERENCES files(id),
+    cluster_id TEXT NOT NULL REFERENCES clusters(id) ON DELETE CASCADE,
+    file_id TEXT NOT NULL REFERENCES files(id),
     PRIMARY KEY (cluster_id, file_id)
 );
 
 CREATE TABLE IF NOT EXISTS burst_runs (
-    id INTEGER PRIMARY KEY,
-    scan_id INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    id TEXT PRIMARY KEY,
+    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
     camera_model TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS burst_run_members (
-    burst_run_id INTEGER NOT NULL REFERENCES burst_runs(id) ON DELETE CASCADE,
-    file_id INTEGER NOT NULL REFERENCES files(id),
+    burst_run_id TEXT NOT NULL REFERENCES burst_runs(id) ON DELETE CASCADE,
+    file_id TEXT NOT NULL REFERENCES files(id),
     seq INTEGER NOT NULL,
     PRIMARY KEY (burst_run_id, file_id)
 );
 
+-- Every id below is a random UUID (see `scans`): never reused, never
+-- mistakable for another row. Lists are read back in insertion order
+-- (`ORDER BY rowid`), since UUIDs carry no order.
+--
 -- Review-only pairs (T2Burst/T2NativeReview/T3CrossDevice/etc. -- never
 -- auto-selectable, see pipeline::PipelineResult::review_pairs). Was
 -- computed but never actually persisted before M2 needed to serve it to
 -- the "same-device review" UI tab.
 CREATE TABLE IF NOT EXISTS review_pairs (
-    id INTEGER PRIMARY KEY,
-    scan_id INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    id TEXT PRIMARY KEY,
+    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
     tier TEXT NOT NULL,
-    file_a_id INTEGER NOT NULL REFERENCES files(id),
-    file_b_id INTEGER NOT NULL REFERENCES files(id),
+    file_a_id TEXT NOT NULL REFERENCES files(id),
+    file_b_id TEXT NOT NULL REFERENCES files(id),
     phash_dist INTEGER NOT NULL,
     reason TEXT NOT NULL
 );
@@ -96,7 +103,7 @@ CREATE TABLE IF NOT EXISTS review_pairs (
 -- discard what a user already decided. Keyed on relative_path, not
 -- file_id, so it survives a fresh scan assigning new file ids.
 CREATE TABLE IF NOT EXISTS decisions (
-    scan_id INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
     relative_path TEXT NOT NULL,
     keep INTEGER NOT NULL,
     decided_at TEXT NOT NULL,
@@ -106,7 +113,7 @@ CREATE TABLE IF NOT EXISTS decisions (
 
 #[derive(Debug, Clone)]
 pub struct StoredFile {
-    pub id: i64,
+    pub id: String,
     pub relative_path: String,
     pub file_name: String,
     pub media_class: MediaClassSerde,
@@ -117,29 +124,29 @@ pub struct StoredFile {
 
 #[derive(Debug, Clone)]
 pub struct StoredCluster {
-    pub id: i64,
+    pub id: String,
     pub tier: String,
-    pub keeper_file_id: i64,
-    pub member_file_ids: Vec<i64>,
+    pub keeper_file_id: String,
+    pub member_file_ids: Vec<String>,
     pub reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct StoredReviewPair {
-    pub id: i64,
+    pub id: String,
     pub tier: String,
-    pub file_a_id: i64,
-    pub file_b_id: i64,
+    pub file_a_id: String,
+    pub file_b_id: String,
     pub phash_dist: i64,
     pub reason: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct StoredBurstRun {
-    pub id: i64,
+    pub id: String,
     pub camera_model: String,
     /// In capture-time order (the `seq` column), not file-id order.
-    pub member_file_ids: Vec<i64>,
+    pub member_file_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -157,7 +164,7 @@ pub struct StoredAnalysis {
 
 #[derive(Debug, Clone)]
 pub struct ScanMeta {
-    pub id: i64,
+    pub id: String,
     pub root_path: String,
     pub started_at: String,
 }
@@ -176,34 +183,46 @@ impl Store {
     fn init(conn: Connection) -> rusqlite::Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        drop_legacy_schema(&conn)?;
         conn.execute_batch(SCHEMA)?;
         Ok(Store { conn })
     }
 
-    /// Persists a full pipeline run. Returns the new `scan_id`.
+    /// Persists a full pipeline run as **the one live scan**. Returns the
+    /// new `scan_id`.
+    ///
+    /// Every earlier scan -- files, analysis, clusters, review pairs,
+    /// burst runs and decisions -- is deleted in the same transaction, so
+    /// the old scan goes away only once the new one is fully written; a
+    /// failure partway rolls back and leaves the old scan intact. Keeping
+    /// several scans alive side by side is deferred (see ROADMAP.md).
     ///
     /// `root` is recorded for display; paths inside are stored *relative*
     /// to it so a scan is portable across machines/mount points.
-    pub fn save_scan(&mut self, root: &Path, result: &PipelineResult) -> rusqlite::Result<i64> {
+    pub fn save_scan(&mut self, root: &Path, result: &PipelineResult) -> rusqlite::Result<String> {
         let tx = self.conn.transaction()?;
+        let scan_id = uuid::Uuid::new_v4().to_string();
+        delete_all_scans(&tx)?;
         let now = chrono::Utc::now().to_rfc3339();
 
         tx.execute(
-            "INSERT INTO scans (root_path, started_at) VALUES (?1, ?2)",
-            params![canonical_root_string(root), now],
+            "INSERT INTO scans (id, root_path, started_at) VALUES (?1, ?2, ?3)",
+            params![scan_id, canonical_root_string(root), now],
         )?;
-        let scan_id = tx.last_insert_rowid();
 
-        // pipeline FileId (u32, scan-local) -> sqlite rowid (i64, stable
-        // across the lifetime of this scan row).
-        let mut id_map: std::collections::HashMap<FileId, i64> = std::collections::HashMap::new();
+        // pipeline FileId (u32, scan-local, in-memory only) -> the file's
+        // database id (a UUID).
+        let mut id_map: std::collections::HashMap<FileId, String> = std::collections::HashMap::new();
+        let new_id = || uuid::Uuid::new_v4().to_string();
 
         for f in &result.files {
             let rel = f.path.strip_prefix(root).unwrap_or(&f.path).to_string_lossy().to_string();
+            let file_row = new_id();
             tx.execute(
-                "INSERT INTO files (scan_id, relative_path, file_name, media_class, size_bytes, mtime_unix, is_placeholder)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO files (id, scan_id, relative_path, file_name, media_class, size_bytes, mtime_unix, is_placeholder)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
+                    file_row,
                     scan_id,
                     rel,
                     f.file_name,
@@ -213,24 +232,24 @@ impl Store {
                     f.is_placeholder as i64,
                 ],
             )?;
-            id_map.insert(f.id, tx.last_insert_rowid());
+            id_map.insert(f.id, file_row);
         }
 
         for (file_id, a) in &result.analyzed {
-            let Some(&row_id) = id_map.get(file_id) else { continue };
+            let Some(row_id) = id_map.get(file_id) else { continue };
             insert_analysis(&tx, row_id, a)?;
         }
 
         for c in &result.clusters {
-            let Some(&keeper_row) = id_map.get(&c.keeper) else { continue };
+            let Some(keeper_row) = id_map.get(&c.keeper) else { continue };
             let reasons_json = serde_json::to_string(&c.reasons).unwrap_or_default();
+            let cluster_row = new_id();
             tx.execute(
-                "INSERT INTO clusters (scan_id, tier, keeper_file_id, reasons_json) VALUES (?1, ?2, ?3, ?4)",
-                params![scan_id, c.tier, keeper_row, reasons_json],
+                "INSERT INTO clusters (id, scan_id, tier, keeper_file_id, reasons_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![cluster_row, scan_id, c.tier, keeper_row, reasons_json],
             )?;
-            let cluster_row = tx.last_insert_rowid();
             for m in &c.members {
-                if let Some(&mrow) = id_map.get(m) {
+                if let Some(mrow) = id_map.get(m) {
                     tx.execute(
                         "INSERT OR IGNORE INTO cluster_members (cluster_id, file_id) VALUES (?1, ?2)",
                         params![cluster_row, mrow],
@@ -240,13 +259,13 @@ impl Store {
         }
 
         for run in &result.burst_runs {
+            let run_row = new_id();
             tx.execute(
-                "INSERT INTO burst_runs (scan_id, camera_model) VALUES (?1, ?2)",
-                params![scan_id, run.camera_model],
+                "INSERT INTO burst_runs (id, scan_id, camera_model) VALUES (?1, ?2, ?3)",
+                params![run_row, scan_id, run.camera_model],
             )?;
-            let run_row = tx.last_insert_rowid();
             for (seq, fid) in run.files.iter().enumerate() {
-                if let Some(&mrow) = id_map.get(fid) {
+                if let Some(mrow) = id_map.get(fid) {
                     tx.execute(
                         "INSERT INTO burst_run_members (burst_run_id, file_id, seq) VALUES (?1, ?2, ?3)",
                         params![run_row, mrow, seq as i64],
@@ -256,12 +275,12 @@ impl Store {
         }
 
         for p in &result.review_pairs {
-            let (Some(&a_row), Some(&b_row)) = (id_map.get(&p.a), id_map.get(&p.b)) else {
+            let (Some(a_row), Some(b_row)) = (id_map.get(&p.a), id_map.get(&p.b)) else {
                 continue;
             };
             tx.execute(
-                "INSERT INTO review_pairs (scan_id, tier, file_a_id, file_b_id, phash_dist, reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![scan_id, tier_str(p.tier), a_row, b_row, p.phash_dist, p.reason],
+                "INSERT INTO review_pairs (id, scan_id, tier, file_a_id, file_b_id, phash_dist, reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![new_id(), scan_id, tier_str(p.tier), a_row, b_row, p.phash_dist, p.reason],
             )?;
         }
 
@@ -272,7 +291,7 @@ impl Store {
     pub fn list_scans(&self) -> rusqlite::Result<Vec<ScanMeta>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, root_path, started_at FROM scans ORDER BY id DESC")?;
+            .prepare("SELECT id, root_path, started_at FROM scans ORDER BY started_at DESC, rowid DESC")?;
         let rows = stmt.query_map([], |row| {
             Ok(ScanMeta {
                 id: row.get(0)?,
@@ -283,7 +302,7 @@ impl Store {
         rows.collect()
     }
 
-    pub fn get_scan(&self, scan_id: i64) -> rusqlite::Result<Option<ScanMeta>> {
+    pub fn get_scan(&self, scan_id: &str) -> rusqlite::Result<Option<ScanMeta>> {
         self.conn
             .query_row(
                 "SELECT id, root_path, started_at FROM scans WHERE id = ?1",
@@ -309,7 +328,7 @@ impl Store {
         let root_str = canonical_root_string(root);
         self.conn
             .query_row(
-                "SELECT id, root_path, started_at FROM scans WHERE root_path = ?1 ORDER BY id DESC LIMIT 1",
+                "SELECT id, root_path, started_at FROM scans WHERE root_path = ?1 ORDER BY started_at DESC, rowid DESC LIMIT 1",
                 params![root_str],
                 |row| {
                     Ok(ScanMeta {
@@ -326,7 +345,7 @@ impl Store {
     /// path -- what a reopened UI needs to restore "which files did I
     /// already mark keep/quarantine" in one round trip, rather than
     /// asking `get_decision` once per file.
-    pub fn load_decisions(&self, scan_id: i64) -> rusqlite::Result<HashMap<String, bool>> {
+    pub fn load_decisions(&self, scan_id: &str) -> rusqlite::Result<HashMap<String, bool>> {
         let mut stmt = self
             .conn
             .prepare("SELECT relative_path, keep FROM decisions WHERE scan_id = ?1")?;
@@ -336,7 +355,7 @@ impl Store {
         rows.collect()
     }
 
-    pub fn get_file(&self, file_id: i64) -> rusqlite::Result<Option<StoredFile>> {
+    pub fn get_file(&self, file_id: &str) -> rusqlite::Result<Option<StoredFile>> {
         self.conn
             .query_row(
                 "SELECT id, relative_path, file_name, media_class, size_bytes, mtime_unix, is_placeholder
@@ -363,7 +382,7 @@ impl Store {
     /// filesystem path; callers serving file content must go through
     /// this (never take a path from a request directly) -- see the
     /// architecture plan's server security section.
-    pub fn get_file_full_path(&self, file_id: i64) -> rusqlite::Result<Option<PathBuf>> {
+    pub fn get_file_full_path(&self, file_id: &str) -> rusqlite::Result<Option<PathBuf>> {
         self.conn
             .query_row(
                 "SELECT s.root_path, f.relative_path FROM files f
@@ -378,10 +397,10 @@ impl Store {
             .optional()
     }
 
-    pub fn load_review_pairs(&self, scan_id: i64) -> rusqlite::Result<Vec<StoredReviewPair>> {
+    pub fn load_review_pairs(&self, scan_id: &str) -> rusqlite::Result<Vec<StoredReviewPair>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, tier, file_a_id, file_b_id, phash_dist, reason
-             FROM review_pairs WHERE scan_id = ?1 ORDER BY id",
+             FROM review_pairs WHERE scan_id = ?1 ORDER BY rowid",
         )?;
         let rows = stmt.query_map(params![scan_id], |row| {
             Ok(StoredReviewPair {
@@ -396,10 +415,10 @@ impl Store {
         rows.collect()
     }
 
-    pub fn load_burst_runs(&self, scan_id: i64) -> rusqlite::Result<Vec<StoredBurstRun>> {
+    pub fn load_burst_runs(&self, scan_id: &str) -> rusqlite::Result<Vec<StoredBurstRun>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, camera_model FROM burst_runs WHERE scan_id = ?1 ORDER BY id")?;
+            .prepare("SELECT id, camera_model FROM burst_runs WHERE scan_id = ?1 ORDER BY rowid")?;
         let mut runs: Vec<StoredBurstRun> = stmt
             .query_map(params![scan_id], |row| {
                 Ok(StoredBurstRun {
@@ -421,7 +440,7 @@ impl Store {
         Ok(runs)
     }
 
-    pub fn load_analysis(&self, file_id: i64) -> rusqlite::Result<Option<StoredAnalysis>> {
+    pub fn load_analysis(&self, file_id: &str) -> rusqlite::Result<Option<StoredAnalysis>> {
         self.conn
             .query_row(
                 "SELECT origin, confidence, evidence_json, sharpness, width, height, camera_model, capture_time, duration_seconds
@@ -446,10 +465,10 @@ impl Store {
             .optional()
     }
 
-    pub fn load_files(&self, scan_id: i64) -> rusqlite::Result<Vec<StoredFile>> {
+    pub fn load_files(&self, scan_id: &str) -> rusqlite::Result<Vec<StoredFile>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, relative_path, file_name, media_class, size_bytes, mtime_unix, is_placeholder
-             FROM files WHERE scan_id = ?1 ORDER BY id",
+             FROM files WHERE scan_id = ?1 ORDER BY rowid",
         )?;
         let rows = stmt.query_map(params![scan_id], |row| {
             Ok(StoredFile {
@@ -465,10 +484,10 @@ impl Store {
         rows.collect()
     }
 
-    pub fn load_clusters(&self, scan_id: i64) -> rusqlite::Result<Vec<StoredCluster>> {
+    pub fn load_clusters(&self, scan_id: &str) -> rusqlite::Result<Vec<StoredCluster>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, tier, keeper_file_id, reasons_json FROM clusters WHERE scan_id = ?1 ORDER BY id")?;
+            .prepare("SELECT id, tier, keeper_file_id, reasons_json FROM clusters WHERE scan_id = ?1 ORDER BY rowid")?;
         let mut clusters: Vec<StoredCluster> = stmt
             .query_map(params![scan_id], |row| {
                 let reasons_json: String = row.get(3)?;
@@ -485,9 +504,9 @@ impl Store {
 
         let mut mstmt = self
             .conn
-            .prepare("SELECT file_id FROM cluster_members WHERE cluster_id = ?1 ORDER BY file_id")?;
+            .prepare("SELECT file_id FROM cluster_members WHERE cluster_id = ?1 ORDER BY rowid")?;
         for c in &mut clusters {
-            let members: Vec<i64> = mstmt
+            let members: Vec<String> = mstmt
                 .query_map(params![c.id], |row| row.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
             c.member_file_ids = members;
@@ -498,7 +517,7 @@ impl Store {
     /// Records (or overwrites) a user's explicit keep/quarantine decision
     /// for one file, keyed by its stable relative path rather than a
     /// scan-local file id -- see the `decisions` table's doc comment.
-    pub fn record_decision(&self, scan_id: i64, relative_path: &str, keep: bool) -> rusqlite::Result<()> {
+    pub fn record_decision(&self, scan_id: &str, relative_path: &str, keep: bool) -> rusqlite::Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         self.conn.execute(
             "INSERT INTO decisions (scan_id, relative_path, keep, decided_at) VALUES (?1, ?2, ?3, ?4)
@@ -508,7 +527,28 @@ impl Store {
         Ok(())
     }
 
-    pub fn get_decision(&self, scan_id: i64, relative_path: &str) -> rusqlite::Result<Option<bool>> {
+    /// Records many decisions in one transaction -- all or none, so a
+    /// bulk "accept suggestions" can't leave a cluster half-decided if it
+    /// fails midway.
+    pub fn record_decisions(&self, scan_id: &str, decisions: &[(String, bool)]) -> rusqlite::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (path, keep) in decisions {
+            self.record_decision(scan_id, path, *keep)?;
+        }
+        tx.commit()
+    }
+
+    /// Forgets a decision, returning the file to "undecided" -- what undo
+    /// needs when the thing being undone was the first decision made.
+    pub fn clear_decision(&self, scan_id: &str, relative_path: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM decisions WHERE scan_id = ?1 AND relative_path = ?2",
+            params![scan_id, relative_path],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_decision(&self, scan_id: &str, relative_path: &str) -> rusqlite::Result<Option<bool>> {
         self.conn
             .query_row(
                 "SELECT keep FROM decisions WHERE scan_id = ?1 AND relative_path = ?2",
@@ -520,7 +560,52 @@ impl Store {
     }
 }
 
-fn insert_analysis(tx: &rusqlite::Transaction, row_id: i64, a: &Analyzed) -> rusqlite::Result<()> {
+/// Databases made before scan ids became UUIDs have an integer `scans.id`
+/// and integer `scan_id` columns, which can't hold one. The project is
+/// pre-release and a scan is regenerable (about two minutes for 2700
+/// files), so rather than carry a migration for throwaway development
+/// databases, drop the old tables -- and say so, since decisions in them
+/// go too.
+fn drop_legacy_schema(conn: &Connection) -> rusqlite::Result<()> {
+    let legacy: bool = conn
+        .query_row("SELECT type FROM pragma_table_info('scans') WHERE name = 'id'", [], |r| r.get::<_, String>(0))
+        .optional()?
+        .is_some_and(|t| t.eq_ignore_ascii_case("INTEGER"));
+    if legacy {
+        eprintln!("photodedup: old database format -- discarding its scans and decisions (re-scan to rebuild)");
+        conn.pragma_update(None, "foreign_keys", "OFF")?;
+        for t in [
+            "decisions", "cluster_members", "burst_run_members", "review_pairs", "analysis", "clusters", "burst_runs", "files", "scans",
+        ] {
+            conn.execute(&format!("DROP TABLE IF EXISTS {t}"), [])?;
+        }
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+    }
+    Ok(())
+}
+
+/// Deletes every scan and everything hanging off it. Explicit, child
+/// tables first, rather than leaning on `ON DELETE CASCADE`: several
+/// references (`cluster_members.file_id`, `clusters.keeper_file_id`, ...)
+/// point at `files` without a cascade, so the order matters.
+fn delete_all_scans(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    for table in [
+        "cluster_members",
+        "burst_run_members",
+        "review_pairs",
+        "analysis",
+        "clusters",
+        "burst_runs",
+        "decisions",
+        "files",
+        "scans",
+    ] {
+        tx.execute(&format!("DELETE FROM {table}"), [])?;
+    }
+    Ok(())
+}
+
+fn insert_analysis(tx: &rusqlite::Transaction, row_id: &str, a: &Analyzed) -> rusqlite::Result<()> {
     let evidence_json = serde_json::to_string(&a.provenance.evidence).unwrap_or_default();
     let phash_blob: Option<Vec<u8>> = a.phash.map(|h| {
         let mut buf = Vec::with_capacity(32);
@@ -695,12 +780,12 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         let scan_id = store.save_scan(&root, &result).unwrap();
 
-        let files = store.load_files(scan_id).unwrap();
+        let files = store.load_files(&scan_id).unwrap();
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].relative_path, "a.jpg");
         assert_eq!(files[0].size_bytes, 1000);
 
-        let clusters = store.load_clusters(scan_id).unwrap();
+        let clusters = store.load_clusters(&scan_id).unwrap();
         assert_eq!(clusters.len(), 1);
         assert_eq!(clusters[0].tier, "T1");
         assert_eq!(clusters[0].member_file_ids.len(), 2);
@@ -713,22 +798,106 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         let scan_id = store.save_scan(&root, &result).unwrap();
 
-        assert_eq!(store.get_decision(scan_id, "a.jpg").unwrap(), None);
-        store.record_decision(scan_id, "a.jpg", true).unwrap();
-        assert_eq!(store.get_decision(scan_id, "a.jpg").unwrap(), Some(true));
-        store.record_decision(scan_id, "a.jpg", false).unwrap();
-        assert_eq!(store.get_decision(scan_id, "a.jpg").unwrap(), Some(false));
+        assert_eq!(store.get_decision(&scan_id, "a.jpg").unwrap(), None);
+        store.record_decision(&scan_id, "a.jpg", true).unwrap();
+        assert_eq!(store.get_decision(&scan_id, "a.jpg").unwrap(), Some(true));
+        store.record_decision(&scan_id, "a.jpg", false).unwrap();
+        assert_eq!(store.get_decision(&scan_id, "a.jpg").unwrap(), Some(false));
     }
 
     #[test]
-    fn two_scans_of_the_same_root_stay_independent() {
+    fn a_new_scan_replaces_the_previous_one_completely() {
         let (root, result) = sample_result();
         let mut store = Store::open_in_memory().unwrap();
         let scan1 = store.save_scan(&root, &result).unwrap();
-        let scan2 = store.save_scan(&root, &result).unwrap();
-        assert_ne!(scan1, scan2);
-        assert_eq!(store.load_files(scan1).unwrap().len(), 2);
-        assert_eq!(store.load_files(scan2).unwrap().len(), 2);
+        let old_file = store.load_files(&scan1).unwrap()[0].id.clone();
+        store.record_decision(&scan1, "a.jpg", true).unwrap();
+
+        // A different root: replacement is global, not per-folder.
+        let other = std::env::temp_dir().join("photodedup-other-root");
+        let scan2 = store.save_scan(&other, &result).unwrap();
+
+        let scans = store.list_scans().unwrap();
+        assert_eq!(scans.iter().map(|s| s.id.clone()).collect::<Vec<_>>(), vec![scan2.clone()]);
+        assert!(store.load_files(&scan1).unwrap().is_empty());
+        assert!(store.load_clusters(&scan1).unwrap().is_empty());
+        assert!(store.load_decisions(&scan1).unwrap().is_empty());
+        assert!(store.load_decisions(&scan2).unwrap().is_empty(), "decisions belong to the replaced scan");
+        assert_eq!(store.load_files(&scan2).unwrap().len(), 2);
+        assert_ne!(scan1, scan2, "scan ids are never reused, so a stale client can't land on the new scan");
+        assert!(store.find_latest_scan_for_root(&root).unwrap().is_none());
+        // Nothing orphaned: the old file and its analysis went with it.
+        assert!(store.get_file(&old_file).unwrap().is_none());
+        assert!(store.load_analysis(&old_file).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_database_with_the_old_integer_scan_ids_is_reset_and_then_usable() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            let conn = Connection::open(tmp.path()).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE scans (id INTEGER PRIMARY KEY, root_path TEXT NOT NULL, started_at TEXT NOT NULL);
+                 INSERT INTO scans (root_path, started_at) VALUES ('/old', 'then');",
+            )
+            .unwrap();
+        }
+
+        let mut store = Store::open(tmp.path()).unwrap();
+        assert!(store.list_scans().unwrap().is_empty(), "legacy rows are discarded");
+
+        let (root, result) = sample_result();
+        let id = store.save_scan(&root, &result).unwrap();
+        assert_eq!(store.list_scans().unwrap().len(), 1);
+        assert_eq!(id.len(), 36, "a UUID");
+
+        // Reopening a current-format database must NOT reset it.
+        drop(store);
+        let store = Store::open(tmp.path()).unwrap();
+        assert_eq!(store.list_scans().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_failed_save_leaves_the_previous_scan_untouched() {
+        let (root, result) = sample_result();
+        let mut store = Store::open_in_memory().unwrap();
+        let scan1 = store.save_scan(&root, &result).unwrap();
+        store.record_decision(&scan1, "a.jpg", true).unwrap();
+
+        // Two files with one relative path violates UNIQUE(&scan_id,
+        // relative_path) partway through the insert -- after the old
+        // scan's rows were already deleted inside the transaction.
+        let (_, mut bad) = sample_result();
+        let dup = bad.files[0].clone();
+        bad.files.push(dup);
+        assert!(store.save_scan(&root, &bad).is_err());
+
+        assert_eq!(store.list_scans().unwrap().iter().map(|s| s.id.clone()).collect::<Vec<_>>(), vec![scan1.clone()]);
+        assert_eq!(store.load_files(&scan1).unwrap().len(), 2);
+        assert_eq!(store.load_clusters(&scan1).unwrap().len(), 1);
+        assert_eq!(store.get_decision(&scan1, "a.jpg").unwrap(), Some(true));
+    }
+
+    #[test]
+    fn no_rows_survive_from_a_replaced_scan_in_any_table() {
+        let (root, result) = sample_result();
+        let mut store = Store::open_in_memory().unwrap();
+        store.save_scan(&root, &result).unwrap();
+        let counts = |store: &Store| -> Vec<i64> {
+            ["files", "analysis", "clusters", "cluster_members", "burst_runs", "burst_run_members", "review_pairs", "decisions"]
+                .iter()
+                .map(|t| store.conn.query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0)).unwrap())
+                .collect()
+        };
+        let live = store.list_scans().unwrap()[0].id.clone();
+        store.record_decision(&live, "a.jpg", true).unwrap();
+        let first = counts(&store);
+        store.save_scan(&root, &result).unwrap();
+        let second = counts(&store);
+        // Same content saved again: identical counts everywhere except the
+        // decision, which went with the old scan.
+        assert_eq!(&first[..7], &second[..7]);
+        assert_eq!(second[7], 0);
     }
 
     #[test]
@@ -737,7 +906,7 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         let scan_id = store.save_scan(&root, &result).unwrap();
 
-        let pairs = store.load_review_pairs(scan_id).unwrap();
+        let pairs = store.load_review_pairs(&scan_id).unwrap();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].tier, "T2NativeReview");
         assert_eq!(pairs[0].phash_dist, 44);
@@ -750,7 +919,7 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         let scan_id = store.save_scan(&root, &result).unwrap();
 
-        let runs = store.load_burst_runs(scan_id).unwrap();
+        let runs = store.load_burst_runs(&scan_id).unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].camera_model, "OnePlus 15");
         assert_eq!(runs[0].member_file_ids.len(), 2);
@@ -767,9 +936,9 @@ mod tests {
         assert_eq!(scans[0].id, scan_id);
         assert_eq!(scans[0].root_path, root.to_string_lossy());
 
-        let scan = store.get_scan(scan_id).unwrap().unwrap();
+        let scan = store.get_scan(&scan_id).unwrap().unwrap();
         assert_eq!(scan.id, scan_id);
-        assert_eq!(store.get_scan(999).unwrap().is_none(), true);
+        assert_eq!(store.get_scan("no-such-scan").unwrap().is_none(), true);
     }
 
     #[test]
@@ -778,13 +947,13 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         let scan_id = store.save_scan(&root, &result).unwrap();
 
-        let files = store.load_files(scan_id).unwrap();
-        let a_id = files.iter().find(|f| f.relative_path == "a.jpg").unwrap().id;
+        let files = store.load_files(&scan_id).unwrap();
+        let a_id = files.iter().find(|f| f.relative_path == "a.jpg").unwrap().id.clone();
 
-        let fetched = store.get_file(a_id).unwrap().unwrap();
+        let fetched = store.get_file(&a_id).unwrap().unwrap();
         assert_eq!(fetched.file_name, "a.jpg");
 
-        let full_path = store.get_file_full_path(a_id).unwrap().unwrap();
+        let full_path = store.get_file_full_path(&a_id).unwrap().unwrap();
         assert_eq!(full_path, root.join("a.jpg"));
     }
 
@@ -794,18 +963,18 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         let scan_id = store.save_scan(&root, &result).unwrap();
 
-        let files = store.load_files(scan_id).unwrap();
-        let a_id = files.iter().find(|f| f.relative_path == "a.jpg").unwrap().id;
+        let files = store.load_files(&scan_id).unwrap();
+        let a_id = files.iter().find(|f| f.relative_path == "a.jpg").unwrap().id.clone();
 
-        let analysis = store.load_analysis(a_id).unwrap().unwrap();
+        let analysis = store.load_analysis(&a_id).unwrap().unwrap();
         assert_eq!(analysis.origin, "camera_original");
         assert_eq!(analysis.camera_model.as_deref(), Some("OnePlus 15"));
         assert_eq!(analysis.evidence, vec![Evidence::IntactCameraExif]);
 
         // File b has no analysis entry in sample_result -- must come back
         // as None, not an error or a default-filled struct.
-        let b_id = files.iter().find(|f| f.relative_path == "b.jpg").unwrap().id;
-        assert!(store.load_analysis(b_id).unwrap().is_none());
+        let b_id = files.iter().find(|f| f.relative_path == "b.jpg").unwrap().id.clone();
+        assert!(store.load_analysis(&b_id).unwrap().is_none());
     }
 
     #[test]
@@ -846,28 +1015,44 @@ mod tests {
     }
 
     #[test]
+    fn bulk_record_and_clear_decision_round_trip() {
+        let (root, result) = sample_result();
+        let mut store = Store::open_in_memory().unwrap();
+        let scan_id = store.save_scan(&root, &result).unwrap();
+        store
+            .record_decisions(&scan_id, &[("a.jpg".into(), true), ("b.jpg".into(), false)])
+            .unwrap();
+        assert_eq!(store.load_decisions(&scan_id).unwrap().len(), 2);
+        store.clear_decision(&scan_id, "a.jpg").unwrap();
+        assert_eq!(store.get_decision(&scan_id, "a.jpg").unwrap(), None);
+        assert_eq!(store.get_decision(&scan_id, "b.jpg").unwrap(), Some(false));
+        // Clearing something never decided is not an error.
+        store.clear_decision(&scan_id, "nope.jpg").unwrap();
+    }
+
+    #[test]
     fn load_decisions_returns_everything_recorded_for_one_scan() {
         let (root, result) = sample_result();
         let mut store = Store::open_in_memory().unwrap();
         let scan_id = store.save_scan(&root, &result).unwrap();
 
-        store.record_decision(scan_id, "a.jpg", true).unwrap();
-        store.record_decision(scan_id, "b.jpg", false).unwrap();
+        store.record_decision(&scan_id, "a.jpg", true).unwrap();
+        store.record_decision(&scan_id, "b.jpg", false).unwrap();
 
-        let decisions = store.load_decisions(scan_id).unwrap();
+        let decisions = store.load_decisions(&scan_id).unwrap();
         assert_eq!(decisions.len(), 2);
         assert_eq!(decisions.get("a.jpg"), Some(&true));
         assert_eq!(decisions.get("b.jpg"), Some(&false));
     }
 
     #[test]
-    fn decisions_do_not_leak_across_different_scan_ids() {
+    fn decisions_are_scoped_to_their_scan_id() {
         let (root, result) = sample_result();
         let mut store = Store::open_in_memory().unwrap();
-        let scan1 = store.save_scan(&root, &result).unwrap();
-        let scan2 = store.save_scan(&root, &result).unwrap();
+        let scan = store.save_scan(&root, &result).unwrap();
 
-        store.record_decision(scan1, "a.jpg", true).unwrap();
-        assert!(store.load_decisions(scan2).unwrap().is_empty());
+        store.record_decision(&scan, "a.jpg", true).unwrap();
+        assert_eq!(store.load_decisions(&scan).unwrap().len(), 1);
+        assert!(store.load_decisions("some-other-scan").unwrap().is_empty());
     }
 }

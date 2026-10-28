@@ -11,13 +11,15 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use super::require_scan;
 
 pub async fn get_decisions(
     State(state): State<AppState>,
-    AxPath(scan_id): AxPath<i64>,
+    AxPath(scan_id): AxPath<String>,
 ) -> Result<Json<HashMap<String, bool>>, StatusCode> {
     let store = state.store.lock().unwrap();
-    store.load_decisions(scan_id).map(Json).map_err(internal)
+    require_scan(&store, &scan_id)?;
+    store.load_decisions(&scan_id).map(Json).map_err(internal)
 }
 
 #[derive(Deserialize)]
@@ -28,19 +30,49 @@ pub struct DecisionBody {
 
 pub async fn put_decision(
     State(state): State<AppState>,
-    AxPath(scan_id): AxPath<i64>,
+    AxPath(scan_id): AxPath<String>,
     Json(body): Json<DecisionBody>,
 ) -> Result<StatusCode, StatusCode> {
     let store = state.store.lock().unwrap();
+    require_scan(&store, &scan_id)?;
     store
-        .record_decision(scan_id, &body.relative_path, body.keep)
+        .record_decision(&scan_id, &body.relative_path, body.keep)
         .map(|()| StatusCode::NO_CONTENT)
         .map_err(internal)
 }
 
+/// `DELETE /api/scans/{id}/decisions?relative_path=...` -- back to
+/// undecided (what undoing a first decision needs).
+pub async fn clear_decision(
+    State(state): State<AppState>,
+    AxPath(scan_id): AxPath<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<StatusCode, StatusCode> {
+    let Some(path) = params.get("relative_path") else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let store = state.store.lock().unwrap();
+    require_scan(&store, &scan_id)?;
+    store.clear_decision(&scan_id, path).map(|()| StatusCode::NO_CONTENT).map_err(internal)
+}
+
+/// `POST /api/scans/{id}/decisions/bulk` -- many decisions in one
+/// transaction (a cluster's whole keep/quarantine split, or "accept all
+/// suggestions"), so a failure can't leave one half-recorded.
+pub async fn put_decisions_bulk(
+    State(state): State<AppState>,
+    AxPath(scan_id): AxPath<String>,
+    Json(body): Json<Vec<DecisionBody>>,
+) -> Result<StatusCode, StatusCode> {
+    let rows: Vec<(String, bool)> = body.into_iter().map(|d| (d.relative_path, d.keep)).collect();
+    let store = state.store.lock().unwrap();
+    require_scan(&store, &scan_id)?;
+    store.record_decisions(&scan_id, &rows).map(|()| StatusCode::NO_CONTENT).map_err(internal)
+}
+
 #[derive(Serialize)]
 pub struct ResumeDto {
-    pub scan_id: Option<i64>,
+    pub scan_id: Option<String>,
     pub started_at: Option<String>,
 }
 

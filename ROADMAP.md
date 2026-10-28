@@ -21,6 +21,7 @@ shaped these decisions.
 | **Windows background-scheduling equivalent** (`SetPriorityClass(..., BELOW_NORMAL_PRIORITY_CLASS)`, `THREAD_MODE_BACKGROUND_BEGIN`) | No Windows target to verify against yet; didn't want a `windows-sys` dependency added speculatively | `platform::noop::NoopScheduler` is the only thing that needs replacing — every caller already goes through the `PlatformScheduler` trait (`crates/core/src/platform/`), untouched by adding a real Windows impl |
 | **Scan-intensity (Efficient/Default/Performance) as a persistent app setting** | No UI exists yet (M2+) — currently a `--mode` CLI flag, set fresh per invocation | `ScanIntensity` (`throttle.rs`) is a small `Copy` enum with no state of its own; M2's settings/options surface needs only to read a stored value and pass it into `PipelineOptions`, not touch the scheduling logic itself. **Explicit user requirement, recorded here so it isn't lost before M2 design starts:** this belongs in the app's persistent Options/Settings tab (a standing preference the user sets once), not a per-scan prompt or CLI-only flag — the `--mode` flag stays for scripting/testing, but isn't the primary UX once a UI exists |
 | **Resume-recognition beyond exact path match** | `Store::find_latest_scan_for_root` (see "Resolved during M2" below) currently matches on canonicalized path only — a folder renamed, moved to a new parent directory, or re-synced to a new local path by a cloud client (OneDrive/Dropbox/iCloud routinely do this) no longer matches its own prior scan at all, even though every file inside is identical. Not fixed now because it needs a real design decision, not just more code — **explicit user requirement, recorded here so it isn't lost**: recognize the same logical folder by content, not just path | The exact-hash pass (`exacthash.rs`) already computes a blake3 digest for every size-collision bucket, and `files` already stores `(size, mtime)` per file from day one — a content fingerprint (e.g. the multiset of `(size, blake3)` for a sample of files, or file count + total size as a cheap first-pass filter before a full comparison) is additive, not a schema change. The harder part is UX, not storage — **see the suggested prompt copy right below the table.** |
+| **Several scans alive at once** (per-folder history, switching between scans, comparing two) | For now exactly one scan is live: saving a new one deletes the previous scan, including its decisions (user's call). Needs a real design decision about when a scan may be discarded, and what a re-scan of the same folder does with the decisions already made on it (carry over by relative path?) | Every database id is a UUID, so nothing in the API assumes there is only one scan. `save_scan` is the single place that deletes the old one (`delete_all_scans`), and decisions are already keyed by relative path rather than file id, so carrying them across a re-scan is additive |
 
 **Suggested UX for the resume-recognition item above (don't lose this when it gets built):**
 Silently auto-matching on content is a real risk *specifically in a dedup
@@ -220,4 +221,64 @@ as a choice.
     Build-time only; nothing from it ships in `ui/dist`.
   - Click-through confirmed in a real browser by the user (start flow,
     scan, progress).
+
+- **One live scan, replaced when the next one completes; UUID ids
+  everywhere.** `Store::save_scan` now deletes every earlier scan (files,
+  analysis, clusters, review pairs, burst runs **and decisions**) in the
+  same transaction that writes the new one, so the old scan goes away only
+  once the new one is fully saved. A cancelled or failed scan never reaches
+  `save_scan`, and a failure partway through rolls back and leaves the old
+  scan intact (tested). The generated thumbnails are cleared with it.
+  - **Consequence to keep in mind:** "Scan again" on a known folder throws
+    away the decisions made on it. The UI says so before it happens.
+    Carrying decisions across a re-scan (they are keyed by relative path,
+    so it is possible) is on the deferred table with multi-scan support.
+  - **Every database id is a random UUID** (scans, files, clusters, review
+    pairs, burst runs), not a serial. Found while doing the above: with
+    serial ids, emptying the table makes SQLite reuse id 1, so a stale tab
+    holding the old scan id would silently land on the new scan and write
+    decisions into it. A UUID is never reused, so a stale id is simply
+    "not found": every scan-scoped route now returns 404 for an unknown
+    scan (tested), instead of an empty list or a raw foreign-key error.
+    The pipeline's own `FileId` (a `u32`) stays in memory only.
+  - Lists are read back in insertion order (`ORDER BY rowid`), since UUIDs
+    have no order.
+  - File ids arrive in URLs as a parsed `Uuid`, so a malformed or
+    path-like id (`..%2F..`, `999`) is rejected before it reaches the
+    database or a cache file name (tested). The thumbnail cache is named
+    `<uuid>_<size>.jpg`, and `clear_cache` deletes only files with exactly
+    that shape.
+  - **Pre-UUID databases are reset on open** (with a message on stderr):
+    the project is unreleased, a scan is regenerable, and a migration for
+    throwaway development databases wasn't worth carrying. Add a real
+    migration before any release that has databases worth keeping.
+  - A near-miss worth recording: my first version of the cache clear
+    deleted every file in whatever directory it was given, and a test
+    pointed it at the system temp dir and deleted other tests' databases.
+    It now matches cache file names only, and tests use a private temp
+    directory.
+
+- **Review screen** (`ui/src/Review.svelte`, `Overview.svelte`,
+  `Detail.svelte`, state in `lib/review.svelte.ts`). Master-detail rather
+  than a wizard: an overview grid of every cluster with a per-cluster
+  state (undecided / accepted / changed / partly decided), filter chips,
+  and a reviewed counter; opening a cluster shows its members side by side
+  with prev/next inside the current filter, and the overview is always one
+  click (or Esc) away, so earlier choices can be revisited at any time.
+  - **Decisions are per file, so any number of a cluster's members can be
+    kept.** The engine's pick is only a suggestion until the user acts on
+    it. The one rule: the last kept member of a cluster can't be
+    quarantined. "Accept all suggestions" only touches clusters nobody has
+    decided yet, behind a confirmation. Undo is multi-level.
+  - Keyboard (all of it also has a visible control): arrows or `j`/`k`
+    move, `1`-`9` toggle keep, `Enter` accepts and advances, `Space`
+    opens the large preview, `Esc` backs out, `u` undoes, `?` lists them.
+  - New API: `POST /api/scans/{id}/decisions/bulk` (one transaction) and
+    `DELETE /api/scans/{id}/decisions?relative_path=` (back to undecided,
+    for undo). Quarantine itself is not built: decisions are only
+    recorded; applying them (move to quarantine, with undo) is M3.
+  - The decision logic has unit tests (`npm test`); **the screen itself is
+    not yet verified in a real browser.** Still to build: review pairs and
+    burst runs as browse-only views, the Options tab, and virtualizing the
+    overview grid for libraries much larger than the 182 clusters tested.
 

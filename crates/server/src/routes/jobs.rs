@@ -69,6 +69,7 @@ pub async fn start_scan(State(state): State<AppState>, Json(body): Json<StartBod
     };
 
     let store = state.store.clone();
+    let cache_dir = state.cache_dir.clone();
     tokio::task::spawn_blocking(move || {
         let opts = PipelineOptions { intensity, ..Default::default() };
         // `send_replace`, not `send`: it never fails when no one is
@@ -89,7 +90,11 @@ pub async fn start_scan(State(state): State<AppState>, Json(body): Json<StartBod
             // result isn't a scan anyone could meaningfully resume.
             Ok(None) => JobStatus::Cancelled,
             Ok(Some(result)) => match store.lock().unwrap().save_scan(&root, &result) {
-                Ok(scan_id) => JobStatus::Done { scan_id },
+                Ok(scan_id) => {
+                    // The previous scan is gone; so are its thumbnails.
+                    super::files::clear_cache(&cache_dir);
+                    JobStatus::Done { scan_id }
+                }
                 Err(e) => JobStatus::Failed { message: format!("saving results failed: {e}") },
             },
             Err(_) => JobStatus::Failed { message: "scan crashed".into() },
@@ -152,11 +157,14 @@ mod tests {
     use photodedup_core::store::Store;
     use std::sync::{Arc, Mutex};
 
+    /// The cache dir is a real, private temp dir per state -- never the
+    /// shared system temp dir, which a cache clear must not be pointed at.
     fn test_state() -> AppState {
+        let cache = tempfile::tempdir().unwrap().keep();
         AppState {
             store: Arc::new(Mutex::new(Store::open_in_memory().unwrap())),
             token: Arc::from("t"),
-            cache_dir: Arc::new(std::env::temp_dir()),
+            cache_dir: Arc::new(cache),
             job: Arc::new(Mutex::new(None)),
         }
     }
@@ -192,7 +200,7 @@ mod tests {
         let err = start_scan(State(state.clone()), body(tmp.path(), None)).await.unwrap_err();
         assert_eq!(err.0, StatusCode::CONFLICT);
 
-        tx.send_replace(JobStatus::Done { scan_id: 1 });
+        tx.send_replace(JobStatus::Done { scan_id: "s".into() });
         let (status, Json(dto)) = start_scan(State(state.clone()), body(tmp.path(), None)).await.unwrap();
         assert_eq!(status, StatusCode::ACCEPTED);
         assert_eq!(dto.job_id, 8, "ids increase so a stale client can't read a newer job as its own");
@@ -220,7 +228,7 @@ mod tests {
         let JobStatus::Done { scan_id } = events.last().unwrap().clone() else {
             panic!("expected done, got {:?}", events.last());
         };
-        assert!(state.store.lock().unwrap().get_scan(scan_id).unwrap().is_some());
+        assert!(state.store.lock().unwrap().get_scan(&scan_id).unwrap().is_some());
         assert!(matches!(&*job_status(State(state), AxPath(dto.job_id)).await.unwrap(), JobStatus::Done { .. }));
     }
 

@@ -2,7 +2,9 @@
 //! touches the filesystem directly, and the one place path-safety
 //! actually matters. Every handler here resolves a filesystem path **only**
 //! via `Store::get_file_full_path(file_id)` -- never from a path in the
-//! request. A request can say "file 42", never "/etc/passwd".
+//! request. A request can name a file by its UUID, never by a path. The id
+//! arrives as a parsed `Uuid`, not a string, so a malformed one is rejected
+//! before it reaches the database or the thumbnail cache's file names.
 
 use crate::state::AppState;
 use axum::body::Body;
@@ -15,17 +17,19 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
+use uuid::Uuid;
 
 /// Resolves `file_id` -> (full path, media class), the one DB round-trip
 /// every file-serving handler needs before it can do anything.
-fn resolve(state: &AppState, file_id: i64) -> Result<(PathBuf, MediaClassSerde), StatusCode> {
+fn resolve(state: &AppState, file_id: &Uuid) -> Result<(PathBuf, MediaClassSerde), StatusCode> {
+    let id = file_id.to_string();
     let store = state.store.lock().unwrap();
     let path = store
-        .get_file_full_path(file_id)
+        .get_file_full_path(&id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
     let file = store
-        .get_file(file_id)
+        .get_file(&id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
     Ok((path, file.media_class))
@@ -36,7 +40,7 @@ fn resolve(state: &AppState, file_id: i64) -> Result<(PathBuf, MediaClassSerde),
 /// requests are the common case (re-rendering the grid on scroll/filter).
 pub async fn thumbnail(
     State(state): State<AppState>,
-    AxPath(file_id): AxPath<i64>,
+    AxPath(file_id): AxPath<Uuid>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let size: u32 = params.get("size").and_then(|s| s.parse().ok()).unwrap_or(256);
@@ -49,20 +53,20 @@ pub async fn thumbnail(
 /// two use cases never collide on a shared default.
 pub async fn preview(
     State(state): State<AppState>,
-    AxPath(file_id): AxPath<i64>,
+    AxPath(file_id): AxPath<Uuid>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let size: u32 = params.get("size").and_then(|s| s.parse().ok()).unwrap_or(1600);
     serve_generated_jpeg(state, file_id, size).await
 }
 
-async fn serve_generated_jpeg(state: AppState, file_id: i64, size: u32) -> Response {
-    let (path, media_class) = match resolve(&state, file_id) {
+async fn serve_generated_jpeg(state: AppState, file_id: Uuid, size: u32) -> Response {
+    let (path, media_class) = match resolve(&state, &file_id) {
         Ok(v) => v,
         Err(code) => return code.into_response(),
     };
 
-    if let Some(cached) = cache_read(&state.cache_dir, file_id, size) {
+    if let Some(cached) = cache_read(&state.cache_dir, &file_id, size) {
         return jpeg_response(cached);
     }
 
@@ -73,7 +77,7 @@ async fn serve_generated_jpeg(state: AppState, file_id: i64, size: u32) -> Respo
 
     match bytes {
         Ok(Ok(bytes)) => {
-            cache_write(&state.cache_dir, file_id, size, &bytes);
+            cache_write(&state.cache_dir, &file_id, size, &bytes);
             jpeg_response(bytes)
         }
         _ => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
@@ -116,10 +120,10 @@ fn jpeg_response(bytes: Vec<u8>) -> Response {
 /// crate hand-rolling byte-range parsing.
 pub async fn original(
     State(state): State<AppState>,
-    AxPath(file_id): AxPath<i64>,
+    AxPath(file_id): AxPath<Uuid>,
     headers: HeaderMap,
 ) -> Response {
-    let (path, _) = match resolve(&state, file_id) {
+    let (path, _) = match resolve(&state, &file_id) {
         Ok(v) => v,
         Err(code) => return code.into_response(),
     };
@@ -173,11 +177,46 @@ pub fn init_cache_dir(db_path: &std::path::Path) -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
-fn cache_path(cache_dir: &std::path::Path, file_id: i64, size: u32) -> PathBuf {
-    cache_dir.join(format!("{file_id}-{size}.jpg"))
+/// Empties the cache. Cache entries are keyed by file id, and a new scan
+/// replaces all file rows (SQLite may hand the old ids out again), so
+/// leaving the old thumbnails would show the wrong photo for a new file.
+///
+/// Deletes only files that look like cache entries (`<id>-<size>.jpg`, or
+/// a leftover `.<id>-<size>.<pid>.tmp`), never anything else in the
+/// directory, never follows a link, never recurses: a mis-set `cache_dir`
+/// must not be able to wipe unrelated files.
+pub fn clear_cache(cache_dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(cache_dir) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if e.file_type().is_ok_and(|t| !t.is_dir()) && is_cache_entry_name(&name) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
-fn cache_read(cache_dir: &std::path::Path, file_id: i64, size: u32) -> Option<Vec<u8>> {
+fn is_cache_entry_name(name: &str) -> bool {
+    let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    // `<uuid>_<size>`, in the canonical hyphenated lowercase form.
+    let id_size = |s: &str| {
+        s.split_once('_')
+            .is_some_and(|(id, size)| id.len() == 36 && Uuid::parse_str(id).is_ok() && id == id.to_ascii_lowercase() && numeric(size))
+    };
+    if let Some(stem) = name.strip_suffix(".jpg") {
+        return id_size(stem);
+    }
+    if let Some(rest) = name.strip_prefix('.').and_then(|n| n.strip_suffix(".tmp")) {
+        return rest.rsplit_once('.').is_some_and(|(a, pid)| numeric(pid) && id_size(a));
+    }
+    false
+}
+
+fn cache_path(cache_dir: &std::path::Path, file_id: &Uuid, size: u32) -> PathBuf {
+    cache_dir.join(format!("{file_id}_{size}.jpg"))
+}
+
+fn cache_read(cache_dir: &std::path::Path, file_id: &Uuid, size: u32) -> Option<Vec<u8>> {
     let path = cache_path(cache_dir, file_id, size);
     // Refuse to follow a symlink -- `symlink_metadata` (not `metadata`)
     // inspects the link itself rather than its target.
@@ -188,12 +227,12 @@ fn cache_read(cache_dir: &std::path::Path, file_id: i64, size: u32) -> Option<Ve
     std::fs::read(path).ok()
 }
 
-fn cache_write(cache_dir: &std::path::Path, file_id: i64, size: u32, bytes: &[u8]) {
+fn cache_write(cache_dir: &std::path::Path, file_id: &Uuid, size: u32, bytes: &[u8]) {
     let final_path = cache_path(cache_dir, file_id, size);
     // Write-to-temp-then-rename: atomic (same directory = same
     // filesystem), and `create_new` refuses to follow a pre-existing
     // symlink or overwrite a pre-existing file at the temp name.
-    let tmp_path = cache_dir.join(format!(".{file_id}-{size}.{}.tmp", std::process::id()));
+    let tmp_path = cache_dir.join(format!(".{file_id}_{size}.{}.tmp", std::process::id()));
 
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
@@ -217,6 +256,29 @@ mod cache_tests {
     use super::*;
 
     #[test]
+    fn clear_cache_removes_only_cache_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let dir_like = format!("{}_9.jpg", Uuid::new_v4());
+        for name in [format!("{id}_256.jpg"), format!("{id}_1024.jpg"), format!(".{id}_256.4242.tmp")] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        for name in ["notes.txt", "photo.jpg", "7-256.jpg", "42_256.jpg"] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        std::fs::write(dir.path().join(format!("{id}_256.jpg.bak")), b"x").unwrap();
+        std::fs::create_dir(dir.path().join(&dir_like)).unwrap(); // a directory that merely looks like one
+
+        clear_cache(dir.path());
+
+        let mut left: Vec<String> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into()).collect();
+        left.sort();
+        let mut want = vec![dir_like, format!("{id}_256.jpg.bak"), "notes.txt".into(), "photo.jpg".into(), "7-256.jpg".into(), "42_256.jpg".into()];
+        want.sort();
+        assert_eq!(left, want);
+    }
+
+    #[test]
     fn init_cache_dir_is_owner_only_on_unix() {
         let tmp = tempfile::TempDir::new().unwrap();
         let db_path = tmp.path().join("scan.sqlite3");
@@ -235,21 +297,23 @@ mod cache_tests {
     fn write_then_read_round_trips() {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = init_cache_dir(&tmp.path().join("scan.sqlite3")).unwrap();
-        cache_write(&dir, 42, 256, b"hello jpeg bytes");
-        assert_eq!(cache_read(&dir, 42, 256), Some(b"hello jpeg bytes".to_vec()));
+        let id = Uuid::new_v4();
+        cache_write(&dir, &id, 256, b"hello jpeg bytes");
+        assert_eq!(cache_read(&dir, &id, 256), Some(b"hello jpeg bytes".to_vec()));
     }
 
     #[test]
     fn read_refuses_to_follow_a_symlink_at_the_cache_path() {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = init_cache_dir(&tmp.path().join("scan.sqlite3")).unwrap();
+        let id = Uuid::new_v4();
         let secret = tmp.path().join("not-a-thumbnail.txt");
         std::fs::write(&secret, b"should never be served as a thumbnail").unwrap();
 
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(&secret, cache_path(&dir, 7, 256)).unwrap();
-            assert_eq!(cache_read(&dir, 7, 256), None);
+            std::os::unix::fs::symlink(&secret, cache_path(&dir, &id, 256)).unwrap();
+            assert_eq!(cache_read(&dir, &id, 256), None);
         }
     }
 
@@ -257,6 +321,6 @@ mod cache_tests {
     fn cache_miss_returns_none_without_creating_anything() {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = init_cache_dir(&tmp.path().join("scan.sqlite3")).unwrap();
-        assert_eq!(cache_read(&dir, 999, 256), None);
+        assert_eq!(cache_read(&dir, &Uuid::new_v4(), 256), None);
     }
 }

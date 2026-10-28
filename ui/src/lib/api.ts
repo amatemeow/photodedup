@@ -29,13 +29,44 @@ export type Phase = 'scanning' | 'analyzing' | 'exact_duplicates' | 'matching' |
 
 export type JobStatus =
   | ({ state: 'running'; phase: Phase } & { done?: number; total?: number })
-  | { state: 'done'; scan_id: number }
+  | { state: 'done'; scan_id: string }
   | { state: 'cancelled' }
   | { state: 'failed'; message: string };
 
 export interface Resume {
-  scan_id: number | null;
+  scan_id: string | null;
   started_at: string | null;
+}
+
+export interface FileDto {
+  id: string;
+  relative_path: string;
+  file_name: string;
+  media_class: 'Image' | 'Video' | string;
+  size_bytes: number;
+  is_placeholder: boolean;
+}
+
+export interface Cluster {
+  id: string;
+  tier: string;
+  keeper_file_id: string;
+  reasons: string[];
+  members: FileDto[];
+}
+
+export interface Analysis {
+  origin: string;
+  width: number | null;
+  height: number | null;
+  camera_model: string | null;
+  capture_time: string | null;
+  duration_seconds: number | null;
+}
+
+export interface DecisionRow {
+  relative_path: string;
+  keep: boolean;
 }
 
 export class ApiError extends Error {
@@ -64,7 +95,17 @@ export const api = {
     call<{ job_id: number }>('/api/scans/start', { method: 'POST', body: JSON.stringify({ root, mode }) }),
   cancel: (jobId: number) => call<void>(`/api/jobs/${jobId}/cancel`, { method: 'POST' }),
   jobStatus: (jobId: number) => call<JobStatus>(`/api/jobs/${jobId}`),
-  clusters: (scanId: number) => call<unknown[]>(`/api/scans/${scanId}/clusters`),
+  clusters: (scanId: string) => call<Cluster[]>(`/api/scans/${scanId}/clusters`),
+  analysis: (fileId: string) => call<Analysis>(`/api/files/${fileId}/analysis`),
+  decisions: (scanId: string) => call<Record<string, boolean>>(`/api/scans/${scanId}/decisions`),
+  putDecisions: (scanId: string, rows: DecisionRow[]) =>
+    call<void>(`/api/scans/${scanId}/decisions/bulk`, { method: 'POST', body: JSON.stringify(rows) }),
+  clearDecision: (scanId: string, relativePath: string) =>
+    call<void>(`/api/scans/${scanId}/decisions?relative_path=${encodeURIComponent(relativePath)}`, { method: 'DELETE' }),
+
+  /** For `<img>`/`<video>` `src`, which can't send an Authorization header. */
+  fileUrl: (fileId: string, kind: 'thumb' | 'preview' | 'original') =>
+    `/files/${fileId}/${kind}?token=${encodeURIComponent(token)}`,
 
   /** Streams a job's status. EventSource can't send headers, hence the
    * query token. Returns a function that closes the stream. */

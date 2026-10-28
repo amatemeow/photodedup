@@ -1,0 +1,77 @@
+:root {
+  --bg: #fafafa;
+  --fg: #1d1d1f;
+  --muted: #6e6e73;
+  --line: #d2d2d7;
+  --accent: #0a64d8;
+  --accent-fg: #fff;
+  --danger: #c4291c;
+  --ok: #1f7a3a;
+  --ok-fg: #fff;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1c1e;
+    --fg: #f5f5f7;
+    --muted: #98989d;
+    --line: #3a3a3c;
+    --accent: #4c9aff;
+    --accent-fg: #0b0b0c;
+    --danger: #ff6b5e;
+    --ok: #3fb663;
+    --ok-fg: #0b0b0c;
+    color-scheme: dark;
+  }
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+input {
+  font: inherit;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+}
+button {
+  font: inherit;
+  padding: 0.5rem 1rem;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+button.secondary {
+  background: transparent;
+  color: inherit;
+  border: 1px solid var(--line);
+}
+progress {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.hint,
+.note {
+  color: var(--muted);
+  font-size: 0.9em;
+}
+.error {
+  color: var(--danger);
+}
+
+button.link {
+  background: none;
+  color: var(--accent);
+  padding: 0;
+  border: 0;
+}
