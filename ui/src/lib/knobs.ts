@@ -55,3 +55,39 @@ export function describeChange(knob: KnobId, from: Counts, to: Counts): string[]
   }
   return lines;
 }
+
+/** The three matching sliders: wording and step, shared by wherever they are shown.
+ * The limits themselves come from the server. */
+export const knobDefs: { id: KnobId; title: string; blurb: string; low: string; high: string; unit: string; step: number; caution?: string }[] = [
+  {
+    id: 'sequence_similarity',
+    title: 'Sequence similarity',
+    blurb:
+      'How alike shots must look to stay in one quick sequence. Shots that differ by more than this are split into separate groups, so a lower value gives smaller, tighter sequences.',
+    low: 'Stricter',
+    high: 'Looser',
+    unit: '',
+    step: 5,
+  },
+  {
+    id: 'sequence_gap_seconds',
+    title: 'Sequence time gap',
+    blurb:
+      'Shots from one camera taken within this many seconds of each other can belong to the same quick sequence. It also decides whether two similar shots are listed as a sequence or under Same-device review.',
+    low: 'Shorter',
+    high: 'Longer',
+    unit: ' s',
+    step: 1,
+  },
+  {
+    id: 'match_distance',
+    title: 'Copy match distance',
+    blurb: 'How different two photos may look and still be checked as possible copies of each other.',
+    low: 'Stricter',
+    high: 'More permissive',
+    unit: '',
+    step: 5,
+    caution:
+      'A higher value finds more copies but can also suggest wrong ones. Two untouched camera photos are never suggested as copies of each other, whatever you choose here.',
+  },
+];

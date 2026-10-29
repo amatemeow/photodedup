@@ -62,7 +62,9 @@ export class Review {
 
   constructor(readonly scanId: string) {}
 
-  async load() {
+  /** `keepView`: reloading under the user (their tab and filter stay), as when matching
+   * settings are being tuned; the first load opens on the first category with anything in it. */
+  async load(keepView = false) {
     try {
       const [clusters, bursts, pairs, orphans, decisions] = await Promise.all([
         api.clusters(this.scanId),
@@ -134,7 +136,7 @@ export class Review {
       ];
       this.decisions = decisions;
       // Open on the first category that has anything to review.
-      this.tab = tabs.find((t) => this.tabCount(t) > 0) ?? 'true';
+      if (!keepView) this.tab = tabs.find((t) => this.tabCount(t) > 0) ?? 'true';
       this.loaded = true;
     } catch (e) {
       this.error = e instanceof Error ? e.message : String(e);

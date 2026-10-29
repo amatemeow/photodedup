@@ -6,6 +6,7 @@
   import Overview from './Overview.svelte';
   import Detail from './Detail.svelte';
   import Apply from './Apply.svelte';
+  import Tuning from './Tuning.svelte';
   import Icon, { type Name } from './Icon.svelte';
 
   let {
@@ -23,6 +24,7 @@
   let focusId = $state<string | null>(null); // overview keyboard focus
   let helpOpen = $state(false);
   let applyOpen = $state(false);
+  let tuningOpen = $state(false);
   // Set once files have actually moved: the results below no longer match disk.
   let moved = $state(false);
   let plan = $state<{ groups: number; quarantine: number } | null>(null); // pending "accept all" confirmation
@@ -36,15 +38,23 @@
   const changes = $derived(changedSince(info?.used ?? null, saved));
   const folderName = $derived(info ? (info.root_path.split(/[\\/]/).filter(Boolean).pop() ?? info.root_path) : '');
 
-  onMount(() => {
-    review.load();
+  const loadInfo = () =>
     Promise.all([api.scanInfo(scanId), api.settings()])
       .then(([i, s]) => {
         info = i;
         saved = s;
       })
       .catch(() => {}); // the banner is a convenience; the review works without it
+
+  onMount(() => {
+    review.load();
+    loadInfo();
   });
+
+  // The matching sliders regrouped the scan: show the new lists, keep the view.
+  async function tuned() {
+    await Promise.all([review.load(true), loadInfo()]);
+  }
 
   const current = $derived(currentId === null ? null : (review.groups.find((g) => g.id === currentId) ?? null));
   const ids = $derived(review.visible.map((g) => g.id));
@@ -163,13 +173,22 @@
 
 <svelte:window onkeydown={onKey} />
 
-<div class="app" class:in-detail={!!current}>
+<div class="app" class:in-detail={!!current} class:tuning={tuningOpen}>
   <header class="toolbar">
     <div class="left">
       <button class="btn plain" onclick={onExit}><Icon name="chevron-left" /> Folders</button>
     </div>
     <h1 class="folder" title={info?.root_path}>{folderName || 'Review'}</h1>
     <div class="right">
+      <button
+        class="btn"
+        class:on={tuningOpen}
+        aria-expanded={tuningOpen}
+        onclick={() => (tuningOpen = !tuningOpen)}
+        title="Change how strictly photos are grouped, and watch the review change"
+      >
+        <Icon name="sliders" /> Fine-tune
+      </button>
       <button class="btn" onclick={() => review.undo()} disabled={!review.canUndo} title="Undo ({undoKey})"><Icon name="undo" /> Undo</button>
       <button
         class="btn"
@@ -284,6 +303,9 @@
         {/if}
       {/if}
     </main>
+    {#if tuningOpen}
+      <Tuning {scanId} onChanged={tuned} onClose={() => (tuningOpen = false)} onRescan={() => onRescan(info?.root_path ?? '', info?.used?.include_videos ?? true)} />
+    {/if}
   </div>
 </div>
 
@@ -384,6 +406,16 @@
   }
   .in-detail .body {
     grid-template-columns: 1fr;
+  }
+  .btn.on {
+    background: color-mix(in srgb, var(--accent) 16%, var(--surface));
+    box-shadow: inset 0 0 0 1.5px var(--accent);
+  }
+  .tuning .body {
+    grid-template-columns: 248px 1fr 320px;
+  }
+  .tuning.in-detail .body {
+    grid-template-columns: 1fr 320px;
   }
   .in-detail .sidebar {
     display: none;
@@ -543,9 +575,14 @@
 
   /* narrow windows: the sidebar becomes a scrolling strip above the content */
   @media (max-width: 860px) {
-    .body {
+    .body,
+    .tuning .body,
+    .tuning.in-detail .body {
       grid-template-columns: 1fr;
       grid-template-rows: auto 1fr;
+    }
+    .tuning.in-detail .body {
+      grid-template-rows: 1fr;
     }
     .sidebar {
       flex-direction: row;
