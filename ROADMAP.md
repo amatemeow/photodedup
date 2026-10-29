@@ -685,7 +685,7 @@ it, with no re-scan. Choices are kept.
   matching sliders are not in it. Opened from the start screen or over a
   running scan it is the full page (it overlays the current screen without
   replacing it, so a scan keeps running behind it); opened from a review (an
-  icon-only button) it is a floating panel over everything. What can be
+  icon-only button) it is a floating panel, centred over everything. What can be
   changed depends on where it was opened from; the rest stays visible but
   disabled, with the reason as a tooltip and as a line of text (a tooltip
   alone cannot be reached from a keyboard): *Appearance* always; *Scan speed*

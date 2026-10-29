@@ -179,14 +179,15 @@
     background: var(--scrim);
     animation: fade var(--t) var(--ease);
   }
-  /* over the review: floats at the top right, above everything */
+  /* over the review: floats in the middle, above everything */
   main.popover {
     position: fixed;
     z-index: 31;
-    top: 60px;
-    right: var(--s3);
-    width: min(440px, calc(100vw - 2 * var(--s3)));
-    max-height: calc(100vh - 76px);
+    inset: 0;
+    margin: auto; /* with a fixed size, centres it both ways */
+    height: fit-content;
+    width: min(480px, calc(100vw - 2 * var(--s3)));
+    max-height: calc(100vh - 2 * var(--s5));
     overflow-y: auto;
     border-radius: var(--radius-lg);
     background: var(--bg);
