@@ -70,6 +70,19 @@ pub async fn put_decisions_bulk(
     store.record_decisions(&scan_id, &rows).map(|()| StatusCode::NO_CONTENT).map_err(internal)
 }
 
+/// `POST /api/scans/{id}/decisions/clear` with a JSON array of relative
+/// paths -- back to undecided for all of them in one transaction ("reset
+/// this group / category / everything").
+pub async fn clear_decisions_bulk(
+    State(state): State<AppState>,
+    AxPath(scan_id): AxPath<String>,
+    Json(paths): Json<Vec<String>>,
+) -> Result<StatusCode, StatusCode> {
+    let mut store = state.store.lock().unwrap();
+    require_scan(&store, &scan_id)?;
+    store.clear_decisions(&scan_id, &paths).map(|()| StatusCode::NO_CONTENT).map_err(internal)
+}
+
 #[derive(Serialize)]
 pub struct ResumeDto {
     pub scan_id: Option<String>,

@@ -1050,6 +1050,15 @@ impl Store {
         Ok(())
     }
 
+    /// Forgets many decisions at once, all or nothing.
+    pub fn clear_decisions(&mut self, scan_id: &str, relative_paths: &[String]) -> rusqlite::Result<()> {
+        let tx = self.conn.transaction()?;
+        for path in relative_paths {
+            tx.execute("DELETE FROM decisions WHERE scan_id = ?1 AND relative_path = ?2", params![scan_id, path])?;
+        }
+        tx.commit()
+    }
+
     pub fn get_decision(&self, scan_id: &str, relative_path: &str) -> rusqlite::Result<Option<bool>> {
         self.conn
             .query_row(
@@ -1427,6 +1436,18 @@ mod tests {
         let scan_id = store.save_scan(&root, &result).unwrap();
         store.exec_for_test("DELETE FROM scan_regroup");
         assert!(store.load_grouping_data(&scan_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn clearing_decisions_in_bulk_returns_only_those_files_to_undecided() {
+        let (root, result) = sample_result();
+        let mut store = Store::open_in_memory().unwrap();
+        let scan_id = store.save_scan(&root, &result).unwrap();
+        store.record_decisions(&scan_id, &[("a.jpg".into(), false), ("b.jpg".into(), true)]).unwrap();
+
+        store.clear_decisions(&scan_id, &["a.jpg".into(), "never-decided.jpg".into()]).unwrap();
+        assert_eq!(store.get_decision(&scan_id, "a.jpg").unwrap(), None);
+        assert_eq!(store.get_decision(&scan_id, "b.jpg").unwrap(), Some(true), "files not named are untouched");
     }
 
     #[test]
