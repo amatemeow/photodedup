@@ -210,6 +210,8 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
+const THUMB_SIZE = 800;
+
 export const api = {
   hasToken: token !== '',
   resume: (root: string) => call<Resume>(`/api/resume?root=${encodeURIComponent(root)}`),
@@ -250,9 +252,13 @@ export const api = {
   batches: () => call<Batch[]>('/api/batches'),
   undoBatch: (batchId: string) => call<UndoResult>(`/api/batches/${batchId}/undo`, { method: 'POST' }),
 
-  /** For `<img>`/`<video>` `src`, which can't send an Authorization header. */
+  /** For `<img>`/`<video>` `src`, which can't send an Authorization header.
+   * Grid thumbnails ask for `THUMB_SIZE`: tiles are 220+ CSS px wide and cropped to
+   * fill (`object-fit: cover`), so a portrait photo needs about 700-800 px on its long
+   * edge to stay sharp on a retina screen. One size everywhere, so the grid and the
+   * detail view's placeholder share a cache entry. */
   fileUrl: (fileId: string, kind: 'thumb' | 'preview' | 'original') =>
-    `/files/${fileId}/${kind}?token=${encodeURIComponent(token)}`,
+    `/files/${fileId}/${kind}?token=${encodeURIComponent(token)}${kind === 'thumb' ? `&size=${THUMB_SIZE}` : ''}`,
 
   /** Streams a job's status. EventSource can't send headers, hence the
    * query token. Returns a function that closes the stream. */
