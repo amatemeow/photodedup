@@ -7,6 +7,7 @@
   import Detail from './Detail.svelte';
   import Apply from './Apply.svelte';
   import Tuning from './Tuning.svelte';
+  import ConfirmRescan from './ConfirmRescan.svelte';
   import Icon, { type Name } from './Icon.svelte';
 
   let {
@@ -25,6 +26,8 @@
   let helpOpen = $state(false);
   let applyOpen = $state(false);
   let tuningOpen = $state(false);
+  let rescanAsk = $state(false);
+  const rescan = () => onRescan(info?.root_path ?? '', info?.used?.include_videos ?? true);
   // Set once files have actually moved: the results below no longer match disk.
   let moved = $state(false);
   let plan = $state<{ groups: number; quarantine: number } | null>(null); // pending "accept all" confirmation
@@ -130,7 +133,7 @@
   }
 
   function onKey(e: KeyboardEvent) {
-    if (applyOpen) return; // the apply panel owns the keyboard while it is open
+    if (applyOpen || rescanAsk) return; // the apply panel and the re-scan question own the keyboard while open
     const t = e.target as HTMLElement;
     if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
     // Undo is the platform's own chord: Cmd+Z on a Mac, Ctrl+Z elsewhere.
@@ -208,7 +211,7 @@
       <p>
         <strong>Matching settings changed since this scan</strong> ({changes.join('; ')}), so what you see was found with the old values.
         Scanning again applies them; your keep/quarantine choices on files that haven't changed are kept.
-        <button class="link" onclick={() => onRescan(info!.root_path, info!.used!.include_videos)}>Scan again</button>
+        <button class="link" onclick={() => (rescanAsk = true)}>Scan again</button>
       </p>
     </div>
   {/if}
@@ -304,7 +307,7 @@
       {/if}
     </main>
     {#if tuningOpen}
-      <Tuning {scanId} onChanged={tuned} onClose={() => (tuningOpen = false)} onRescan={() => onRescan(info?.root_path ?? '', info?.used?.include_videos ?? true)} />
+      <Tuning {scanId} onChanged={tuned} onClose={() => (tuningOpen = false)} onRescan={() => (rescanAsk = true)} />
     {/if}
   </div>
 </div>
@@ -328,6 +331,10 @@
       </div>
     </div>
   </div>
+{/if}
+
+{#if rescanAsk}
+  <ConfirmRescan folder={folderName || 'this folder'} onCancel={() => (rescanAsk = false)} onConfirm={rescan} />
 {/if}
 
 {#if applyOpen}

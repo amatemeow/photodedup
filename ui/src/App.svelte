@@ -3,6 +3,7 @@
   import Review from './Review.svelte';
   import Options from './Options.svelte';
   import Icon from './Icon.svelte';
+  import ConfirmRescan from './ConfirmRescan.svelte';
 
   type View =
     | { kind: 'start' }
@@ -105,6 +106,8 @@
   // Repeats the last scan on its own folder, with the include-videos choice it
   // was made with, so there is no need to pick the folder again.
   let rescanning = $state(false);
+  // A re-scan replaces the current results, so it is always asked about first.
+  let confirm = $state<{ folder: string; run: () => void } | null>(null);
   async function rescanLast() {
     if (!last) return;
     rescanning = true;
@@ -204,6 +207,18 @@
     s.state === 'running' ? shownPhases(withVideos).findIndex((p) => p.id === s.phase) : -1;
 </script>
 
+{#if confirm}
+  <ConfirmRescan
+    folder={confirm.folder}
+    onCancel={() => (confirm = null)}
+    onConfirm={() => {
+      const run = confirm!.run;
+      confirm = null;
+      run();
+    }}
+  />
+{/if}
+
 {#if view.kind === 'options'}
   <Options onBack={() => { view = { kind: 'start' }; loadIntensity(); loadLast(); }} />
 {:else if view.kind === 'review'}
@@ -259,7 +274,7 @@
               <button
                 class="btn"
                 disabled={rescanning}
-                onclick={rescanLast}
+                onclick={() => (confirm = { folder: folderName(last!.root_path), run: rescanLast })}
                 title="Scan this folder again. The new scan replaces this one; your choices on files that haven't changed are kept."
               >
                 {rescanning ? 'Starting…' : 'Scan again'}
@@ -311,7 +326,7 @@
           </p>
           <div class="row">
             <button class="btn primary" onclick={() => open((view as { scanId: string }).scanId)}>Resume</button>
-            <button class="btn" onclick={scan}>Scan again</button>
+            <button class="btn" onclick={() => (confirm = { folder: folderName(root), run: scan })}>Scan again</button>
             <button class="btn plain" onclick={() => (view = { kind: 'start' })}>Back</button>
           </div>
         </section>
