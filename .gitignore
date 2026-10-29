@@ -16,3 +16,8 @@ dist/
 
 # generated at release time by scripts/third-party-licenses.sh
 /THIRD-PARTY-LICENSES.md
+
+# Local tooling config that can hold credentials -- never commit these
+.mcp.json
+.env
+.env.*
