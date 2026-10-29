@@ -6,7 +6,7 @@
   import Overview from './Overview.svelte';
   import Detail from './Detail.svelte';
   import Apply from './Apply.svelte';
-  import Tuning from './Tuning.svelte';
+  import SettingsPanel from './SettingsPanel.svelte';
   import ConfirmRescan from './ConfirmRescan.svelte';
   import Icon, { type Name } from './Icon.svelte';
 
@@ -25,7 +25,7 @@
   let focusId = $state<string | null>(null); // overview keyboard focus
   let helpOpen = $state(false);
   let applyOpen = $state(false);
-  let tuningOpen = $state(false);
+  let settingsOpen = $state(false);
   let resetAsk = $state(false);
   let rescanAsk = $state(false);
   const rescan = () => onRescan(info?.root_path ?? '', info?.used?.include_videos ?? true);
@@ -178,22 +178,13 @@
 
 <svelte:window onkeydown={onKey} />
 
-<div class="app" class:in-detail={!!current} class:tuning={tuningOpen}>
+<div class="app" class:in-detail={!!current} class:with-settings={settingsOpen}>
   <header class="toolbar">
     <div class="left">
       <button class="btn plain" onclick={onExit}><Icon name="chevron-left" /> Folders</button>
     </div>
     <h1 class="folder" title={info?.root_path}>{folderName || 'Review'}</h1>
     <div class="right">
-      <button
-        class="btn"
-        class:on={tuningOpen}
-        aria-expanded={tuningOpen}
-        onclick={() => (tuningOpen = !tuningOpen)}
-        title="Change how strictly photos are grouped, and watch the review change"
-      >
-        <Icon name="sliders" /> Fine-tune
-      </button>
       <button class="btn" onclick={() => review.undo()} disabled={!review.canUndo} title="Undo ({undoKey})"><Icon name="undo" /> Undo</button>
       <button
         class="btn"
@@ -204,6 +195,16 @@
         Apply{review.markedCount ? ` (${review.markedCount})` : ''}…
       </button>
       <button class="btn icon" onclick={() => (helpOpen = true)} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts"><Icon name="help" /></button>
+      <button
+        class="btn icon"
+        class:on={settingsOpen}
+        aria-expanded={settingsOpen}
+        onclick={() => (settingsOpen = !settingsOpen)}
+        title="Settings"
+        aria-label="Settings"
+      >
+        <Icon name="sliders" />
+      </button>
     </div>
   </header>
 
@@ -309,8 +310,8 @@
         {/if}
       {/if}
     </main>
-    {#if tuningOpen}
-      <Tuning {scanId} onChanged={tuned} onClose={() => (tuningOpen = false)} onRescan={() => (rescanAsk = true)} />
+    {#if settingsOpen}
+      <SettingsPanel scope="review" {scanId} onChanged={tuned} onClose={() => (settingsOpen = false)} onRescan={() => (rescanAsk = true)} />
     {/if}
   </div>
 </div>
@@ -460,11 +461,11 @@
     background: color-mix(in srgb, var(--accent) 16%, var(--surface));
     box-shadow: inset 0 0 0 1.5px var(--accent);
   }
-  .tuning .body {
-    grid-template-columns: 248px 1fr 320px;
+  .with-settings .body {
+    grid-template-columns: 248px 1fr 360px;
   }
-  .tuning.in-detail .body {
-    grid-template-columns: 1fr 320px;
+  .with-settings.in-detail .body {
+    grid-template-columns: 1fr 360px;
   }
   .in-detail .sidebar {
     display: none;
@@ -637,12 +638,12 @@
   /* narrow windows: the sidebar becomes a scrolling strip above the content */
   @media (max-width: 860px) {
     .body,
-    .tuning .body,
-    .tuning.in-detail .body {
+    .with-settings .body,
+    .with-settings.in-detail .body {
       grid-template-columns: 1fr;
       grid-template-rows: auto 1fr;
     }
-    .tuning.in-detail .body {
+    .with-settings.in-detail .body {
       grid-template-rows: 1fr;
     }
     .sidebar {

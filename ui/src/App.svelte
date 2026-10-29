@@ -1,13 +1,12 @@
 <script lang="ts">
   import { api, ApiError, type IntensityId, type JobStatus, type Phase, type ScanSummary, type Shell } from './lib/api';
   import Review from './Review.svelte';
-  import Options from './Options.svelte';
+  import SettingsPanel from './SettingsPanel.svelte';
   import Icon from './Icon.svelte';
   import ConfirmRescan from './ConfirmRescan.svelte';
 
   type View =
     | { kind: 'start' }
-    | { kind: 'options' }
     | { kind: 'found'; scanId: string; startedAt: string }
     | { kind: 'scanning'; jobId: number; status: JobStatus; withVideos: boolean }
     | { kind: 'review'; scanId: string }
@@ -72,6 +71,7 @@
   let root = $state('');
   let view = $state<View>({ kind: 'start' });
   let busy = $state(false);
+  let settingsOpen = $state(false);
   let error = $state('');
   let stopWatching: (() => void) | undefined;
 
@@ -219,16 +219,12 @@
   />
 {/if}
 
-{#if view.kind === 'options'}
-  <Options onBack={() => { view = { kind: 'start' }; loadIntensity(); loadLast(); }} />
-{:else if view.kind === 'review'}
+{#if view.kind === 'review'}
   <Review scanId={view.scanId} onExit={backToStart} onRescan={startScan} />
 {:else}
   <main>
     <header class="top">
-      {#if view.kind === 'start'}
-        <button class="btn plain" onclick={() => (view = { kind: 'options' })}><Icon name="sliders" /> Settings</button>
-      {/if}
+      <button class="btn plain" aria-expanded={settingsOpen} onclick={() => (settingsOpen = !settingsOpen)}><Icon name="sliders" /> Settings</button>
     </header>
 
     <div class="column">
@@ -362,6 +358,16 @@
       {/if}
     </div>
   </main>
+{/if}
+
+{#if settingsOpen && view.kind !== 'review'}
+  <SettingsPanel
+    scope={view.kind === 'scanning' ? 'scanning' : 'start'}
+    onClose={() => {
+      settingsOpen = false;
+      loadIntensity();
+    }}
+  />
 {/if}
 
 <style>
