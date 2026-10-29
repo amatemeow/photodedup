@@ -102,6 +102,20 @@
 
   const scan = () => startScan(root.trim(), includeVideos);
 
+  // Repeats the last scan on its own folder, with the include-videos choice it
+  // was made with, so there is no need to pick the folder again.
+  let rescanning = $state(false);
+  async function rescanLast() {
+    if (!last) return;
+    rescanning = true;
+    try {
+      const used = (await api.scanInfo(last.id).catch(() => null))?.used;
+      await startScan(last.root_path, used?.include_videos ?? includeVideos);
+    } finally {
+      rescanning = false;
+    }
+  }
+
   // Also used by the review's "Scan again", which repeats a scan with the
   // same folder and the same include-videos choice it was made with.
   async function startScan(folder: string, withVideos: boolean) {
@@ -241,7 +255,17 @@
               <p class="lead name"><Icon name="folder" size={18} /> {folderName(last.root_path)}</p>
               <p class="hint">{groupCount(last)} groups to review · scanned {ago(last.started_at)}</p>
             </div>
-            <button class="btn primary" onclick={() => open(last!.id)}>Continue <Icon name="arrow-right" /></button>
+            <div class="resume-actions">
+              <button
+                class="btn"
+                disabled={rescanning}
+                onclick={rescanLast}
+                title="Scan this folder again. The new scan replaces this one; your choices on files that haven't changed are kept."
+              >
+                {rescanning ? 'Starting…' : 'Scan again'}
+              </button>
+              <button class="btn primary" onclick={() => open(last!.id)}>Continue <Icon name="arrow-right" /></button>
+            </div>
           </section>
         {/if}
 
@@ -371,6 +395,12 @@
   .resume {
     grid-template-columns: 1fr auto;
     align-items: center;
+  }
+  .resume-actions {
+    display: flex;
+    gap: var(--s2);
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
   .resume-text {
     display: grid;
