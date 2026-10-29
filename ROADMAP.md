@@ -680,6 +680,17 @@ it, with no re-scan. Choices are kept.
   (it supplies the starting counts and tells a regroupable scan from an old
   one). Checked in headless Chrome: counts change live, Revert restores them,
   axe clean in light, dark and narrow.
+- **Settings everywhere, scoped (revised again):** the Fine-tune panel and the
+  Settings page became one panel (`ui/src/SettingsPanel.svelte`), reachable
+  from a button at the top right of every screen: icon and text on the start
+  and scanning screens (a sheet over them), a single icon in the review (a
+  docked side panel, so the results stay visible). What can be changed depends
+  on where it was opened from, and the rest stays visible but disabled, with
+  the reason as a tooltip and as a line of text (a tooltip alone cannot be
+  reached from a keyboard): *Appearance* is always available; *Scan speed* is
+  disabled while a scan runs (it is read when a scan starts); *Matching* is
+  live only in a review of a regroupable scan, and in the review it is listed
+  first. There is no separate Fine-tune button any more.
 - **Known limit:** each regroup gives its groups new ids, so a group open in
   the detail view closes back to the overview while a slider is moved.
 
