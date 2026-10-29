@@ -162,23 +162,24 @@
           {#if !keep}<span class="dim" aria-hidden="true"></span><span class="veil"><span class="badge overlay warning">Will be quarantined</span></span>{/if}
         </button>
 
-        <div class="info">
-          <strong class="name" title={m.relative_path}>{m.file_name}</strong>
-          {#await review.analysis(m.id) then a}
-            <span class="line">{[dims(a), a?.duration_seconds ? minutes(a.duration_seconds) : '', formatBytes(m.size_bytes)].filter(Boolean).join(' · ')}</span>
-            {#if !isBurst}<span class="hint">{[a?.origin?.replaceAll('_', ' '), a?.camera_model].filter(Boolean).join(' · ')}</span>{/if}
-          {/await}
-          {#if isBurst && group.sharpness[m.id] !== undefined}
-            <span class="sharp" title="Sharpness (higher is sharper)">
-              <span class="bar-fill" style:width="{sharpest ? (group.sharpness[m.id] / sharpest) * 100 : 0}%"></span>
-            </span>
-            <span class="hint">Sharpness {Math.round(group.sharpness[m.id])}</span>
-          {/if}
-        </div>
-
-        <div class="seg block" role="group" aria-label="Decision for {m.file_name}">
-          <button class="keep" aria-pressed={keep} aria-label="Keep" title="Keep" onclick={(e) => choose(i, true, e)}><Icon name="check" size={18} /></button>
-          <button class="aside" aria-pressed={!keep} aria-label="Quarantine" title="Quarantine (moved aside, never deleted)" onclick={(e) => choose(i, false, e)}><Icon name="archive" size={18} /></button>
+        <div class="meta">
+          <div class="info">
+            <strong class="name" title={m.relative_path}>{m.file_name}</strong>
+            {#await review.analysis(m.id) then a}
+              <span class="line">{[dims(a), a?.duration_seconds ? minutes(a.duration_seconds) : '', formatBytes(m.size_bytes)].filter(Boolean).join(' · ')}</span>
+              {#if !isBurst}<span class="hint">{[a?.origin?.replaceAll('_', ' '), a?.camera_model].filter(Boolean).join(' · ')}</span>{/if}
+            {/await}
+            {#if isBurst && group.sharpness[m.id] !== undefined}
+              <span class="sharp" title="Sharpness (higher is sharper)">
+                <span class="bar-fill" style:width="{sharpest ? (group.sharpness[m.id] / sharpest) * 100 : 0}%"></span>
+              </span>
+              <span class="hint">Sharpness {Math.round(group.sharpness[m.id])}</span>
+            {/if}
+          </div>
+          <div class="seg decide" role="group" aria-label="Decision for {m.file_name}">
+            <button class="keep" aria-pressed={keep} aria-label="Keep" title="Keep" onclick={(e) => choose(i, true, e)}><Icon name="check" size={16} /></button>
+            <button class="aside" aria-pressed={!keep} aria-label="Quarantine" title="Quarantine (moved aside, never deleted)" onclick={(e) => choose(i, false, e)}><Icon name="archive" size={16} /></button>
+          </div>
         </div>
       </article>
     {/each}
@@ -358,10 +359,50 @@
     left: var(--s2);
     bottom: var(--s2);
   }
+  .meta {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--s3);
+  }
   .info {
     display: grid;
     gap: 2px;
     min-width: 0;
+    flex: 1;
+  }
+  /* the decision: a small pill of two icons. The chosen side is tinted in its
+     meaning's colour; the other stays quiet. */
+  .decide {
+    flex: none;
+    padding: 3px;
+    gap: 3px;
+    border-radius: 999px;
+  }
+  .decide > button {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    min-height: 28px;
+    padding: 0;
+    border-radius: 999px;
+    color: var(--label-3);
+  }
+  .decide > button:hover {
+    color: var(--label);
+  }
+  .decide > button:focus-visible {
+    box-shadow: var(--ring);
+  }
+  .decide > button.keep[aria-pressed='true'] {
+    background: color-mix(in srgb, var(--success) 18%, var(--surface));
+    color: var(--success);
+    box-shadow: inset 0 0 0 1.5px var(--success);
+  }
+  .decide > button.aside[aria-pressed='true'] {
+    background: color-mix(in srgb, var(--warning) 20%, var(--surface));
+    color: var(--warning-text, var(--warning));
+    box-shadow: inset 0 0 0 1.5px var(--warning);
   }
   .name {
     overflow: hidden;
