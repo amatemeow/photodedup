@@ -6,7 +6,8 @@
   import Overview from './Overview.svelte';
   import Detail from './Detail.svelte';
   import Apply from './Apply.svelte';
-  import SettingsPanel from './SettingsPanel.svelte';
+  import Tuning from './Tuning.svelte';
+  import Options from './Options.svelte';
   import ConfirmRescan from './ConfirmRescan.svelte';
   import Icon, { type Name } from './Icon.svelte';
 
@@ -25,7 +26,8 @@
   let focusId = $state<string | null>(null); // overview keyboard focus
   let helpOpen = $state(false);
   let applyOpen = $state(false);
-  let settingsOpen = $state(false);
+  let tuningOpen = $state(false);
+  let settingsOpen = $state(false); // the floating Settings panel
   let resetAsk = $state(false);
   let rescanAsk = $state(false);
   const rescan = () => onRescan(info?.root_path ?? '', info?.used?.include_videos ?? true);
@@ -135,7 +137,7 @@
 
   function onKey(e: KeyboardEvent) {
     if (resetAsk && e.key === 'Escape') resetAsk = false;
-    if (applyOpen || rescanAsk || resetAsk) return; // the apply panel and the re-scan question own the keyboard while open
+    if (applyOpen || rescanAsk || resetAsk || settingsOpen) return; // the apply panel and the re-scan question own the keyboard while open
     const t = e.target as HTMLElement;
     if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
     // Undo is the platform's own chord: Cmd+Z on a Mac, Ctrl+Z elsewhere.
@@ -178,13 +180,22 @@
 
 <svelte:window onkeydown={onKey} />
 
-<div class="app" class:in-detail={!!current} class:with-settings={settingsOpen}>
+<div class="app" class:in-detail={!!current} class:tuning={tuningOpen}>
   <header class="toolbar">
     <div class="left">
       <button class="btn plain" onclick={onExit}><Icon name="chevron-left" /> Folders</button>
     </div>
     <h1 class="folder" title={info?.root_path}>{folderName || 'Review'}</h1>
     <div class="right">
+      <button
+        class="btn"
+        class:on={tuningOpen}
+        aria-expanded={tuningOpen}
+        onclick={() => (tuningOpen = !tuningOpen)}
+        title="Change how strictly photos are grouped, and watch the review change"
+      >
+        <Icon name="dial" /> Fine-tune
+      </button>
       <button class="btn" onclick={() => review.undo()} disabled={!review.canUndo} title="Undo ({undoKey})"><Icon name="undo" /> Undo</button>
       <button
         class="btn"
@@ -199,6 +210,7 @@
         class="btn icon"
         class:on={settingsOpen}
         aria-expanded={settingsOpen}
+        aria-haspopup="dialog"
         onclick={() => (settingsOpen = !settingsOpen)}
         title="Settings"
         aria-label="Settings"
@@ -310,8 +322,8 @@
         {/if}
       {/if}
     </main>
-    {#if settingsOpen}
-      <SettingsPanel scope="review" {scanId} onChanged={tuned} onClose={() => (settingsOpen = false)} onRescan={() => (rescanAsk = true)} />
+    {#if tuningOpen}
+      <Tuning {scanId} onChanged={tuned} onClose={() => (tuningOpen = false)} onRescan={() => (rescanAsk = true)} />
     {/if}
   </div>
 </div>
@@ -374,6 +386,10 @@
       <div class="sheet-actions"><button class="btn" onclick={() => (resetAsk = false)}>Cancel</button></div>
     </div>
   </div>
+{/if}
+
+{#if settingsOpen}
+  <Options scope="review" onBack={() => (settingsOpen = false)} />
 {/if}
 
 {#if rescanAsk}
@@ -461,11 +477,11 @@
     background: color-mix(in srgb, var(--accent) 16%, var(--surface));
     box-shadow: inset 0 0 0 1.5px var(--accent);
   }
-  .with-settings .body {
-    grid-template-columns: 248px 1fr 360px;
+  .tuning .body {
+    grid-template-columns: 248px 1fr 320px;
   }
-  .with-settings.in-detail .body {
-    grid-template-columns: 1fr 360px;
+  .tuning.in-detail .body {
+    grid-template-columns: 1fr 320px;
   }
   .in-detail .sidebar {
     display: none;
@@ -638,12 +654,12 @@
   /* narrow windows: the sidebar becomes a scrolling strip above the content */
   @media (max-width: 860px) {
     .body,
-    .with-settings .body,
-    .with-settings.in-detail .body {
+    .tuning .body,
+    .tuning.in-detail .body {
       grid-template-columns: 1fr;
       grid-template-rows: auto 1fr;
     }
-    .with-settings.in-detail .body {
+    .tuning.in-detail .body {
       grid-template-rows: 1fr;
     }
     .sidebar {
