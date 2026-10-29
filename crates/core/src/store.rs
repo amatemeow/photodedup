@@ -1093,6 +1093,8 @@ fn drop_legacy_schema(conn: &Connection) -> rusqlite::Result<()> {
 fn delete_all_scans(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
     for table in [
         "scan_settings",
+        "scan_regroup",
+        "fixed_edges",
         "file_siblings",
         "orphan_videos",
         "cluster_members",
@@ -1399,6 +1401,23 @@ mod tests {
         assert!(store.load_burst_runs(&scan_id).unwrap().is_empty(), "the old sequence is gone");
         assert_eq!(store.get_scan_settings(&scan_id).unwrap().unwrap().0, tight, "and the scan says what it now reflects");
         assert_eq!(store.get_decision(&scan_id, "s1.jpg").unwrap(), Some(false), "choices are about files, so they stay");
+    }
+
+    #[test]
+    fn a_new_scan_replaces_an_old_one_that_has_exact_copies_and_matched_videos() {
+        // Regression: the links no setting changes point at files, so they
+        // must be removed with them or the replacement fails on a foreign key.
+        let (root, mut result) = three_shots_result();
+        result.exact_edges = vec![(0, 1)];
+        result.video_edges = vec![(1, 2)];
+        let mut store = Store::open_in_memory().unwrap();
+        let first = store.save_scan(&root, &result).unwrap();
+        assert_eq!(store.load_grouping_data(&first).unwrap().unwrap().exact_edges.len(), 1);
+
+        let second = store.save_scan(&root, &result).expect("re-scanning a library with exact copies works");
+        assert!(store.load_grouping_data(&first).unwrap().is_none(), "the old scan's links went with it");
+        let data = store.load_grouping_data(&second).unwrap().unwrap();
+        assert_eq!((data.exact_edges.len(), data.video_edges.len()), (1, 1));
     }
 
     #[test]
