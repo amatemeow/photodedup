@@ -86,9 +86,22 @@ For a red job: the job name, the first error (not the last line), and the
 operating system. For a green one that misbehaves: what you did, what you saw,
 and the system.
 
+## What the first dry run found (2026-10-29)
+
+- Apple Silicon: the ffmpeg build, the licence gate, the third-party licence
+  file and `tauri build` all succeeded. The run then failed at the attestation
+  step: *"Feature not available for user-owned private repositories"*. Build
+  attestations need a public repository (or a paid organisation plan), and the
+  artifact upload came after the failing step, so the finished installer was
+  lost. The attestation step is now skipped while the repository is private
+  (`if: ${{ !github.event.repository.private }}`) and the upload always runs.
+  Once the repository is public, attestations switch on by themselves.
+- The Linux leg built ffmpeg in about 8 minutes with `nasm`; Windows reached its
+  MSYS2 toolchain step. Their results are recorded below once known.
+
 ## Settings on GitHub
 
-- Actions must be allowed to run; the release job needs the repository to be
-  able to create attestations (public repositories can).
+- Actions must be allowed to run. Build attestations in the release job need a
+  public repository; while it is private that step is skipped automatically.
 - Dependabot (`.github/dependabot.yml`) opens pull requests when a pinned
   action has a newer version or a runner label is deprecated.

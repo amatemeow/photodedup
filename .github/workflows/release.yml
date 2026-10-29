@@ -12,8 +12,10 @@
 #  * only the small publish job can write to the release, and all it does is
 #    upload files the build job already produced and attested.
 #
-# NOTE: this workflow has NOT been run. Before the first tag, run it by hand
-# (Actions tab, "Run workflow") and read docs/FIRST-CI-RUN.md. What has been verified locally is the
+# NOTE: first dry run 2026-10-29 (see docs/FIRST-CI-RUN.md): the Apple Silicon leg
+# built everything, then failed on the attestation step (private repository).
+# Before the first tag, run it by hand again (Actions tab, "Run workflow"). What
+# was verified locally is the
 # pieces it strings together, on macOS/arm64 only: building the LGPL ffmpeg
 # (scripts/build-sidecar.sh), the licence gate on it, and `tauri build`. The
 # Windows and Linux legs, and the x86-64 macOS leg, are untested.
@@ -140,7 +142,14 @@ jobs:
           { sha256sum -- * 2>/dev/null || shasum -a 256 -- *; } > "../SHA256SUMS-${{ matrix.os }}.txt"
           mv "../SHA256SUMS-${{ matrix.os }}.txt" .
 
-      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+      # Build attestations are only available for public repositories (or paid
+      # organisation plans): on a user-owned private repository the step fails
+      # with "Feature not available for user-owned private repositories", which
+      # also used to cost the finished installers (the upload came after it).
+      # Skipped while the repository is private; it runs once it is public.
+      - name: Attest the build provenance (public repositories only)
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: |
             dist/*.dmg
