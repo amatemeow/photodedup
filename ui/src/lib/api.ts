@@ -155,6 +155,19 @@ export interface Settings {
 /** Send only what changed. */
 export type SettingsPatch = Partial<{ scan_intensity: IntensityId } & Record<KnobId, number>>;
 
+/** How many entries each review tab holds (or would hold under other settings). */
+export interface Counts {
+  exact: number;
+  duplicates: number;
+  sequences: number;
+  sequence_photos: number;
+  look_alikes: number;
+}
+export interface RegroupPreview {
+  current: Counts;
+  proposed: Counts;
+}
+
 export interface ScanInfo {
   id: string;
   root_path: string;
@@ -223,6 +236,11 @@ export const api = {
   /** The shell's native folder dialog; null if the user cancels it. */
   pickFolder: () => call<{ path: string | null }>('/api/pick-folder', { method: 'POST' }),
   scanInfo: (scanId: string) => call<ScanInfo>(`/api/scans/${scanId}/info`),
+  /** What matching values would change in a scan's results; changes nothing. 409 for a scan that cannot be regrouped. */
+  previewRegroup: (scanId: string, values: Record<KnobId, number>) =>
+    call<RegroupPreview>(`/api/scans/${scanId}/regroup/preview?${new URLSearchParams(Object.entries(values).map(([k, v]) => [k, String(v)]))}`),
+  /** Groups the scan again with the saved matching settings, keeping the user's choices. */
+  regroup: (scanId: string) => call<Counts>(`/api/scans/${scanId}/regroup`, { method: 'POST' }),
   settings: () => call<Settings>('/api/settings'),
   saveSettings: (patch: SettingsPatch) => call<Settings>('/api/settings', { method: 'PUT', body: JSON.stringify(patch) }),
 

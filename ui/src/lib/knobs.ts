@@ -1,4 +1,4 @@
-import type { KnobId, ScanInfo, Settings } from './api';
+import type { Counts, KnobId, ScanInfo, Settings } from './api';
 
 /** How each matching setting is named and written in the review. */
 export const knobName: Record<KnobId, string> = {
@@ -33,4 +33,25 @@ export function usedLine(tab: string, used: ScanInfo['used']): string {
   const keys = tabSettings[tab] ?? [];
   if (!used || keys.length === 0) return '';
   return `Found with ${keys.map((k) => `${knobName[k]} ${used[k]}${knobUnit[k]}`).join(' and ')}.`;
+}
+
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+/** What moving a setting does to the lists it feeds, as readable lines.
+ * Only the lists that setting can affect are mentioned, and only when they
+ * would differ. Empty when nothing would change. */
+export function describeChange(knob: KnobId, from: Counts, to: Counts): string[] {
+  const lines: string[] = [];
+  if (knob !== 'match_distance' && (from.sequences !== to.sequences || from.sequence_photos !== to.sequence_photos)) {
+    lines.push(
+      `Quick sequences: ${from.sequences} → ${to.sequences} (${plural(from.sequence_photos, 'photo', 'photos')} → ${to.sequence_photos})`,
+    );
+  }
+  if (knob === 'match_distance' && from.duplicates !== to.duplicates) {
+    lines.push(`True duplicates: ${from.duplicates} → ${to.duplicates}`);
+  }
+  if (knob !== 'sequence_similarity' && from.look_alikes !== to.look_alikes) {
+    lines.push(`Look-alike pairs: ${from.look_alikes} → ${to.look_alikes}`);
+  }
+  return lines;
 }

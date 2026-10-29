@@ -73,21 +73,36 @@ pub fn plan(store: &Store, scan_id: &str) -> Result<Plan, ApplyError> {
     let files = store.load_files(scan_id)?;
     let by_id: HashMap<&str, &crate::store::StoredFile> = files.iter().map(|f| (f.id.as_str(), f)).collect();
     let decisions = store.load_decisions(scan_id)?;
+    // Groups of two or more: duplicate clusters, sequences, look-alike pairs.
+    let clusters = store.load_clusters(scan_id)?;
+    let runs = store.load_burst_runs(scan_id)?;
+    let pairs = store.load_review_pairs(scan_id)?;
+    let orphans = store.load_orphan_videos(scan_id)?;
+
+    // A choice only counts for a file that is still in some group. After the
+    // matching settings change, a photo can stop being a duplicate of
+    // anything; a "quarantine" chosen back when it was must not move it now.
+    let grouped: HashSet<&str> = clusters
+        .iter()
+        .flat_map(|c| c.member_file_ids.iter().map(String::as_str))
+        .chain(runs.iter().flat_map(|r| r.member_file_ids.iter().map(String::as_str)))
+        .chain(pairs.iter().flat_map(|p| [p.file_a_id.as_str(), p.file_b_id.as_str()]))
+        .chain(orphans.iter().map(|o| o.file_id.as_str()))
+        .collect();
     let quarantine: HashSet<&str> = files
         .iter()
-        .filter(|f| decisions.get(&f.relative_path) == Some(&false))
+        .filter(|f| decisions.get(&f.relative_path) == Some(&false) && grouped.contains(f.id.as_str()))
         .map(|f| f.id.as_str())
         .collect();
 
-    // Groups of two or more: duplicate clusters, sequences, look-alike pairs.
     let mut groups: Vec<(String, Vec<String>)> = Vec::new();
-    for c in store.load_clusters(scan_id)? {
+    for c in clusters {
         groups.push(("duplicate group".into(), c.member_file_ids));
     }
-    for r in store.load_burst_runs(scan_id)? {
+    for r in runs {
         groups.push(("quick sequence".into(), r.member_file_ids));
     }
-    for p in store.load_review_pairs(scan_id)?.into_iter().filter(|p| p.tier != "T2Burst") {
+    for p in pairs.into_iter().filter(|p| p.tier != "T2Burst") {
         groups.push(("pair of look-alikes".into(), vec![p.file_a_id, p.file_b_id]));
     }
 
@@ -424,6 +439,8 @@ mod tests {
             review_pairs: vec![],
             burst_runs: vec![],
             video_matches: vec![],
+            exact_edges: vec![],
+            video_edges: vec![],
             orphan_videos: vec![],
             unknown_provenance_videos: vec![],
             placeholder_count: 0,
@@ -563,6 +580,20 @@ mod tests {
     }
 
     #[test]
+    fn a_quarantine_choice_for_a_file_no_longer_in_any_group_moves_nothing() {
+        // `stray.jpg` was marked back when it was grouped; after the matching
+        // settings changed it belongs to no group, so the choice is void.
+        let fx = fixture(&[("k.jpg", BIG), ("dup.jpg", SMALL), ("stray.jpg", SMALL)], &[&["k.jpg", "dup.jpg"]], &[]);
+        fx.decide("dup.jpg", false);
+        fx.decide("stray.jpg", false);
+
+        let r = execute(&fx.store, &fx.scan).unwrap();
+        assert_eq!(r.moved, 1);
+        assert!(!fx.exists("dup.jpg"));
+        assert!(fx.exists("stray.jpg"), "a photo that is no longer a duplicate of anything stays put");
+    }
+
+    #[test]
     fn a_file_that_changed_since_the_scan_is_skipped_not_moved() {
         let fx = fixture(&[("k.jpg", BIG), ("changed.jpg", SMALL), ("fine.jpg", SMALL)], &[&["k.jpg", "changed.jpg", "fine.jpg"]], &[]);
         fx.decide("changed.jpg", false);
@@ -692,6 +723,8 @@ mod tests {
             review_pairs: vec![],
             burst_runs: vec![],
             video_matches: vec![],
+            exact_edges: vec![],
+            video_edges: vec![],
             orphan_videos: vec![],
             unknown_provenance_videos: vec![],
             placeholder_count: 0,

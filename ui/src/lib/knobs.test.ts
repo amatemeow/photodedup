@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { ScanInfo, Settings } from './api';
-import { changedSince, usedLine } from './knobs';
+import type { Counts, ScanInfo, Settings } from './api';
+import { changedSince, describeChange, usedLine } from './knobs';
 
 const used: NonNullable<ScanInfo['used']> = { match_distance: 45, sequence_similarity: 80, sequence_gap_seconds: 3, include_videos: true };
 const knob = (value: number) => ({ value, default: value, min: 0, max: 100 });
@@ -38,5 +38,38 @@ describe('settings that changed since a scan', () => {
     expect(usedLine('exact', used)).toBe('');
     expect(usedLine('orphans', used)).toBe('');
     expect(usedLine('burst', null)).toBe('');
+  });
+});
+
+const counts = (over: Partial<Counts> = {}): Counts => ({ exact: 2, duplicates: 180, sequences: 4, sequence_photos: 14, look_alikes: 9, ...over });
+
+describe('describing what a setting would change', () => {
+  it('says nothing when the lists it feeds would stay the same', () => {
+    expect(describeChange('sequence_gap_seconds', counts(), counts())).toEqual([]);
+  });
+
+  it('reports sequences with their photo count, and only for settings that affect them', () => {
+    const to = counts({ sequences: 3, sequence_photos: 11 });
+    expect(describeChange('sequence_similarity', counts(), to)).toEqual(['Quick sequences: 4 → 3 (14 photos → 11)']);
+    expect(describeChange('match_distance', counts(), to)).toEqual([]);
+  });
+
+  it('the time gap moves pairs between sequences and look-alikes, so reports both', () => {
+    const to = counts({ sequences: 5, sequence_photos: 20, look_alikes: 4 });
+    expect(describeChange('sequence_gap_seconds', counts(), to)).toEqual([
+      'Quick sequences: 4 → 5 (14 photos → 20)',
+      'Look-alike pairs: 9 → 4',
+    ]);
+  });
+
+  it('copy match distance reports duplicates and look-alikes but never sequences', () => {
+    const to = counts({ duplicates: 190, look_alikes: 14, sequences: 9 });
+    expect(describeChange('match_distance', counts(), to)).toEqual(['True duplicates: 180 → 190', 'Look-alike pairs: 9 → 14']);
+  });
+
+  it('uses the singular for one photo', () => {
+    expect(describeChange('sequence_gap_seconds', counts({ sequence_photos: 1 }), counts({ sequences: 5, sequence_photos: 1 }))[0]).toBe(
+      'Quick sequences: 4 → 5 (1 photo → 1)',
+    );
   });
 });

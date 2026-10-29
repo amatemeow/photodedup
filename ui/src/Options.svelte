@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api, ApiError, type IntensityId, type KnobId, type Settings, type SettingsPatch } from './lib/api';
+  import { api, ApiError, type Counts, type IntensityId, type KnobId, type Settings, type SettingsPatch } from './lib/api';
+  import { describeChange } from './lib/knobs';
   import Icon from './Icon.svelte';
 
-  let { onBack }: { onBack: () => void } = $props();
+  // `scanId` is the scan in the database, if there is one: sliders preview on it and apply to it.
+  let { onBack, scanId = null }: { onBack: () => void; scanId?: string | null } = $props();
 
   let settings = $state<Settings | null>(null);
   let error = $state('');
@@ -75,6 +77,55 @@
 
   const say = (e: unknown) => (e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e));
 
+  // What the current results would look like with the value under the
+  // finger, worked out on the server from the saved analysis. `seq` drops
+  // answers that arrive after a newer question.
+  let preview = $state<{ knob: KnobId; lines: string[] } | { knob: KnobId; message: string } | null>(null);
+  let seq = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // True once the server says this scan predates trying settings on it.
+  let cannotRegroup = $state(false);
+
+  function previewDrag(knob: KnobId, value: number) {
+    drag[knob] = value;
+    if (!scanId || !settings || cannotRegroup) return;
+    clearTimeout(timer);
+    const values = Object.fromEntries(knobs.map((k) => [k.id, k.id === knob ? value : (drag[k.id] ?? settings!.advanced[k.id].value)])) as Record<KnobId, number>;
+    const mine = ++seq;
+    timer = setTimeout(async () => {
+      try {
+        const p = await api.previewRegroup(scanId, values);
+        if (mine !== seq) return;
+        const lines = describeChange(knob, p.current, p.proposed);
+        preview = lines.length ? { knob, lines } : { knob, message: 'No change to your current results.' };
+      } catch (e) {
+        if (mine !== seq) return;
+        if (e instanceof ApiError && e.status === 409) cannotRegroup = true;
+        preview = null;
+      }
+    }, 120);
+  }
+
+  /** Saves a matching value, then regroups the current review with it. */
+  async function saveKnob(knob: KnobId, value: number) {
+    clearTimeout(timer);
+    seq++;
+    await save({ [knob]: value });
+    if (error || !scanId || cannotRegroup) return;
+    try {
+      const c: Counts = await api.regroup(scanId);
+      appliedKnob = knob;
+      applied = `Your review is updated: ${c.sequences} quick sequence${c.sequences === 1 ? '' : 's'}, ${c.duplicates + c.exact} duplicate groups, ${c.look_alikes} look-alike pairs.`;
+      preview = null;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) cannotRegroup = true;
+      else error = say(e);
+    }
+  }
+  let applied = $state('');
+  // Which slider the confirmation belongs to (null: it was a reset of all of them).
+  let appliedKnob = $state<KnobId | null>(null);
+
   onMount(async () => {
     try {
       settings = await api.settings();
@@ -86,6 +137,7 @@
   async function save(patch: SettingsPatch) {
     error = '';
     saved = false;
+    applied = '';
     try {
       settings = await api.saveSettings(patch);
       saved = true;
@@ -99,8 +151,22 @@
   const choose = (id: IntensityId) => (settings && settings.scan_intensity !== id ? save({ scan_intensity: id }) : undefined);
 
   const allDefault = $derived(settings ? knobs.every((k) => settings!.advanced[k.id].value === settings!.advanced[k.id].default) : true);
-  const resetAll = () =>
-    settings && save(Object.fromEntries(knobs.map((k) => [k.id, settings!.advanced[k.id].default])) as SettingsPatch);
+  const resetAll = async () => {
+    if (!settings) return;
+    await save(Object.fromEntries(knobs.map((k) => [k.id, settings!.advanced[k.id].default])) as SettingsPatch);
+    if (!error && scanId && !cannotRegroup) await regroupNow();
+  };
+  async function regroupNow() {
+    try {
+      await api.regroup(scanId!);
+      appliedKnob = null;
+      applied = 'Your review is updated.';
+      preview = null;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) cannotRegroup = true;
+      else error = say(e);
+    }
+  }
 
   const workers = (id: IntensityId) => settings?.tiers.find((t) => t.id === id)?.workers;
 
@@ -164,8 +230,12 @@
       <details class="advanced">
         <summary><span class="lead">Advanced matching</span><Icon name="chevron-right" size={16} /></summary>
         <p class="hint intro">
-          How strictly the scan groups photos. The defaults were tuned on real libraries and suit most people. Changes apply to the
-          <strong>next scan</strong>; scan the folder again to see them.
+          How strictly photos are grouped. The defaults were tuned on real libraries and suit most people.
+          {#if scanId && !cannotRegroup}
+            Drag a slider to see what it would change in your current review; letting go applies it. Your keep and quarantine choices are kept.
+          {:else}
+            Changes apply to the <strong>next scan</strong>; scan the folder again to see them.
+          {/if}
         </p>
         {#each knobs as k (k.id)}
           {@const kn = settings.advanced[k.id]}
@@ -174,7 +244,7 @@
               <label for={k.id}><strong>{k.title}</strong></label>
               <span class="value">{shown(k.id)}{k.unit}</span>
               {#if kn.value !== kn.default}
-                <button class="link" onclick={() => save({ [k.id]: kn.default })}>Reset to {kn.default}{k.unit}</button>
+                <button class="link" onclick={() => saveKnob(k.id, kn.default)}>Reset to {kn.default}{k.unit}</button>
               {/if}
             </div>
             <p class="hint">{k.blurb}</p>
@@ -188,14 +258,27 @@
                 step={k.step}
                 value={kn.value}
                 style="--p: {((shown(k.id) - kn.min) / (kn.max - kn.min)) * 100}%"
-                oninput={(e) => (drag[k.id] = Number(e.currentTarget.value))}
-                onchange={(e) => save({ [k.id]: Number(e.currentTarget.value) })}
+                oninput={(e) => previewDrag(k.id, Number(e.currentTarget.value))}
+                onchange={(e) => saveKnob(k.id, Number(e.currentTarget.value))}
               />
               <span class="hint">{k.high}</span>
+            </div>
+            <div class="effect" aria-live="polite">
+              {#if preview && preview.knob === k.id}
+                {#if 'lines' in preview}
+                  <span class="hint">With this value:</span>
+                  <ul>{#each preview.lines as l (l)}<li>{l}</li>{/each}</ul>
+                {:else}
+                  <span class="hint">{preview.message}</span>
+                {/if}
+              {:else if applied && appliedKnob === k.id}
+                <p class="applied"><Icon name="check" size={15} /><span>{applied}</span></p>
+              {/if}
             </div>
             {#if k.caution}<p class="notice warning small"><Icon name="info" size={15} /><span>{k.caution}</span></p>{/if}
           </div>
         {/each}
+        {#if applied && appliedKnob === null}<p class="notice success small" role="status"><Icon name="check" size={15} /><span>{applied}</span></p>{/if}
         <button class="btn" disabled={allDefault} onclick={resetAll}>Reset all to defaults</button>
       </details>
 
@@ -332,6 +415,23 @@
     grid-template-columns: auto 1fr auto;
     align-items: center;
     gap: var(--s3);
+  }
+  .effect {
+    min-height: 1.5em;
+    padding-bottom: var(--s2);
+  }
+  .applied {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    margin: 0;
+    color: var(--success);
+    font-size: var(--fs-small);
+  }
+  .effect ul {
+    margin: var(--s1) 0 0;
+    padding-left: var(--s4);
+    font-variant-numeric: tabular-nums;
   }
   .small {
     font-size: var(--fs-small);

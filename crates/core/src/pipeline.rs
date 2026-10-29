@@ -3,17 +3,16 @@
 //! This is the thing `crates/cli` calls, and the thing M1's end-to-end
 //! parity test runs against the reference Japan-trip dataset.
 
-use crate::classify::{classify_pair, ClassifyInput, PairClassification};
+use crate::classify::PairClassification;
 use crate::thresholds::Thresholds;
-use crate::cluster::merge_edges;
+use crate::grouping::{group, GroupingInput};
 use crate::decode::decode_image;
 use crate::exacthash::find_exact_duplicates;
 use crate::hash::{phash256, sharpness, Hash256};
-use crate::keeper::{pick_keeper, score as keeper_score};
 use crate::metadata::{extract_image, extract_video};
 use crate::model::{FileId, FileRecord, MediaClassSerde, SiblingSet};
 use crate::provenance::{evaluate, Origin, Provenance};
-use crate::resolve::{detect_burst_runs, resolve_t1_edges, resolve_t1b_edges, split_runs_by_similarity, BurstRun};
+use crate::resolve::BurstRun;
 use crate::scan::scan;
 use crate::throttle::{build_pool, lower_process_priority, ScanIntensity};
 use crate::video_match::{find_video_matches, VideoCandidate, VideoMatch};
@@ -110,6 +109,10 @@ pub struct PipelineResult {
     /// already in `clusters`.
     pub review_pairs: Vec<PairClassification>,
     pub burst_runs: Vec<BurstRun>,
+    /// Byte-identical pairs and matched (derived, native) video pairs:
+    /// the edges no setting changes, kept so the grouping can be redone.
+    pub exact_edges: Vec<(FileId, FileId)>,
+    pub video_edges: Vec<(FileId, FileId)>,
     pub video_matches: Vec<VideoMatch>,
     pub orphan_videos: Vec<FileId>,
     pub unknown_provenance_videos: Vec<FileId>,
@@ -228,51 +231,7 @@ fn run_inner(root: &Path, opts: &PipelineOptions, on_progress: &(dyn Fn(Progress
         }
     }
 
-    // --- Candidate search + classification, images only. ---
     on_progress(Progress::Matching);
-    let image_hash_entries: Vec<(FileId, Hash256)> = primary_ids
-        .iter()
-        .filter(|&&id| file_by_id[&id].media_class == MediaClassSerde::Image)
-        .filter_map(|&id| analyzed.get(&id).and_then(|a| a.phash).map(|h| (id, h)))
-        .collect();
-    let index = crate::search::BruteForceIndex::build(image_hash_entries);
-    let candidate_pairs = index.all_pairs_within(opts.thresholds.match_distance);
-
-    let pair_classifications: Vec<PairClassification> = candidate_pairs
-        .into_iter()
-        .filter(|(a, b, _)| {
-            // Already an exact byte duplicate -> T0 handles it; skip here,
-            // mirroring pass4_classify.py's identical skip.
-            !matches!((exact_group_of.get(a), exact_group_of.get(b)), (Some(ga), Some(gb)) if ga == gb)
-        })
-        .map(|(a_id, b_id, dist)| {
-            let a = analyzed.get(&a_id).unwrap();
-            let b = analyzed.get(&b_id).unwrap();
-            let ai = ClassifyInput {
-                id: a_id,
-                origin: a.provenance.origin,
-                camera_model: a.camera_model.clone(),
-                capture_time: a.capture_time,
-            };
-            let bi = ClassifyInput {
-                id: b_id,
-                origin: b.provenance.origin,
-                camera_model: b.camera_model.clone(),
-                capture_time: b.capture_time,
-            };
-            classify_pair(&ai, &bi, dist, opts.thresholds.sequence_gap_seconds)
-        })
-        .collect();
-
-    let t1_image_edges = resolve_t1_edges(&pair_classifications);
-    // A derived file that already resolved to a native original via T1
-    // isn't "orphaned" -- T1b must not also merge it into an unrelated
-    // cluster through a weaker derived-derived link. See resolve.rs's
-    // doc comment on resolve_t1b_edges for the real discrepancy this
-    // guards against.
-    let already_t1_matched: std::collections::HashSet<FileId> =
-        t1_image_edges.iter().map(|&(derived, _, _)| derived).collect();
-    let t1b_image_edges = resolve_t1b_edges(&pair_classifications, &already_t1_matched);
 
     // --- Video matching (separate mechanism: duration-blocked + frame
     // sequence, not phash-matrix candidate search). ---
@@ -323,109 +282,27 @@ fn run_inner(root: &Path, opts: &PipelineOptions, on_progress: &(dyn Fn(Progress
         .filter(|c| c.origin == Origin::Unknown)
         .map(|c| c.id)
         .collect();
-    let video_edges: Vec<(FileId, FileId)> = video_matches.iter().map(|m| (m.derived, m.native)).collect();
-
-    // --- Union-find merge across every edge source, then keeper scoring
-    // per cluster. See cluster.rs for why this must happen across ALL
-    // edges together, not tier-by-tier. ---
     on_progress(Progress::Clustering);
-    let mut tier_of_edge: HashMap<(FileId, FileId), &'static str> = HashMap::new();
-    for &(a, b) in &t0_edges {
-        tier_of_edge.insert(norm(a, b), "T0");
-    }
-    for &(a, b, _) in &t1_image_edges {
-        tier_of_edge.entry(norm(a, b)).or_insert("T1");
-    }
-    for &(a, b, _) in &t1b_image_edges {
-        tier_of_edge.entry(norm(a, b)).or_insert("T1b");
-    }
-    for &(a, b) in &video_edges {
-        tier_of_edge.entry(norm(a, b)).or_insert("T1");
-    }
-
-    let all_edges: Vec<(FileId, FileId)> = t0_edges
-        .iter()
-        .copied()
-        .chain(t1_image_edges.iter().map(|&(a, b, _)| (a, b)))
-        .chain(t1b_image_edges.iter().map(|&(a, b, _)| (a, b)))
-        .chain(video_edges.iter().copied())
-        .collect();
-
-    let raw_clusters = merge_edges(all_edges);
-    let clusters: Vec<Cluster> = raw_clusters
-        .into_iter()
-        .map(|members| {
-            let scored: Vec<(FileId, String, _)> = members
-                .iter()
-                .map(|&id| {
-                    let rec = file_by_id[&id];
-                    let a = analyzed.get(&id);
-                    let ext = rec.path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                    let (origin, pixels, has_gps) = match a {
-                        Some(a) => (
-                            a.provenance.origin,
-                            a.width.zip(a.height),
-                            a.provenance.evidence.iter().any(|e| matches!(e, crate::provenance::Evidence::GpsPresent)),
-                        ),
-                        None => (Origin::Unknown, None, false),
-                    };
-                    (id, rec.file_name.clone(), keeper_score(origin, pixels, rec.size_bytes, has_gps, ext))
-                })
-                .collect();
-            let keeper = pick_keeper(&scored);
-
-            let tier = cluster_tier(&members, &tier_of_edge);
-
-            let reasons: Vec<&'static str> = pair_classifications
-                .iter()
-                .filter(|p| members.contains(&p.a) && members.contains(&p.b))
-                .map(|p| p.reason)
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .collect();
-
-            Cluster {
-                tier,
-                members,
-                keeper,
-                reasons,
-            }
-        })
-        .collect();
-
-    // --- Burst runs: native images only, independent of pairwise
-    // classification (see resolve.rs). ---
-    let burst_input: Vec<(FileId, String, NaiveDateTime)> = primary_ids
-        .iter()
-        .filter(|&&id| file_by_id[&id].media_class == MediaClassSerde::Image)
-        .filter_map(|&id| {
-            let a = analyzed.get(&id)?;
-            if a.provenance.origin != Origin::CameraOriginal {
-                return None;
-            }
-            Some((id, a.camera_model.clone()?, a.capture_time?))
-        })
-        .collect();
-    // Time alone over-groups (see `thresholds::SEQUENCE_SIMILARITY`): keep only the
-    // frames that also look like the same shot.
-    let frame_hashes: HashMap<FileId, Hash256> = analyzed.iter().filter_map(|(&id, a)| a.phash.map(|h| (id, h))).collect();
-    let burst_runs = split_runs_by_similarity(
-        detect_burst_runs(&burst_input, opts.thresholds.sequence_gap_seconds),
-        &frame_hashes,
-        opts.thresholds.sequence_similarity,
+    let video_edges: Vec<(FileId, FileId)> = video_matches.iter().map(|m| (m.derived, m.native)).collect();
+    let grouping = group(
+        &GroupingInput {
+            files: &scan_report.files,
+            analyzed: &analyzed,
+            primary_ids: &primary_ids,
+            exact_edges: &t0_edges,
+            video_edges: &video_edges,
+        },
+        &opts.thresholds,
     );
-
-    let review_pairs: Vec<PairClassification> = pair_classifications
-        .into_iter()
-        .filter(|p| !p.tier.is_auto_selectable())
-        .collect();
 
     Some(PipelineResult {
         files: scan_report.files,
         analyzed,
-        clusters,
-        review_pairs,
-        burst_runs,
+        clusters: grouping.clusters,
+        review_pairs: grouping.review_pairs,
+        burst_runs: grouping.burst_runs,
+        exact_edges: t0_edges,
+        video_edges,
         video_matches,
         orphan_videos,
         unknown_provenance_videos,
@@ -455,40 +332,6 @@ fn drop_videos(report: &mut crate::scan::ScanReport) {
         .collect();
     report.files.retain(|f| !video.contains(&f.id));
     report.sibling_sets.retain(|s| !video.contains(&s.primary));
-}
-
-/// Picks a cluster's display tier (T0 > T1 > T1b) from whichever of its
-/// members' edges are present in `tier_of_edge`. Checks **all pairs**
-/// among `members`, not just sorted-adjacent ones: after union-find, a
-/// cluster's real edges don't necessarily fall between consecutive
-/// elements of the sorted member list -- e.g. two derived files that each
-/// separately matched the same native keeper produce edges
-/// (native,d1)/(native,d2); if d1 and d2 sort between other members,
-/// neither sorted-adjacent pair is a real edge at all. An earlier version
-/// of this used `.windows(2)` and could silently mislabel such a cluster's
-/// tier as the `unwrap_or` fallback. Clusters are small (almost always 2-3
-/// members), so the O(k^2) pair scan here is free.
-fn cluster_tier(members: &[FileId], tier_of_edge: &HashMap<(FileId, FileId), &'static str>) -> &'static str {
-    members
-        .iter()
-        .enumerate()
-        .flat_map(|(i, &a)| members[i + 1..].iter().map(move |&b| (a, b)))
-        .filter_map(|(a, b)| tier_of_edge.get(&norm(a, b)))
-        .copied()
-        .max_by_key(|t| match *t {
-            "T0" => 2,
-            "T1" => 1,
-            _ => 0,
-        })
-        .unwrap_or("T1b")
-}
-
-fn norm(a: FileId, b: FileId) -> (FileId, FileId) {
-    if a < b {
-        (a, b)
-    } else {
-        (b, a)
-    }
 }
 
 #[cfg(test)]
@@ -571,44 +414,6 @@ mod tests {
         assert!(run_cancellable(tmp.path(), &PipelineOptions::default(), &|_| {}, &cancel).is_some());
     }
 
-    #[test]
-    fn cluster_tier_finds_t0_edge_regardless_of_sort_order() {
-        let mut edges = HashMap::new();
-        edges.insert(norm(1, 2), "T0");
-        assert_eq!(cluster_tier(&[1, 2], &edges), "T0");
-    }
-
-    #[test]
-    fn cluster_tier_survives_edges_that_skip_every_sorted_adjacent_pair() {
-        // Regression test for a real bug: a 6-member cluster whose real
-        // edges are {1,4},{2,4},{2,6},{3,6},{3,5} -- none of which is a
-        // sorted-adjacent pair ((1,2),(2,3),(3,4),(4,5),(5,6)). The old
-        // `.windows(2)` implementation found zero matches here and
-        // silently fell back to "T1b" even when the real edges were T1.
-        let mut edges = HashMap::new();
-        edges.insert(norm(1, 4), "T1");
-        edges.insert(norm(2, 4), "T1");
-        edges.insert(norm(2, 6), "T1");
-        edges.insert(norm(3, 6), "T1");
-        edges.insert(norm(3, 5), "T1");
-
-        let members = vec![1, 2, 3, 4, 5, 6];
-        assert_eq!(cluster_tier(&members, &edges), "T1");
-    }
-
-    #[test]
-    fn cluster_tier_prefers_t0_over_t1_when_both_present() {
-        let mut edges = HashMap::new();
-        edges.insert(norm(1, 2), "T1");
-        edges.insert(norm(2, 3), "T0");
-        assert_eq!(cluster_tier(&[1, 2, 3], &edges), "T0");
-    }
-
-    #[test]
-    fn cluster_tier_falls_back_to_t1b_only_when_truly_no_edge_matches() {
-        let edges: HashMap<(FileId, FileId), &'static str> = HashMap::new();
-        assert_eq!(cluster_tier(&[1, 2], &edges), "T1b");
-    }
 }
 
 fn analyze_one(rec: &FileRecord, opts: &PipelineOptions) -> Option<Analyzed> {

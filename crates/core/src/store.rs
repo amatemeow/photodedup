@@ -6,9 +6,10 @@
 //! one specifically so that hook is cheap to add without a schema change).
 
 use crate::classify::Tier;
-use crate::model::{FileId, MediaClassSerde};
+use crate::grouping::{Grouping, GroupingInput};
+use crate::model::{FileId, FileRecord, MediaClassSerde};
 use crate::pipeline::{Analyzed, PipelineResult};
-use crate::provenance::{Evidence, Origin};
+use crate::provenance::{Evidence, Origin, Provenance};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -150,6 +151,22 @@ CREATE TABLE IF NOT EXISTS apply_items (
     PRIMARY KEY (batch_id, seq)
 );
 
+-- The links between files that no setting changes: byte-identical copies
+-- and matched videos. With the saved analysis, these are enough to group a
+-- scan again under different matching settings without scanning the folder
+-- (see `grouping.rs`). `scan_regroup` marks the scans that have them: a scan
+-- saved before this existed cannot be regrouped, only scanned again.
+CREATE TABLE IF NOT EXISTS fixed_edges (
+    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    file_a_id TEXT NOT NULL REFERENCES files(id),
+    file_b_id TEXT NOT NULL REFERENCES files(id),
+    -- exact | video
+    kind TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS scan_regroup (
+    scan_id TEXT PRIMARY KEY REFERENCES scans(id) ON DELETE CASCADE
+);
+
 -- Videos with no counterpart, shown in their own tab in their own tab: `no_match` (a derived video
 -- with no native original found) or `unknown_origin` (provenance
 -- couldn't be established, so it was never a match candidate).
@@ -209,6 +226,29 @@ pub struct StoredBurstRun {
     pub camera_model: String,
     /// In capture-time order (the `seq` column), not file-id order.
     pub member_file_ids: Vec<String>,
+}
+
+/// A saved scan, in the shape `grouping::group` takes. A file's `FileId` is
+/// its index in `row_ids`, which maps back to the database id.
+pub struct StoredGroupingData {
+    pub files: Vec<FileRecord>,
+    pub row_ids: Vec<String>,
+    pub analyzed: HashMap<FileId, Analyzed>,
+    pub primary_ids: Vec<FileId>,
+    pub exact_edges: Vec<(FileId, FileId)>,
+    pub video_edges: Vec<(FileId, FileId)>,
+}
+
+impl StoredGroupingData {
+    pub fn input(&self) -> GroupingInput<'_> {
+        GroupingInput {
+            files: &self.files,
+            analyzed: &self.analyzed,
+            primary_ids: &self.primary_ids,
+            exact_edges: &self.exact_edges,
+            video_edges: &self.video_edges,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -433,6 +473,18 @@ impl Store {
                 }
             }
         }
+
+        for (edges, kind) in [(&result.exact_edges, "exact"), (&result.video_edges, "video")] {
+            for (a, b) in edges {
+                if let (Some(a_row), Some(b_row)) = (id_map.get(a), id_map.get(b)) {
+                    tx.execute(
+                        "INSERT INTO fixed_edges (scan_id, file_a_id, file_b_id, kind) VALUES (?1, ?2, ?3, ?4)",
+                        params![scan_id, a_row, b_row, kind],
+                    )?;
+                }
+            }
+        }
+        tx.execute("INSERT INTO scan_regroup (scan_id) VALUES (?1)", params![scan_id])?;
 
         tx.commit()?;
         Ok(scan_id)
@@ -775,6 +827,146 @@ impl Store {
             .optional()
     }
 
+    /// Everything `grouping::group` needs to redo a scan's grouping from what
+    /// is saved, with each file's `FileId` being its position in `row_ids`.
+    /// `None` for a scan that predates this (it can only be scanned again).
+    pub fn load_grouping_data(&self, scan_id: &str) -> rusqlite::Result<Option<StoredGroupingData>> {
+        let marked: bool = self
+            .conn
+            .query_row("SELECT 1 FROM scan_regroup WHERE scan_id = ?1", params![scan_id], |_| Ok(true))
+            .optional()?
+            .unwrap_or(false);
+        if !marked {
+            return Ok(None);
+        }
+
+        let stored = self.load_files(scan_id)?;
+        let index: HashMap<&str, FileId> = stored.iter().enumerate().map(|(i, f)| (f.id.as_str(), i as FileId)).collect();
+        let row_ids: Vec<String> = stored.iter().map(|f| f.id.clone()).collect();
+        let files: Vec<FileRecord> = stored
+            .iter()
+            .enumerate()
+            .map(|(i, f)| FileRecord {
+                id: i as FileId,
+                path: PathBuf::from(&f.relative_path),
+                file_name: f.file_name.clone(),
+                media_class: f.media_class,
+                size_bytes: f.size_bytes,
+                mtime_unix: f.mtime_unix,
+                is_placeholder: f.is_placeholder,
+            })
+            .collect();
+
+        let mut analyzed = HashMap::new();
+        let mut stmt = self.conn.prepare(
+            "SELECT a.file_id, a.origin, a.confidence, a.evidence_json, a.phash, a.sharpness, a.width, a.height,
+                    a.camera_model, a.capture_time, a.duration_seconds
+             FROM analysis a JOIN files f ON f.id = a.file_id WHERE f.scan_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![scan_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, f64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<Vec<u8>>>(4)?,
+                r.get::<_, Option<f64>>(5)?,
+                r.get::<_, Option<u32>>(6)?,
+                r.get::<_, Option<u32>>(7)?,
+                r.get::<_, Option<String>>(8)?,
+                r.get::<_, Option<String>>(9)?,
+                r.get::<_, Option<f64>>(10)?,
+            ))
+        })?;
+        for row in rows {
+            let (file_id, origin, confidence, evidence_json, phash, sharpness, width, height, camera_model, capture_time, duration) = row?;
+            let Some(&id) = index.get(file_id.as_str()) else { continue };
+            analyzed.insert(
+                id,
+                Analyzed {
+                    provenance: Provenance {
+                        origin: origin_from_str(&origin),
+                        confidence: confidence as f32,
+                        evidence: serde_json::from_str(&evidence_json).unwrap_or_default(),
+                    },
+                    phash: phash.as_deref().and_then(hash_from_blob),
+                    sharpness,
+                    width,
+                    height,
+                    size_bytes: files[id as usize].size_bytes,
+                    camera_model,
+                    capture_time: capture_time.as_deref().and_then(|t| chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%d %H:%M:%S%.f").ok()),
+                    duration_seconds: duration,
+                },
+            );
+        }
+
+        let companions: std::collections::HashSet<String> = self.load_siblings(scan_id)?.into_values().flatten().collect();
+        let primary_ids: Vec<FileId> = stored.iter().enumerate().filter(|(_, f)| !companions.contains(&f.id)).map(|(i, _)| i as FileId).collect();
+
+        let (mut exact_edges, mut video_edges) = (Vec::new(), Vec::new());
+        let mut stmt = self.conn.prepare("SELECT file_a_id, file_b_id, kind FROM fixed_edges WHERE scan_id = ?1 ORDER BY rowid")?;
+        for row in stmt.query_map(params![scan_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))? {
+            let (a, b, kind) = row?;
+            if let (Some(&a), Some(&b)) = (index.get(a.as_str()), index.get(b.as_str())) {
+                if kind == "exact" { &mut exact_edges } else { &mut video_edges }.push((a, b));
+            }
+        }
+
+        Ok(Some(StoredGroupingData { files, row_ids, analyzed, primary_ids, exact_edges, video_edges }))
+    }
+
+    /// Replaces a scan's duplicate groups, sequences and look-alike pairs with
+    /// a new grouping, and records the settings it was made with. Choices
+    /// (`decisions`) and the videos with no counterpart are untouched: both
+    /// are about files, not about how they happen to be grouped. All or
+    /// nothing.
+    pub fn replace_grouping(
+        &mut self,
+        scan_id: &str,
+        data: &StoredGroupingData,
+        grouping: &Grouping,
+        thresholds: &crate::thresholds::Thresholds,
+    ) -> rusqlite::Result<()> {
+        let tx = self.conn.transaction()?;
+        let row = |id: &FileId| data.row_ids.get(*id as usize);
+        for table in ["clusters", "burst_runs", "review_pairs"] {
+            tx.execute(&format!("DELETE FROM {table} WHERE scan_id = ?1"), params![scan_id])?;
+        }
+        let new_id = || uuid::Uuid::new_v4().to_string();
+
+        for c in &grouping.clusters {
+            let Some(keeper) = row(&c.keeper) else { continue };
+            let cluster = new_id();
+            tx.execute(
+                "INSERT INTO clusters (id, scan_id, tier, keeper_file_id, reasons_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![cluster, scan_id, c.tier, keeper, serde_json::to_string(&c.reasons).unwrap_or_default()],
+            )?;
+            for m in c.members.iter().filter_map(row) {
+                tx.execute("INSERT OR IGNORE INTO cluster_members (cluster_id, file_id) VALUES (?1, ?2)", params![cluster, m])?;
+            }
+        }
+        for run in &grouping.burst_runs {
+            let run_row = new_id();
+            tx.execute("INSERT INTO burst_runs (id, scan_id, camera_model) VALUES (?1, ?2, ?3)", params![run_row, scan_id, run.camera_model])?;
+            for (seq, m) in run.files.iter().filter_map(row).enumerate() {
+                tx.execute("INSERT INTO burst_run_members (burst_run_id, file_id, seq) VALUES (?1, ?2, ?3)", params![run_row, m, seq as i64])?;
+            }
+        }
+        for p in &grouping.review_pairs {
+            let (Some(a), Some(b)) = (row(&p.a), row(&p.b)) else { continue };
+            tx.execute(
+                "INSERT INTO review_pairs (id, scan_id, tier, file_a_id, file_b_id, phash_dist, reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![new_id(), scan_id, tier_str(p.tier), a, b, p.phash_dist, p.reason],
+            )?;
+        }
+        tx.execute(
+            "UPDATE scan_settings SET match_distance = ?2, sequence_similarity = ?3, sequence_gap_seconds = ?4 WHERE scan_id = ?1",
+            params![scan_id, thresholds.match_distance, thresholds.sequence_similarity, thresholds.sequence_gap_seconds],
+        )?;
+        tx.commit()
+    }
+
     pub fn load_files(&self, scan_id: &str) -> rusqlite::Result<Vec<StoredFile>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, relative_path, file_name, media_class, size_bytes, mtime_unix, is_placeholder
@@ -968,6 +1160,20 @@ fn media_class_from_str(s: &str) -> MediaClassSerde {
     }
 }
 
+fn origin_from_str(s: &str) -> Origin {
+    match s {
+        "camera_original" => Origin::CameraOriginal,
+        "derived" => Origin::Derived,
+        _ => Origin::Unknown,
+    }
+}
+
+fn hash_from_blob(b: &[u8]) -> Option<crate::hash::Hash256> {
+    let hi = u128::from_le_bytes(b.get(..16)?.try_into().ok()?);
+    let lo = u128::from_le_bytes(b.get(16..32)?.try_into().ok()?);
+    Some(crate::hash::Hash256(hi, lo))
+}
+
 fn origin_str(o: Origin) -> &'static str {
     match o {
         Origin::CameraOriginal => "camera_original",
@@ -1082,6 +1288,8 @@ mod tests {
                 review_pairs,
                 burst_runs,
                 video_matches: vec![],
+                exact_edges: vec![],
+                video_edges: vec![],
                 orphan_videos: vec![],
                 unknown_provenance_videos: vec![],
                 placeholder_count: 0,
@@ -1108,6 +1316,98 @@ mod tests {
         assert_eq!(clusters[0].tier, "T1");
         assert_eq!(clusters[0].member_file_ids.len(), 2);
         assert_eq!(clusters[0].reasons, vec!["native_vs_derived".to_string()]);
+    }
+
+    /// Three untouched camera photos of one shot, two seconds apart.
+    fn three_shots_result() -> (PathBuf, PipelineResult) {
+        let root = std::env::temp_dir().join("photodedup-regroup-root");
+        let t0 = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap().and_hms_opt(10, 0, 0).unwrap();
+        let mut files = Vec::new();
+        let mut analyzed = HashMap::new();
+        for i in 0..3u32 {
+            files.push(FileRecord {
+                id: i,
+                path: root.join(format!("s{i}.jpg")),
+                file_name: format!("s{i}.jpg"),
+                media_class: MediaClassSerde::Image,
+                size_bytes: 1000,
+                mtime_unix: 1,
+                is_placeholder: false,
+            });
+            analyzed.insert(
+                i,
+                Analyzed {
+                    provenance: Provenance { origin: Origin::CameraOriginal, confidence: 1.0, evidence: vec![] },
+                    phash: Some(crate::hash::Hash256(u128::MAX - 7, 3)),
+                    sharpness: Some(1.0),
+                    width: Some(10),
+                    height: Some(10),
+                    size_bytes: 1000,
+                    camera_model: Some("Cam".into()),
+                    capture_time: Some(t0 + chrono::Duration::seconds(2 * i as i64)),
+                    duration_seconds: None,
+                },
+            );
+        }
+        let result = PipelineResult {
+            files,
+            analyzed,
+            clusters: vec![],
+            review_pairs: vec![],
+            burst_runs: vec![],
+            exact_edges: vec![],
+            video_edges: vec![],
+            video_matches: vec![],
+            orphan_videos: vec![],
+            unknown_provenance_videos: vec![],
+            placeholder_count: 0,
+            placeholder_bytes: 0,
+            refused_managed_libraries: vec![],
+            sibling_sets: vec![],
+        };
+        (root, result)
+    }
+
+    #[test]
+    fn a_saved_scan_can_be_grouped_again_under_new_settings_and_keeps_its_choices() {
+        use crate::grouping::group;
+        use crate::thresholds::Thresholds;
+        let (root, result) = three_shots_result();
+        let mut store = Store::open_in_memory().unwrap();
+        let scan_id = store.save_scan(&root, &result).unwrap();
+        store.record_scan_settings(&scan_id, &Thresholds::default(), true).unwrap();
+        store.record_decision(&scan_id, "s1.jpg", false).unwrap();
+
+        let data = store.load_grouping_data(&scan_id).unwrap().expect("a fresh scan can be regrouped");
+        assert_eq!(data.files.len(), 3);
+        assert_eq!(data.analyzed.len(), 3);
+        assert_eq!(data.analyzed[&0].phash, result.analyzed[&0].phash, "fingerprints survive the round trip");
+        assert_eq!(data.analyzed[&1].capture_time, result.analyzed[&1].capture_time);
+
+        // The default 3 s gap links shots 2 s apart into one sequence of three.
+        let wide = group(&data.input(), &Thresholds::default());
+        assert_eq!((wide.counts().sequences, wide.counts().sequence_photos), (1, 3));
+
+        // A 1 s gap separates them all, and a run of one is not a sequence.
+        let tight = Thresholds { sequence_gap_seconds: 1, ..Thresholds::default() };
+        let narrow = group(&data.input(), &tight);
+        assert_eq!(narrow.counts().sequences, 0);
+
+        store.replace_grouping(&scan_id, &data, &wide, &Thresholds::default()).unwrap();
+        assert_eq!(store.load_burst_runs(&scan_id).unwrap().len(), 1);
+        store.replace_grouping(&scan_id, &data, &narrow, &tight).unwrap();
+        assert!(store.load_burst_runs(&scan_id).unwrap().is_empty(), "the old sequence is gone");
+        assert_eq!(store.get_scan_settings(&scan_id).unwrap().unwrap().0, tight, "and the scan says what it now reflects");
+        assert_eq!(store.get_decision(&scan_id, "s1.jpg").unwrap(), Some(false), "choices are about files, so they stay");
+    }
+
+    #[test]
+    fn a_scan_saved_before_regrouping_existed_cannot_be_regrouped() {
+        let (root, result) = three_shots_result();
+        let mut store = Store::open_in_memory().unwrap();
+        let scan_id = store.save_scan(&root, &result).unwrap();
+        store.exec_for_test("DELETE FROM scan_regroup");
+        assert!(store.load_grouping_data(&scan_id).unwrap().is_none());
     }
 
     #[test]

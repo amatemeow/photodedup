@@ -13,6 +13,7 @@ pub mod cluster;
 pub mod decode;
 pub mod exacthash;
 pub mod fsguard;
+pub mod grouping;
 pub mod hash;
 pub mod keeper;
 pub mod metadata;
