@@ -1,5 +1,6 @@
 //! Keeper scoring: within a cluster, which file is the best copy to keep?
-//! Port of `~/photo-dedup/scripts/pass6_keeper.py:18-33`'s scoring tuple,
+//! Port of the Python prototype's scoring tuple (`pass6_keeper.py`, not part
+//! of this repo),
 //! as a named, inspectable struct per the architecture plan rather than an
 //! anonymous tuple -- each field is meant to be surfaced in the UI's
 //! evidence panel later, not just compared.

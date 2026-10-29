@@ -33,7 +33,7 @@ pub enum MetadataError {
 
 /// Raw metadata as extracted, before any native/derived judgment. Field
 /// names deliberately stay close to what the MVP's `inventory_final.json`
-/// recorded (see `~/photo-dedup/scripts/pass1_derive.py`) so the parity
+/// recorded (see the prototype's `pass1_derive.py`, not part of this repo) so the parity
 /// comparison in M1's acceptance test is a straightforward diff.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FileMetadata {
@@ -223,10 +223,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn dataset_dir() -> Option<PathBuf> {
-        let dir = PathBuf::from(std::env::var("HOME").unwrap())
-            .join("photo-dedup")
-            .join("originals");
-        dir.exists().then_some(dir)
+        crate::reference::photos()
     }
 
     #[test]
@@ -252,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the personal ~/photo-dedup reference dataset"]
+    #[ignore = "requires the private reference photo set (PHOTODEDUP_REFERENCE_SET)"]
     fn heic_extracts_full_camera_metadata() {
         let Some(dir) = dataset_dir() else { return };
         let meta = extract_image(&dir.join("IMG_3684.HEIC")).unwrap();
@@ -263,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the personal ~/photo-dedup reference dataset"]
+    #[ignore = "requires the private reference photo set (PHOTODEDUP_REFERENCE_SET)"]
     fn messenger_jpg_has_no_camera_identity() {
         let Some(dir) = dataset_dir() else { return };
         let meta = extract_image(&dir.join("IMG_3465.JPG")).unwrap();
@@ -274,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the personal ~/photo-dedup reference dataset + ffprobe on PATH"]
+    #[ignore = "requires the private reference photo set (PHOTODEDUP_REFERENCE_SET) + ffprobe on PATH"]
     fn oneplus_video_extracts_vendor_model_via_ffprobe() {
         let Some(dir) = dataset_dir() else { return };
         let meta = extract_video(&dir.join("VID20261020154635.mp4"), &crate::tools::ffprobe(), Some(SchedulingHint::Utility)).unwrap();
@@ -283,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the personal ~/photo-dedup reference dataset + ffprobe on PATH"]
+    #[ignore = "requires the private reference photo set (PHOTODEDUP_REFERENCE_SET) + ffprobe on PATH"]
     fn iphone_video_extracts_make_and_model_via_ffprobe() {
         let Some(dir) = dataset_dir() else { return };
         let mov = std::fs::read_dir(&dir)

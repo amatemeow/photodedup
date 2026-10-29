@@ -1,7 +1,7 @@
 # M0 spike results
 
-Run 2026-10-27 against the real Japan trip dataset
-(`~/photo-dedup/originals/`, 2718 files) with Homebrew ffmpeg 9.0.2 on macOS.
+Run 2026-10-27 against the real Japan trip dataset (a private reference
+set of 2718 files, not distributed) with Homebrew ffmpeg 9.0.2 on macOS.
 These three answers were blocking before writing the real engine — see
 `ROADMAP.md` and the architecture plan for what they decide.
 

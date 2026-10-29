@@ -1,12 +1,12 @@
 use photodedup_core::classify::Tier;
 use photodedup_core::pipeline::{run, PipelineOptions};
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 fn main() {
-    let dir = PathBuf::from(std::env::var("HOME").unwrap())
-        .join("photo-dedup")
-        .join("originals");
+    let Some(dir) = photodedup_core::reference::photos() else {
+        eprintln!("set {} to a folder of photos", photodedup_core::reference::ENV);
+        std::process::exit(2);
+    };
     // Default intensity (Efficient/Default/Performance) -- this is a
     // diagnostic tool, not a benchmark; no reason to override the
     // background-friendly default just to get a one-off dump faster.

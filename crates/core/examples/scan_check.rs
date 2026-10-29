@@ -1,10 +1,10 @@
 use photodedup_core::scan::scan;
-use std::path::PathBuf;
 
 fn main() {
-    let dir = PathBuf::from(std::env::var("HOME").unwrap())
-        .join("photo-dedup")
-        .join("originals");
+    let Some(dir) = photodedup_core::reference::photos() else {
+        eprintln!("set {} to a folder of photos", photodedup_core::reference::ENV);
+        std::process::exit(2);
+    };
     let report = scan(&dir);
     println!("files: {}", report.files.len());
     println!("sibling_sets: {}", report.sibling_sets.len());

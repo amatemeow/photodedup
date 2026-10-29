@@ -118,14 +118,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the personal ~/photo-dedup reference dataset + ffmpeg on PATH"]
+    #[ignore = "requires the private reference photo set (PHOTODEDUP_REFERENCE_SET) + ffmpeg on PATH"]
     fn heic_thumbnail_is_valid_jpeg_within_bounds() {
-        let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap())
-            .join("photo-dedup")
-            .join("originals");
-        if !dir.exists() {
-            return;
-        }
+        let Some(dir) = crate::reference::photos() else { return };
         let bytes = image_thumbnail(&dir.join("IMG_3684.HEIC"), &crate::tools::ffmpeg(), 256, None).unwrap();
         assert!(bytes.starts_with(&[0xFF, 0xD8]));
         let decoded = image::load_from_memory(&bytes).unwrap();

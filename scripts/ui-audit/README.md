@@ -11,8 +11,9 @@ cd scripts/ui-audit && npm ci
 cd ../..
 cargo build --release -p photodedup-cli && (cd ui && npm ci && npm run build)
 
-# A server on a throwaway database, and a library to scan (the test-folder
-# recipe in ~/photodedup-test works well). The server prints the address.
+# A server on a throwaway database, and a library to scan (any small folder
+# of real photos works; about 50 covering duplicates, quick sequences and a
+# video or two is plenty). The server prints the address.
 ./target/release/photodedup serve /tmp/audit.sqlite3        # note the URL it prints
 
 node scripts/ui-audit/screenshots.mjs  "<url>" <library> <outdir> light wide     # or dark/narrow/medium
