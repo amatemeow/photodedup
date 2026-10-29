@@ -177,8 +177,8 @@
         </div>
 
         <div class="seg block" role="group" aria-label="Decision for {m.file_name}">
-          <button class="keep" aria-pressed={keep} onclick={(e) => choose(i, true, e)}>{#if keep}<Icon name="check" size={14} />{/if} Keep</button>
-          <button class="aside" aria-pressed={!keep} onclick={(e) => choose(i, false, e)}>Quarantine</button>
+          <button class="keep" aria-pressed={keep} aria-label="Keep" title="Keep" onclick={(e) => choose(i, true, e)}><Icon name="check" size={18} /></button>
+          <button class="aside" aria-pressed={!keep} aria-label="Quarantine" title="Quarantine (moved aside, never deleted)" onclick={(e) => choose(i, false, e)}><Icon name="archive" size={18} /></button>
         </div>
       </article>
     {/each}
