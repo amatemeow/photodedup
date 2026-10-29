@@ -395,6 +395,7 @@ mod tests {
     use crate::pipeline::{Cluster, PipelineResult};
     use std::collections::BTreeMap;
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
 
@@ -647,6 +648,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // creating a symlink needs a privilege on Windows
     fn a_folder_swapped_for_a_symlink_after_the_scan_is_not_followed() {
         let fx = fixture(&[("k.jpg", BIG), ("sub/d.jpg", SMALL)], &[&["k.jpg", "sub/d.jpg"]], &[]);
         fx.decide("sub/d.jpg", false);

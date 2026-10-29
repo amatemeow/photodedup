@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# Keeps the pinned GitHub Actions (each pinned to a commit SHA) up to date, so a
+# pin does not quietly go stale. Runner labels are not covered by this; watch
+# https://github.blog/changelog/ for runner image retirements.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

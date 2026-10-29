@@ -135,7 +135,21 @@ impl Workspace {
                 return Err(unsafe_path(format!("{} is not a folder", cur.display())));
             }
         }
+        self.require_inside(&cur)?;
         Ok(cur)
+    }
+
+    /// The fully resolved path must still be under the workspace root. This
+    /// is a second line of defence behind the symlink checks: on Windows a
+    /// directory *junction* is not reported as a symlink, yet leads anywhere,
+    /// and resolving the path is what exposes where it really goes.
+    fn require_inside(&self, path: &Path) -> Result<(), GuardError> {
+        let real = fs::canonicalize(path)?;
+        if real.starts_with(&self.root) {
+            Ok(())
+        } else {
+            Err(unsafe_path(format!("{} leads outside the workspace", path.display())))
+        }
     }
 
     /// The real path of an existing regular file inside the workspace.
@@ -158,6 +172,7 @@ impl Workspace {
                 Err(e) => return Err(e.into()),
             }
         }
+        self.require_inside(&cur)?;
         Ok(cur)
     }
 
@@ -310,6 +325,21 @@ mod tests {
         let ws = Workspace::open(tmp.path()).unwrap();
         (tmp, ws)
     }
+    #[test]
+    fn a_resolved_path_that_leaves_the_workspace_is_refused_even_if_no_symlink_is_reported() {
+        // The symlink checks are the first line; this is the second. It is called
+        // directly on a link to show it catches an escape the first would miss (what
+        // a Windows junction looks like to the checks above).
+        let (tmp, ws) = ws();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("inside")).unwrap();
+        symlink(outside.path(), tmp.path().join("inside/door")).unwrap();
+
+        assert!(ws.require_inside(&ws.root().join("inside")).is_ok());
+        let err = ws.require_inside(&ws.root().join("inside/door")).unwrap_err();
+        assert!(err.to_string().contains("leads outside"), "{err}");
+    }
+
     fn put(root: &Path, rel: &str, body: &[u8]) {
         let p = root.join(rel);
         fs::create_dir_all(p.parent().unwrap()).unwrap();

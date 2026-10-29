@@ -740,6 +740,36 @@ The cache used to grow without limit (about 100 KB per grid thumbnail and
   portrait photo in a 270 px tile needs about 540 px across on a retina
   screen, so 400 looked soft; 800 it stays, and the budget does the bounding.
 
+### Prepared for the first CI run (before any remote existed)
+
+Done without a runner, so the first run starts from fewer surprises; the guide
+for that run is `docs/FIRST-CI-RUN.md`.
+
+- **Runner labels were wrong.** `macos-13` was retired in December 2025 and
+  `macos-14` on 2026-11-02 (brownouts were already failing it). Now `macos-15`
+  and `macos-15-intel` (labels checked against GitHub's runner docs).
+- **The ffmpeg sidecar build could not have worked on three of four legs:** it
+  needs `nasm` on x86 and the workflow never installed it. Added (and the script
+  now stops with a clear message without one). The Windows leg now uses an MSYS2
+  mingw-w64 shell, as the script documents, with the licence gate run outside it
+  (its `link` command shadows the MSVC linker) and a printout of the DLLs the
+  sidecar imports.
+- **`release.yml` can be run by hand** (dry run): it builds and keeps the
+  installers but publishes nothing; only a `v*` tag publishes.
+- **`ci.yml` also runs the engine tests on macOS and Windows** (Windows
+  informational until it has run clean once).
+- **Pins verified:** every pinned action's SHA was compared with its tag using
+  `git ls-remote`; Dependabot is set up for the pins. REUSE, both cargo-deny
+  gates (with the action's real argument order) and the CI commands were run
+  locally, also with ffmpeg hidden from `PATH`.
+- **Windows hardening:** the workspace guard now also requires a fully resolved
+  path to stay inside the folder, which covers a directory junction (not
+  reported as a symlink). Tests that create symlinks are limited to Unix.
+- **Still unknown until a Windows/Linux machine runs it:** the ffmpeg build on
+  those systems, `\\?\` paths handed to ffmpeg, the installers, and the app
+  itself. A Linux container could test the Linux leg locally if Docker's engine
+  is started.
+
 ## M4: desktop shell and packaging
 
 Built and checked on **macOS/arm64 only**. What was and wasn't verified is
