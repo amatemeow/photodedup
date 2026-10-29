@@ -664,13 +664,24 @@ it, with no re-scan. Choices are kept.
   so on). On a scratch copy of the small test folder (exact copies, a video
   group, sequences), regrouping at unchanged settings reproduced the scan's
   clusters, keepers, reasons, sequences and pairs identically.
-- **UI:** each slider shows "With this value: Quick sequences 3 → 2 (11 photos
-  → 5), Look-alike pairs 9 → 12" while dragged (debounced, stale answers
-  dropped) and a green confirmation under it once applied. Only the lists a
-  slider can affect are mentioned. Checked in headless Chrome.
-- **Not done:** Settings is still reached from the start screen, so trying a
-  slider means leaving the review and coming back; opening it from the review
-  (as a side sheet, so the change shows behind it) is the natural next step.
+- **UI (revised after first use):** the sliders first lived in Settings, with
+  a preview on drag and apply on release. That meant leaving the review,
+  opening Settings and coming back, so they moved into the review itself:
+  a **Fine-tune** button in the toolbar opens a side panel (a sheet at narrow
+  widths) with the three sliders. Moving one saves it, regroups the scan and
+  reloads the review behind the panel (debounced, latest value wins, never
+  two updates at once), so the sidebar counts and the lists change as you
+  drag. Your tab and filter stay. **Revert** restores the values from when
+  the panel opened, **Defaults** resets them, and a "Since you opened this"
+  summary says what changed in the lists. Settings keeps scan speed and
+  appearance and points to Fine-tune. A scan that cannot be regrouped
+  (saved before this) gets a notice and a Scan again button in the panel.
+  The Settings-era preview endpoint is still used, once, when the panel opens
+  (it supplies the starting counts and tells a regroupable scan from an old
+  one). Checked in headless Chrome: counts change live, Revert restores them,
+  axe clean in light, dark and narrow.
+- **Known limit:** each regroup gives its groups new ids, so a group open in
+  the detail view closes back to the overview while a slider is moved.
 
 ## M4: desktop shell and packaging
 

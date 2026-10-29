@@ -191,7 +191,7 @@
 </script>
 
 {#if view.kind === 'options'}
-  <Options scanId={last?.id ?? null} onBack={() => { view = { kind: 'start' }; loadIntensity(); loadLast(); }} />
+  <Options onBack={() => { view = { kind: 'start' }; loadIntensity(); loadLast(); }} />
 {:else if view.kind === 'review'}
   <Review scanId={view.scanId} onExit={backToStart} onRescan={startScan} />
 {:else}
