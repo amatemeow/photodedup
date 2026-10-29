@@ -20,7 +20,7 @@ shaped these decisions.
 | **Windows code signing (SmartScreen)** | OV certs now require hardware tokens/HSM; real cost | SignPath.io's free OSS tier is the planned path if users report friction; artifact build is already reproducible via GitHub Actions, which SignPath needs |
 | **Windows background-scheduling equivalent** (`SetPriorityClass(..., BELOW_NORMAL_PRIORITY_CLASS)`, `THREAD_MODE_BACKGROUND_BEGIN`) | No Windows target to verify against yet; didn't want a `windows-sys` dependency added speculatively | `platform::noop::NoopScheduler` is the only thing that needs replacing — every caller already goes through the `PlatformScheduler` trait (`crates/core/src/platform/`), untouched by adding a real Windows impl |
 | **Resume-recognition beyond exact path match** | `Store::find_latest_scan_for_root` (see "Resolved during M2" below) currently matches on canonicalized path only — a folder renamed, moved to a new parent directory, or re-synced to a new local path by a cloud client (OneDrive/Dropbox/iCloud routinely do this) no longer matches its own prior scan at all, even though every file inside is identical. Not fixed now because it needs a real design decision, not just more code — **explicit user requirement, recorded here so it isn't lost**: recognize the same logical folder by content, not just path | The exact-hash pass (`exacthash.rs`) already computes a blake3 digest for every size-collision bucket, and `files` already stores `(size, mtime)` per file from day one — a content fingerprint (e.g. the multiset of `(size, blake3)` for a sample of files, or file count + total size as a cheap first-pass filter before a full comparison) is additive, not a schema change. The harder part is UX, not storage — **see the suggested prompt copy right below the table.** |
-| **Live preview and live application of the matching sliders** (plus more tunable settings) -- **top priority after M4** | The three matching knobs shipped (see "Options tab"). Still deferred: the video-matching distances (duration tolerance, frame-match distance), and re-grouping in place. The settings take effect on the next scan, and the review now says when its results are out of date and offers a one-click re-scan that keeps your choices -- but a true "regroup without re-scanning" would recompute groups from the stored analysis (capture time, camera, fingerprint, provenance are all saved) and needs the pipeline's second half split out and the exact-duplicate and video edges persisted | The thresholds are one `Thresholds` struct with named ranges (`core/src/thresholds.rs`) passed explicitly through the engine, and the `settings` table is a plain key/value store, so another knob is a field, a range and a row in the UI |
+| **More tunable settings** (the video-matching distances: duration tolerance, frame-match distance) | The three image-matching sliders now preview and apply live (see "Live sliders"). Video matching is the one stage that still needs the files: it extracts frames with ffmpeg, so its distances cannot be regrouped from saved data. They would need the per-pair frame distances saved, after which they could join the same mechanism | The thresholds are one `Thresholds` struct with named ranges (`core/src/thresholds.rs`) passed explicitly through the engine, and the `settings` table is a plain key/value store, so another knob is a field, a range and a row in the UI |
 | **Several scans alive at once** (per-folder history, switching between scans, comparing two) | For now exactly one scan is live: saving a new one deletes the previous scan, including its decisions (user's call). Needs a real design decision about when a scan may be discarded, and what a re-scan of the same folder does with the decisions already made on it (carry over by relative path?) | Every database id is a UUID, so nothing in the API assumes there is only one scan. `save_scan` is the single place that deletes the old one (`delete_all_scans`), and decisions are already keyed by relative path rather than file id, so carrying them across a re-scan is additive |
 
 **Suggested UX for the resume-recognition item above (don't lose this when it gets built):**
@@ -626,6 +626,51 @@ live (a preview, then applying it without a re-scan). Recorded as the top
 priority after M4; the groundwork is in place (settings recorded per scan,
 stale-results banner, choices kept across a re-scan, per-slider ranges),
 and the stored analysis already holds what a regroup needs.
+
+### Live sliders (preview while dragging, apply on release)
+
+Top priority after M4, built on the groundwork above. Moving a matching slider
+now shows what it would change in the current review, and letting go applies
+it, with no re-scan. Choices are kept.
+
+- **The grouping half of the pipeline is one pure function**
+  (`core/src/grouping.rs`, `group(input, thresholds)`): candidate search,
+  classification, the tier resolution, union-find, keeper choice, sequences.
+  A scan calls it once at the end; the server calls it again on saved data.
+  `Grouping::counts()` gives the numbers each tab would show.
+- **What makes regrouping possible is what the scan now saves:** the analysis
+  was already stored (fingerprints, capture times, provenance); new is the
+  `fixed_edges` table, the links no setting changes (byte-identical copies,
+  matched videos), and a `scan_regroup` marker. Video matching therefore stays
+  out of the sliders (see the deferred table). `Store::load_grouping_data`
+  rebuilds the input; `Store::replace_grouping` swaps the clusters, sequences
+  and look-alike pairs in one transaction and records the new settings on the
+  scan. Orphan videos and decisions are untouched.
+- **Two endpoints:** `GET /api/scans/{id}/regroup/preview?...` (both
+  counts, writes nothing, 400 for out-of-range values) and
+  `POST /api/scans/{id}/regroup` (groups with the saved settings). A scan
+  saved before this existed answers 409; it needs one ordinary re-scan, after
+  which it is regroupable. The Settings screen then says "next scan" again.
+- **Safety, found while designing it:** a regroup can leave a photo in no
+  group at all, while an old "quarantine" choice for it still exists. Applying
+  would then have moved a photo that is no longer a duplicate of anything.
+  `apply::plan` now counts a choice only for a file that is in some group
+  today (tested). The choice itself is kept, so dragging a slider back
+  restores it.
+- **Verified on real photos, not just tests:** on a scratch copy of the slider
+  demo folder (default scan mode), the preview at every slider position in its
+  README reproduces the table exactly (7 sequences / 28 photos / 7 look-alikes
+  at the defaults; 6 / 19 / 10 at a 1 s gap; 0 look-alikes at distance 25; and
+  so on). On a scratch copy of the small test folder (exact copies, a video
+  group, sequences), regrouping at unchanged settings reproduced the scan's
+  clusters, keepers, reasons, sequences and pairs identically.
+- **UI:** each slider shows "With this value: Quick sequences 3 → 2 (11 photos
+  → 5), Look-alike pairs 9 → 12" while dragged (debounced, stale answers
+  dropped) and a green confirmation under it once applied. Only the lists a
+  slider can affect are mentioned. Checked in headless Chrome.
+- **Not done:** Settings is still reached from the start screen, so trying a
+  slider means leaving the review and coming back; opening it from the review
+  (as a side sheet, so the change shows behind it) is the natural next step.
 
 ## M4: desktop shell and packaging
 

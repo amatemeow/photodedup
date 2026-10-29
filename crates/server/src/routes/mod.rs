@@ -2,6 +2,7 @@ pub mod apply;
 pub mod decisions;
 pub mod files;
 pub mod jobs;
+pub mod regroup;
 pub mod scans;
 pub mod settings;
 pub mod shell;

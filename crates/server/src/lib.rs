@@ -93,6 +93,8 @@ pub async fn build_with(db_path: &std::path::Path, config: Config) -> anyhow::Re
         .route("/api/scans/{id}/clusters", get(routes::scans::list_clusters))
         .route("/api/scans/{id}/review-pairs", get(routes::scans::list_review_pairs))
         .route("/api/scans/{id}/burst-runs", get(routes::scans::list_burst_runs))
+        .route("/api/scans/{id}/regroup/preview", get(routes::regroup::preview))
+        .route("/api/scans/{id}/regroup", post(routes::regroup::apply))
         .route("/api/scans/start", post(routes::jobs::start_scan))
         .route("/api/jobs/{id}", get(routes::jobs::job_status))
         .route("/api/jobs/{id}/cancel", post(routes::jobs::cancel_job))
@@ -225,6 +227,8 @@ mod tests {
             review_pairs: vec![],
             burst_runs: vec![],
             video_matches: vec![],
+            exact_edges: vec![],
+            video_edges: vec![],
             orphan_videos: vec![],
             unknown_provenance_videos: vec![],
             placeholder_count: 0,
@@ -391,6 +395,8 @@ mod tests {
             review_pairs: vec![],
             burst_runs: vec![photodedup_core::resolve::BurstRun { camera_model: "Cam".into(), files: vec![0, 1, 2] }],
             video_matches: vec![],
+            exact_edges: vec![],
+            video_edges: vec![],
             orphan_videos: vec![3],
             unknown_provenance_videos: vec![],
             placeholder_count: 0,
@@ -461,6 +467,8 @@ mod tests {
             review_pairs: vec![],
             burst_runs: vec![],
             video_matches: vec![],
+            exact_edges: vec![],
+            video_edges: vec![],
             orphan_videos: vec![],
             unknown_provenance_videos: vec![],
             placeholder_count: 0,
@@ -531,6 +539,93 @@ mod tests {
         assert_eq!(s, 409, "already undone");
         let (s, _) = call(&router, "POST", format!("/api/batches/not-a-uuid/undo?token={t}"), "").await;
         assert!(s == 400 || s == 404);
+    }
+
+    #[tokio::test]
+    async fn trying_a_setting_on_a_saved_scan_previews_then_applies_without_rescanning() {
+        use photodedup_core::hash::Hash256;
+        use photodedup_core::model::{FileRecord, MediaClassSerde};
+        use photodedup_core::pipeline::{Analyzed, PipelineResult};
+        use photodedup_core::provenance::{Origin, Provenance};
+        use photodedup_core::thresholds::Thresholds;
+
+        // Three shots of one scene from one camera, two seconds apart.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let root = std::env::temp_dir().join("photodedup-server-regroup-root");
+        let t0 = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap().and_hms_opt(10, 0, 0).unwrap();
+        let mut files = Vec::new();
+        let mut analyzed = HashMap::new();
+        for i in 0..3u32 {
+            files.push(FileRecord { id: i, path: root.join(format!("s{i}.jpg")), file_name: format!("s{i}.jpg"), media_class: MediaClassSerde::Image, size_bytes: 10, mtime_unix: 0, is_placeholder: false });
+            analyzed.insert(
+                i,
+                Analyzed {
+                    provenance: Provenance { origin: Origin::CameraOriginal, confidence: 1.0, evidence: vec![] },
+                    phash: Some(Hash256(1, 1)),
+                    sharpness: Some(1.0),
+                    width: Some(8),
+                    height: Some(8),
+                    size_bytes: 10,
+                    camera_model: Some("Cam".into()),
+                    capture_time: Some(t0 + chrono::Duration::seconds(2 * i as i64)),
+                    duration_seconds: None,
+                },
+            );
+        }
+        let result = PipelineResult {
+            files,
+            analyzed,
+            clusters: vec![],
+            review_pairs: vec![],
+            burst_runs: vec![photodedup_core::resolve::BurstRun { camera_model: "Cam".into(), files: vec![0, 1, 2] }],
+            video_matches: vec![],
+            exact_edges: vec![],
+            video_edges: vec![],
+            orphan_videos: vec![],
+            unknown_provenance_videos: vec![],
+            placeholder_count: 0,
+            placeholder_bytes: 0,
+            refused_managed_libraries: vec![],
+            sibling_sets: vec![],
+        };
+        let scan = {
+            let mut store = photodedup_core::store::Store::open(tmp.path()).unwrap();
+            let id = store.save_scan(&root, &result).unwrap();
+            store.record_scan_settings(&id, &Thresholds::default(), true).unwrap();
+            id
+        };
+        let (_l, router, info) = build(tmp.path()).await.unwrap();
+        let t = &info.token;
+
+        // The preview reports both sides and changes nothing.
+        let q = "match_distance=45&sequence_similarity=80&sequence_gap_seconds=1";
+        let (s, p) = call(&router, "GET", format!("/api/scans/{scan}/regroup/preview?{q}&token={t}"), "").await;
+        assert_eq!(s, 200);
+        assert_eq!((p["current"]["sequences"].as_u64(), p["current"]["sequence_photos"].as_u64()), (Some(1), Some(3)));
+        assert_eq!(p["proposed"]["sequences"].as_u64(), Some(0));
+        let (_, runs) = call(&router, "GET", format!("/api/scans/{scan}/burst-runs?token={t}"), "").await;
+        assert_eq!(runs.as_array().unwrap().len(), 1, "previewing is not applying");
+
+        // An out-of-range candidate is refused, naming the setting.
+        let (s, _) = call(&router, "GET", format!("/api/scans/{scan}/regroup/preview?match_distance=45&sequence_similarity=80&sequence_gap_seconds=99&token={t}"), "").await;
+        assert_eq!(s, 400);
+
+        // Saving the setting alone leaves the results as they were; applying updates them.
+        call(&router, "PUT", format!("/api/settings?token={t}"), r#"{"sequence_gap_seconds":1}"#).await;
+        let (s, counts) = call(&router, "POST", format!("/api/scans/{scan}/regroup?token={t}"), "").await;
+        assert_eq!(s, 200);
+        assert_eq!(counts["sequences"].as_u64(), Some(0));
+        let (_, runs) = call(&router, "GET", format!("/api/scans/{scan}/burst-runs?token={t}"), "").await;
+        assert!(runs.as_array().unwrap().is_empty());
+        let (_, info_json) = call(&router, "GET", format!("/api/scans/{scan}/info?token={t}"), "").await;
+        assert_eq!(info_json["used"]["sequence_gap_seconds"].as_i64(), Some(1), "the scan now says what it reflects");
+    }
+
+    #[tokio::test]
+    async fn a_scan_that_cannot_be_regrouped_says_so_instead_of_guessing() {
+        let (router, info, scan, _root) = test_server_with_scan().await;
+        let (s, _) = call(&router, "POST", format!("/api/scans/{scan}/regroup?token={}", info.token), "").await;
+        assert_eq!(s, 409, "it has no recorded settings, like a scan saved before this existed");
     }
 
     #[tokio::test]
