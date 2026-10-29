@@ -116,6 +116,7 @@ pub async fn build_with(db_path: &std::path::Path, config: Config) -> anyhow::Re
             "/api/scans/{id}/decisions/bulk",
             post(routes::decisions::put_decisions_bulk),
         )
+        .route("/api/scans/{id}/decisions/clear", post(routes::decisions::clear_decisions_bulk))
         .route("/api/resume", get(routes::decisions::resume))
         .route("/api/shell", get(routes::shell::status))
         .route("/api/pick-folder", post(routes::shell::pick_folder))
@@ -354,6 +355,21 @@ mod tests {
         let body = axum::body::to_bytes(get_res.into_body(), usize::MAX).await.unwrap();
         let decisions: HashMap<String, bool> = serde_json::from_slice(&body).unwrap();
         assert_eq!(decisions.get("a.jpg"), Some(&true));
+    }
+
+    #[tokio::test]
+    async fn decisions_can_be_cleared_in_bulk_and_a_stale_scan_id_is_not_found() {
+        let (router, info, scan_id, _root) = test_server_with_scan().await;
+        let t = &info.token;
+        call(&router, "PUT", format!("/api/scans/{scan_id}/decisions?token={t}"), r#"{"relative_path":"a.jpg","keep":false}"#).await;
+
+        let (s, _) = call(&router, "POST", format!("/api/scans/{scan_id}/decisions/clear?token={t}"), r#"["a.jpg"]"#).await;
+        assert_eq!(s, 204);
+        let (_, d) = call(&router, "GET", format!("/api/scans/{scan_id}/decisions?token={t}"), "").await;
+        assert!(d.as_object().unwrap().is_empty(), "the choice is gone");
+
+        let (s, _) = call(&router, "POST", format!("/api/scans/00000000-0000-0000-0000-000000000000/decisions/clear?token={t}"), r#"["a.jpg"]"#).await;
+        assert_eq!(s, 404);
     }
 
     #[tokio::test]

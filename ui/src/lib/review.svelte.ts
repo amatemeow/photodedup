@@ -284,6 +284,33 @@ export class Review {
     await this.accept(this.undecidedPlan().groups);
   }
 
+  /** The files in these groups that have a choice recorded: what resetting them forgets. */
+  resetPaths(groups: Group[]): string[] {
+    return [...new Set(groups.flatMap((g) => g.members.map((m) => m.relative_path)))].filter((p) => p in this.decisions);
+  }
+
+  /** Forgets the choices on these groups' files, so each goes back to the
+   * engine's suggestion and the group to "to review". A file that is in
+   * another group too has one choice, so it resets there as well. Undoable. */
+  async reset(groups: Group[]) {
+    const paths = this.resetPaths(groups);
+    if (paths.length === 0) return;
+    this.error = '';
+    const prev = paths.map((path) => ({ path, keep: this.decisions[path] }));
+    for (const p of paths) delete this.decisions[p];
+    try {
+      await api.clearDecisions(this.scanId, paths);
+      this.undoStack.push({ prev });
+      this.canUndo = true;
+    } catch (e) {
+      for (const p of prev) this.decisions[p.path] = p.keep!;
+      this.error = `Couldn't reset: ${e instanceof Error ? e.message : e}`;
+    }
+  }
+
+  /** The groups of one category, or of every category. */
+  groupsOf = (scope: 'tab' | 'all'): Group[] => (scope === 'all' ? this.groups : this.groups.filter((g) => g.tab === this.tab));
+
   async undo() {
     const entry = this.undoStack.pop();
     this.canUndo = this.undoStack.length > 0;

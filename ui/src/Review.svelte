@@ -26,6 +26,7 @@
   let helpOpen = $state(false);
   let applyOpen = $state(false);
   let tuningOpen = $state(false);
+  let resetAsk = $state(false);
   let rescanAsk = $state(false);
   const rescan = () => onRescan(info?.root_path ?? '', info?.used?.include_videos ?? true);
   // Set once files have actually moved: the results below no longer match disk.
@@ -133,7 +134,8 @@
   }
 
   function onKey(e: KeyboardEvent) {
-    if (applyOpen || rescanAsk) return; // the apply panel and the re-scan question own the keyboard while open
+    if (resetAsk && e.key === 'Escape') resetAsk = false;
+    if (applyOpen || rescanAsk || resetAsk) return; // the apply panel and the re-scan question own the keyboard while open
     const t = e.target as HTMLElement;
     if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
     // Undo is the platform's own chord: Cmd+Z on a Mac, Ctrl+Z elsewhere.
@@ -293,6 +295,7 @@
             </select>
           </label>
           <button class="btn" disabled={review.counts.undecided === 0} onclick={askAcceptAll}><Icon name="check" /> Accept all suggestions</button>
+          <button class="btn" disabled={review.resetPaths(review.groupsOf('all')).length === 0} onclick={() => (resetAsk = true)} title="Forget your choices and go back to the suggestions"><Icon name="undo" /> Reset…</button>
         </div>
 
         {#if review.visible.length === 0}
@@ -329,6 +332,45 @@
         <button class="btn" onclick={() => (plan = null)}>Cancel</button>
         <button class="btn primary" onclick={doAcceptAll}>Accept</button>
       </div>
+    </div>
+  </div>
+{/if}
+
+{#if resetAsk}
+  {@const here = review.groupsOf('tab')}
+  {@const everywhere = review.groupsOf('all')}
+  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+  <div class="scrim" onclick={() => (resetAsk = false)}>
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="reset-title" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+      <h2 id="reset-title" class="lead">Reset your choices</h2>
+      <p class="secondary sheet-text">
+        Each photo goes back to the suggestion and its group to “to review”. Nothing on disk changes, and {undoKey} brings your choices back.
+      </p>
+      <div class="reset-options">
+        <button
+          class="btn"
+          disabled={review.resetPaths(here).length === 0}
+          onclick={() => {
+            resetAsk = false;
+            review.reset(here);
+          }}
+        >
+          This category: {tabInfo[review.tab].title}
+          <span class="hint">{review.resetPaths(here).length} choice{review.resetPaths(here).length === 1 ? '' : 's'}</span>
+        </button>
+        <button
+          class="btn"
+          disabled={review.resetPaths(everywhere).length === 0}
+          onclick={() => {
+            resetAsk = false;
+            review.reset(everywhere);
+          }}
+        >
+          Everything, in every category
+          <span class="hint">{review.resetPaths(everywhere).length} choice{review.resetPaths(everywhere).length === 1 ? '' : 's'}</span>
+        </button>
+      </div>
+      <div class="sheet-actions"><button class="btn" onclick={() => (resetAsk = false)}>Cancel</button></div>
     </div>
   </div>
 {/if}
@@ -554,6 +596,18 @@
     text-align: center;
   }
 
+  .reset-options {
+    display: grid;
+    gap: var(--s2);
+    margin-bottom: var(--s4);
+  }
+  .reset-options .btn {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    height: auto;
+    padding: var(--s3) var(--s4);
+  }
   .sheet-text {
     margin: var(--s2) 0 var(--s4);
   }

@@ -29,6 +29,13 @@ vi.mock('./api', () => ({
     clearDecision: async (_: string, p: string) => {
       delete server.decisions[p];
     },
+    clearDecisions: async (_: string, paths: string[]) => {
+      if (server.failNextWrite) {
+        server.failNextWrite = false;
+        throw new Error('disk full');
+      }
+      for (const p of paths) delete server.decisions[p];
+    },
     analysis: async () => null,
   },
 }));
@@ -349,5 +356,67 @@ describe('undo and failure', () => {
     await r.toggle(group(r, 'c1'), B);
     r.filter = 'changed';
     expect(r.visible.map((g) => g.id)).toEqual(['c1']);
+  });
+});
+
+describe('resetting choices', () => {
+  async function withChoices() {
+    const r = await loaded();
+    await r.accept([group(r, 'c1'), group(r, 'c2')]); // every file in both groups now has a choice
+    await r.toggle(group(r, 'c1'), B); // and c1 is edited
+    return r;
+  }
+
+  it('one group goes back to undecided and the other is left alone', async () => {
+    const r = await withChoices();
+    await r.reset([group(r, 'c1')]);
+    expect(r.statuses.get('c1')).toBe('undecided');
+    expect(r.statuses.get('c2')).toBe('accepted');
+    expect(Object.keys(server.decisions).sort()).toEqual(['d.jpg', 'e.jpg']);
+  });
+
+  it('a category resets its own groups only, and everything resets all of them', async () => {
+    const r = await withChoices();
+    r.tab = 'exact';
+    await r.reset(r.groupsOf('tab'));
+    expect(r.statuses.get('c2')).toBe('undecided');
+    expect(r.statuses.get('c1')).toBe('changed');
+    await r.reset(r.groupsOf('all'));
+    expect(r.statuses.get('c1')).toBe('undecided');
+    expect(server.decisions).toEqual({});
+  });
+
+  it('resetting nothing writes nothing and leaves nothing to undo', async () => {
+    const r = await loaded();
+    expect(r.resetPaths(r.groups)).toEqual([]);
+    await r.reset(r.groups);
+    expect(r.canUndo).toBe(false);
+  });
+
+  it('can be undone, bringing back exactly what was chosen', async () => {
+    const r = await withChoices();
+    const before = { ...server.decisions };
+    await r.reset(r.groupsOf('all'));
+    expect(server.decisions).toEqual({});
+    await r.undo();
+    expect(server.decisions).toEqual(before);
+    expect(r.statuses.get('c1')).toBe('changed');
+  });
+
+  it('rolls the screen back when the server refuses', async () => {
+    const r = await withChoices();
+    server.failNextWrite = true;
+    await r.reset([group(r, 'c1')]);
+    expect(r.error).toMatch(/disk full/);
+    expect(r.statuses.get('c1')).toBe('changed');
+  });
+
+  it('a file that sits in two groups has one choice, so it resets in both', async () => {
+    server.bursts = [{ id: 'b1', camera_model: 'Cam', captured_at: null, frames: [A, file('f9', '9.jpg')], sharpness: {}, suggested_file_id: 'fa' }];
+    const r = await loaded();
+    await r.accept([group(r, 'c1')]);
+    expect(r.statuses.get('b1')).not.toBe('undecided'); // a.jpg is in both
+    await r.reset([group(r, 'c1')]);
+    expect(r.decisions['a.jpg']).toBeUndefined();
   });
 });

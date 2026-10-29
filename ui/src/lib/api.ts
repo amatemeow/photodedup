@@ -230,6 +230,9 @@ export const api = {
   decisions: (scanId: string) => call<Record<string, boolean>>(`/api/scans/${scanId}/decisions`),
   putDecisions: (scanId: string, rows: DecisionRow[]) =>
     call<void>(`/api/scans/${scanId}/decisions/bulk`, { method: 'POST', body: JSON.stringify(rows) }),
+  /** Back to undecided for every path, in one transaction. */
+  clearDecisions: (scanId: string, relativePaths: string[]) =>
+    call<void>(`/api/scans/${scanId}/decisions/clear`, { method: 'POST', body: JSON.stringify(relativePaths) }),
   clearDecision: (scanId: string, relativePath: string) =>
     call<void>(`/api/scans/${scanId}/decisions?relative_path=${encodeURIComponent(relativePath)}`, { method: 'DELETE' }),
 

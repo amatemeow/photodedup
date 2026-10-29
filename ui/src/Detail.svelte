@@ -43,6 +43,7 @@
   const status = $derived(review.statuses.get(group.id) ?? 'undecided');
   const isBurst = $derived(group.tab === 'burst');
   const sharpest = $derived(Math.max(0, ...Object.values(group.sharpness)));
+  const undoKey = /Mac|iPhone|iPad/i.test(navigator.userAgent) ? '⌘Z' : 'Ctrl+Z';
   const undecided = $derived(status === 'undecided' || status === 'partial');
   const keepsAll = $derived(group.tab === 'similar' || group.tab === 'orphans');
   const primaryLabel = $derived(!undecided ? 'Next' : isBurst ? 'Keep suggested only' : keepsAll ? 'Keep all' : 'Accept suggestion');
@@ -130,6 +131,14 @@
       {#if isBurst}
         <button class="btn" onclick={() => review.keepAll(group)} title="Keep every frame in this sequence">Keep all</button>
       {/if}
+      <button
+        class="btn"
+        disabled={review.resetPaths([group]).length === 0}
+        onclick={() => review.reset([group])}
+        title="Forget your choices for this group and go back to the suggestion ({undoKey} undoes it)"
+      >
+        Reset
+      </button>
       <button class="btn primary" onclick={onAccept} title="{primaryLabel} and continue (Enter)">{primaryLabel} <kbd class="on-accent">⏎</kbd></button>
     </div>
   </div>
