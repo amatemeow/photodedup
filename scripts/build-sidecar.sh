@@ -16,7 +16,13 @@
 #   WORK_DIR=/some/dir ...              # reuse a download/build folder
 #
 # Needs a C compiler and make (and nasm/yasm on x86). On Windows run it from
-# an MSYS2 shell. Only macOS/arm64 has been exercised so far.
+# an MSYS2 shell (MINGW64) with the mingw-w64 toolchain. Only macOS/arm64 has
+# been exercised so far.
+#
+#   SKIP_GATE=1 scripts/build-sidecar.sh   # build only; run the licence gate yourself
+#
+# The gate runs the Rust CLI, which on Windows is better done outside MSYS2
+# (its own `link` command shadows the MSVC linker), hence the switch.
 set -euo pipefail
 
 FFMPEG_VERSION="9.0.2"
@@ -58,6 +64,14 @@ CONFIGURE_FLAGS=(
   --disable-network --disable-doc --disable-ffplay
   --enable-static --disable-shared --enable-pic
 )
+case "$TRIPLE" in
+  x86_64-*|i686-*)
+    if ! command -v nasm >/dev/null && ! command -v yasm >/dev/null; then
+      echo "nasm (or yasm) is needed to build ffmpeg for $TRIPLE; install it (apt/brew/pacman install nasm)" >&2
+      exit 1
+    fi ;;
+esac
+
 ( cd "$SRC" && ./configure "${CONFIGURE_FLAGS[@]}" && make -j"$JOBS" && make install )
 
 mkdir -p "$ROOT/sidecar"
@@ -66,8 +80,16 @@ for tool in ffmpeg ffprobe; do
 done
 
 # The gate: refuse to continue if what we just built is not redistributable.
-( cd "$ROOT" && cargo run -q -p photodedup-cli -- check-sidecar \
-    "sidecar/ffmpeg-${TRIPLE}${EXE}" "sidecar/ffprobe-${TRIPLE}${EXE}" )
+if [ -z "${SKIP_GATE:-}" ]; then
+  ( cd "$ROOT" && cargo run -q -p photodedup-cli -- check-sidecar \
+      "sidecar/ffmpeg-${TRIPLE}${EXE}" "sidecar/ffprobe-${TRIPLE}${EXE}" )
+else
+  echo "SKIP_GATE set: the licence gate was NOT run. Run it before shipping:"
+  echo "  cargo run -q -p photodedup-cli -- check-sidecar sidecar/ffmpeg-${TRIPLE}${EXE} sidecar/ffprobe-${TRIPLE}${EXE}"
+fi
+
+# The flags as recorded: the same, but without the temporary build path.
+SHOWN_FLAGS=("${CONFIGURE_FLAGS[@]/#--prefix=*/--prefix=<build directory>}")
 
 # Record exactly what shipped (the LGPL asks for the version and a way to get
 # the corresponding source).
@@ -81,7 +103,7 @@ SHA-256:  ${FFMPEG_SHA256}
 Licence:  GNU LGPL v2.1 or later (see LICENSES/LGPL-2.1-or-later.txt).
           Built WITHOUT --enable-gpl and WITHOUT --enable-nonfree.
 Built by: scripts/build-sidecar.sh
-Configure: ${CONFIGURE_FLAGS[*]}
+Configure: ${SHOWN_FLAGS[*]}
 
 photodedup runs these as separate programs (it never links against them),
 and you can replace them: set PHOTODEDUP_FFMPEG / PHOTODEDUP_FFPROBE to your

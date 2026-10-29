@@ -732,6 +732,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)] // creating a symlink needs a privilege on Windows
     async fn a_file_swapped_for_a_symlink_after_the_scan_cannot_be_read_through_the_server() {
         let (router, info, scan, root, _dir) = server_over_real_files(&[("a.jpg", b"one"), ("b.jpg", b"two")]).await;
         let secret = tempfile::tempdir().unwrap();

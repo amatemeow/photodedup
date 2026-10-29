@@ -2,7 +2,8 @@
 # Every third-party action is pinned to a full commit SHA (the tag is in the
 # comment), so a moved or hijacked tag can't change what runs here.
 # Checks on every push and pull request. NOTE: written to match the commands
-# that were run locally, but this workflow itself has not been run on GitHub yet.
+# that were run locally, but this workflow itself has not been run on GitHub yet
+# (see docs/FIRST-CI-RUN.md).
 name: ci
 
 on:
@@ -40,6 +41,27 @@ jobs:
       - name: Server tests with the UI compiled in
         run: cargo test -p photodedup-server --features embed-ui
 
+  # The engine and server tests on the other systems, to learn early whether the
+  # engine itself builds and passes there. Windows is informational
+  # (`continue-on-error`) until it has run clean once; macOS is held to the same
+  # standard as Linux. Neither needs the UI.
+  engine-os:
+    name: engine tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # the `stable` branch, as of 2026-10-28
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Engine and server tests
+        run: cargo test --workspace
+
   licences:
     name: licences, advisories, reuse
     runs-on: ubuntu-latest
@@ -62,7 +84,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest, ubuntu-22.04]
+        os: [macos-15, windows-latest, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

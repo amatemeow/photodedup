@@ -33,8 +33,9 @@ It grew out of a working single-purpose script used on one trip's photos (see
 The engine, review UI, apply/undo, and options are built and tested. The
 desktop app (`src-tauri/`) builds and runs on macOS/arm64 with a bundled LGPL
 ffmpeg. **Not yet done:** Windows and Linux packaging, paid-certificate
-signing, a Homebrew cask, the installer workflows have never run on GitHub, and
-the interface still needs a design pass. See `ROADMAP.md` for what is deferred,
+signing, a Homebrew cask, the installer workflows have never run on GitHub
+(`docs/FIRST-CI-RUN.md` says what to expect), and the interface still needs a
+design pass. See `ROADMAP.md` for what is deferred,
 and what is known to be rough, in detail.
 
 ## Running it
