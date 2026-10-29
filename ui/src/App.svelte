@@ -1,7 +1,7 @@
 <script lang="ts">
   import { api, ApiError, type IntensityId, type JobStatus, type Phase, type ScanSummary, type Shell } from './lib/api';
   import Review from './Review.svelte';
-  import SettingsPanel from './SettingsPanel.svelte';
+  import Options from './Options.svelte';
   import Icon from './Icon.svelte';
   import ConfirmRescan from './ConfirmRescan.svelte';
 
@@ -71,6 +71,8 @@
   let root = $state('');
   let view = $state<View>({ kind: 'start' });
   let busy = $state(false);
+  // Settings opens over whatever screen is showing without replacing it, so a
+  // scan keeps running behind it and closing it returns to exactly where you were.
   let settingsOpen = $state(false);
   let error = $state('');
   let stopWatching: (() => void) | undefined;
@@ -158,6 +160,7 @@
   }
 
   function open(scanId: string) {
+    settingsOpen = false;
     view = { kind: 'review', scanId };
   }
 
@@ -219,12 +222,20 @@
   />
 {/if}
 
-{#if view.kind === 'review'}
+{#if settingsOpen && view.kind !== 'review'}
+  <Options
+    scope={view.kind === 'scanning' ? 'scanning' : 'start'}
+    onBack={() => {
+      settingsOpen = false;
+      loadIntensity();
+    }}
+  />
+{:else if view.kind === 'review'}
   <Review scanId={view.scanId} onExit={backToStart} onRescan={startScan} />
 {:else}
   <main>
     <header class="top">
-      <button class="btn plain" aria-expanded={settingsOpen} onclick={() => (settingsOpen = !settingsOpen)}><Icon name="sliders" /> Settings</button>
+      <button class="btn plain" onclick={() => (settingsOpen = true)}><Icon name="sliders" /> Settings</button>
     </header>
 
     <div class="column">
@@ -358,16 +369,6 @@
       {/if}
     </div>
   </main>
-{/if}
-
-{#if settingsOpen && view.kind !== 'review'}
-  <SettingsPanel
-    scope={view.kind === 'scanning' ? 'scanning' : 'start'}
-    onClose={() => {
-      settingsOpen = false;
-      loadIntensity();
-    }}
-  />
 {/if}
 
 <style>

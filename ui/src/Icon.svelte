@@ -2,6 +2,7 @@
   export type Name =
     | 'folder'
     | 'sliders'
+    | 'dial'
     | 'undo'
     | 'check'
     | 'chevron-left'
@@ -31,6 +32,8 @@
   const paths: Record<Name, string> = {
     folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z',
     sliders: 'M4 7h8M18 7h2M4 17h2M12 17h8M15 4.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5ZM9 14.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z',
+    // a tuning knob: a dial with its pointer
+    dial: 'M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16ZM12 12l3.6-3.6M12 6.5v.01M7.6 8.2l.01.01M6.5 12h.01',
     undo: 'M9 14 4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3',
     check: 'm5 12 5 5 9-10',
     'chevron-left': 'm15 5-7 7 7 7',
