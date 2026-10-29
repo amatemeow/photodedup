@@ -1,6 +1,6 @@
 //! Turns raw candidate pairs into the clean edges/runs that actually feed
-//! `cluster::merge_edges` and the UI. Port of
-//! `~/photo-dedup/scripts/pass4b_resolve.py`: argmin resolution per file
+//! `cluster::merge_edges` and the UI. Port of the
+//! Python prototype's `pass4b_resolve.py` (not part of this repo): argmin resolution per file
 //! (so a weak, borderline candidate pair surviving the match-distance setting's
 //! generous net can't merge two genuinely unrelated files -- only each
 //! file's single *closest* match becomes an edge) and independent

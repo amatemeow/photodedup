@@ -1,6 +1,6 @@
-//! Union-find merge of overlapping groups into single clusters. Port of
-//! `~/photo-dedup/scripts/pass6_keeper.py:108-159`'s fix for a real bug
-//! class: a file can be an exact byte-dup of one file *and* a perceptual
+//! Union-find merge of overlapping groups into single clusters. Port of the
+//! Python prototype's fix (`pass6_keeper.py`, not part of this repo) for a real
+//! bug class: a file can be an exact byte-dup of one file *and* a perceptual
 //! dup of another (e.g. two independent messenger re-saves of the same
 //! original). Without merging connected components across all edges first,
 //! that produces overlapping groups where a file is "keeper" in one group

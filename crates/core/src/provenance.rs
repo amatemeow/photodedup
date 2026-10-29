@@ -1,5 +1,5 @@
 //! Generalises the MVP's `is_messenger_derived` boolean
-//! (`~/photo-dedup/scripts/pass4_classify.py:53-54`) into scored,
+//! (the prototype's `pass4_classify.py`, not part of this repo) into scored,
 //! explainable evidence. Two hard-won lessons from the MVP session are
 //! encoded directly in this module's shape, not left as comments to be
 //! forgotten:
@@ -286,18 +286,14 @@ mod tests {
     /// auto-collapse two camera-originals" safety rule in classify.rs would
     /// stop protecting exactly the files it exists to protect.
     #[test]
-    #[ignore = "requires the personal ~/photo-dedup reference dataset"]
+    #[ignore = "requires the private reference photo set (PHOTODEDUP_REFERENCE_SET)"]
     fn filename_native_but_exif_absent_classifies_derived_on_real_dataset() {
         use crate::metadata::extract_image;
-        use std::path::PathBuf;
 
-        let dir = PathBuf::from(std::env::var("HOME").unwrap())
-            .join("photo-dedup")
-            .join("originals");
-        if !dir.exists() {
-            eprintln!("skipping: {} not found", dir.display());
+        let Some(dir) = crate::reference::photos() else {
+            eprintln!("skipping: {} is not set to a folder", crate::reference::ENV);
             return;
-        }
+        };
 
         let mut zero_exif_img_pattern = 0u32;
         let mut wrongly_camera_original = 0u32;

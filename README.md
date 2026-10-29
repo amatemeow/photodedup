@@ -87,9 +87,20 @@ cd ui && npm ci && npm run check && npm test
 `scripts/ui-audit/` has screenshot, accessibility (axe-core, WCAG 2.2 AA) and
 interaction-timing tools for the UI (see its README).
 
-`cargo test --workspace -- --ignored` additionally runs the tests that need the
-personal reference photo set and ffmpeg. The desktop shell is a separate Cargo
-workspace so its large dependency tree stays out of engine builds.
+A few regression tests run against a private reference photo set (a real
+library of several thousand HEIC, JPEG and video files the engine was validated
+on). It is personal data and is not distributed, so those tests are
+`#[ignore]`d and skip themselves. A maintainer who has the set runs them with
+
+```
+PHOTODEDUP_REFERENCE_SET=/path/to/the/photos cargo test --workspace -- --ignored
+```
+
+(they also need ffmpeg and ffprobe on `PATH`; two diagnostic examples,
+`dump_clusters` and `scan_check`, use the same variable). "The prototype" in the
+code comments means the earlier single-purpose Python version this engine
+replaces; it is not part of this repository. The desktop shell is a separate
+Cargo workspace so its large dependency tree stays out of engine builds.
 
 Layout: `crates/core` (the engine, no I/O policy), `crates/server` (local HTTP
 API), `crates/cli`, `ui/` (Svelte, talks only HTTP), `src-tauri/` (the native

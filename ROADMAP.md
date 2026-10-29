@@ -92,7 +92,7 @@ as a choice.
   only (no QoS-class equivalent exists at that API level).
 - **T1-cluster-count discrepancy (179 vs. MVP's 180), root-caused and
   fixed.** Diffing actual cluster membership (not just counts) against
-  `~/photo-dedup/decisions_input.json` found one real bug: two messenger-
+  the prototype's `decisions_input.json` found one real bug: two messenger-
   derived copies of two *different*, burst-adjacent native photos
   (`IMG20261016074102.jpg`/`...074103.jpg`, 1s apart, same camera) hash
   close enough to each other (d=44) to fire `T1b` -- but each of those two
@@ -568,15 +568,15 @@ on the review screen) stay where they are used.
 
 ## Test folder
 
-`~/photodedup-test/` (outside the repo, outside every real folder) holds a
-52-file copy of real photos and videos covering every review tab, plus
+A small test folder, kept outside the repo and outside every real photo
+folder, holds a 52-file copy of real photos and videos covering every review tab, plus
 `reset.sh` to rebuild it and clear its database, and a README with the
 steps. Scan result for the folder: 2 exact, 8 true duplicates (7 photo
 groups + 1 video group), 3 sequences over 11 frames, 9 look-alike pairs, 2
 orphan videos, 1 companion sidecar.
 
-*Test-folder note:* pointing the app at `~/photodedup-test` itself (rather
-than its `library/` folder) works, and creates the quarantine folder one
+*Test-folder note:* pointing the app at the test folder itself (rather
+than its `library/` subfolder) works, and creates the quarantine folder one
 level up. That is the guard doing what it should, since the "workspace" is
 whichever folder you scan. It happened during first use: 18 files moved,
 all accounted for in the manifest, 34 + 18 = the 52 that were created.
@@ -603,7 +603,7 @@ small. Fixed on three fronts:
   wart that "Scan again" threw away a review in progress. (It reverses one
   line of the single-live-scan entry above: decisions are no longer lost on a
   re-scan of the same folder.)
-- **A second test folder built to show the sliders**, `~/photodedup-slider-demo/`
+- **A second test folder built to show the sliders**
   (46 real photos, `reset.sh`, README). Its README has a table of what each
   tab should read at each slider position, measured with the engine on those
   exact files: e.g. Same-device review goes 0 / 5 / 7 / 12 / 14 as copy match

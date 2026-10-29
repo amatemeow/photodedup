@@ -1,5 +1,5 @@
-//! Video duplicate matching. Port of
-//! `~/photo-dedup/scripts/pass5_video.py`: block candidates by duration
+//! Video duplicate matching. Port of the
+//! Python prototype's `pass5_video.py` (not part of this repo): block candidates by duration
 //! (±1.5s) to cut the search space, then compare a 5-point frame-pHash
 //! sequence for survivors. Same structural safety rule as images (see
 //! `classify.rs`): only `Derived`-vs-`CameraOriginal` pairs are eligible
@@ -228,8 +228,8 @@ mod tests {
 
     /// Pins `MAX_MATCH_MEAN_DIST` and `HIGH_CONFIDENCE_MAX_MEAN_DIST`
     /// against the actual mean distances the MVP's pass5_video.py measured
-    /// on the reference dataset's 8 derived videos (see
-    /// `~/photo-dedup/video_t1_groups.json`): 4 high-confidence real
+    /// on the reference dataset's 8 derived videos (the
+    /// prototype's `video_t1_groups.json` output): 4 high-confidence real
     /// matches, 2 medium-confidence (a reframed/re-edited clip), and 2
     /// genuinely unrelated clips that must be rejected as noise rather
     /// than reported as the "best available" match. This is a pure-data

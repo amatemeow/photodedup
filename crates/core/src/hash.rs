@@ -123,8 +123,8 @@ pub fn phash256(img: &DynamicImage) -> Hash256 {
     pack_bits(dct.iter().take(HASH_SIZE).flat_map(|row| row[..HASH_SIZE].iter().map(move |&v| v > med)))
 }
 
-/// Laplacian-variance sharpness, matching
-/// `~/photo-dedup/scripts/pass3_phash.py`'s finite-difference 3x3
+/// Laplacian-variance sharpness, matching the Python prototype's
+/// (`pass3_phash.py`, not part of this repo) finite-difference 3x3
 /// Laplacian on a 512x512 grayscale resize (no extra dependency needed for
 /// a real Laplacian kernel). Used to pre-select the sharpest frame in a
 /// burst run.
@@ -203,23 +203,20 @@ mod tests {
         assert!(d > 50, "expected a large distance, got {d}");
     }
 
-    /// Regression test against the real Python pipeline's output, pinned to
-    /// the reference Japan-trip dataset. Ignored by default since that
-    /// dataset is personal data, not something to commit to this repo —
-    /// run explicitly with `cargo test -- --ignored` on a machine that has
-    /// `~/photo-dedup/originals/` (a symlink to the source photos) and
-    /// `~/photo-dedup/phash_results.json` (the Python-computed ground
-    /// truth). See `/SPIKES.md` §3 for the measured numbers this pins to.
+    /// Regression test against the Python prototype's output, pinned to the
+    /// reference Japan-trip dataset. Ignored by default since that dataset is
+    /// personal data, not something to commit to this repo: run it with
+    /// `PHOTODEDUP_REFERENCE_SET=<folder> cargo test -- --ignored` on a machine
+    /// that has the set (see `reference.rs`). The prototype's pHash distances
+    /// for the pairs below are written into the cases. See `/SPIKES.md` §3 for
+    /// the measured numbers this pins to.
     #[test]
-    #[ignore = "requires the personal ~/photo-dedup reference dataset"]
+    #[ignore = "requires the private reference photo set (PHOTODEDUP_REFERENCE_SET)"]
     fn parity_against_python_pipeline() {
-        use std::path::Path;
-
-        let base = dirs_originals();
-        if !base.exists() {
-            eprintln!("skipping: {} not found", base.display());
+        let Some(base) = crate::reference::photos() else {
+            eprintln!("skipping: {} is not set to a folder", crate::reference::ENV);
             return;
-        }
+        };
 
         let cases: &[(&str, &str, &str, u32, u32)] = &[
             // (label, file_a, file_b, max_phash_dist, python_phash_dist)
@@ -241,12 +238,6 @@ mod tests {
                 d <= *max_dist,
                 "{label}: rust phash_dist={d} too far from python's {python_dist} (band limit {max_dist})"
             );
-        }
-
-        fn dirs_originals() -> std::path::PathBuf {
-            Path::new(&std::env::var("HOME").unwrap())
-                .join("photo-dedup")
-                .join("originals")
         }
     }
 }

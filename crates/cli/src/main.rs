@@ -302,8 +302,8 @@ fn run_scan(path: &PathBuf, intensity: ScanIntensity, include_videos: bool) {
     // cloud-synced folder (OneDrive/Dropbox/iCloud Drive), and dropping a
     // stray file into it would get picked up by the sync client. State
     // lives next to where the tool is run from instead -- same lesson the
-    // MVP already learned (`~/photo-dedup/` was kept separate from the
-    // `originals/` symlink for exactly this reason).
+    // Python prototype already learned (its state was kept apart from the photo
+    // folder for exactly this reason).
     let db_path = PathBuf::from(".photodedup-scan.sqlite3");
     match Store::open(&db_path) {
         Ok(mut store) => match store.save_scan(path, &result) {

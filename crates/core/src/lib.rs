@@ -21,6 +21,7 @@ pub mod model;
 pub mod pipeline;
 pub mod platform;
 pub mod provenance;
+pub mod reference;
 pub mod resolve;
 pub mod scan;
 pub mod search;

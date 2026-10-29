@@ -1,7 +1,7 @@
 //! Pairwise classification: turns a candidate pair's distance + provenance
-//! into a tier. This is the safety core of the whole engine -- port of
-//! `~/photo-dedup/scripts/pass4_classify.py`'s structural rule, generalized
-//! from the MVP's `is_native` boolean to the `Origin` enum (see
+//! into a tier. This is the safety core of the whole engine -- a port of the
+//! earlier Python prototype's structural rule (`pass4_classify.py`, not part of
+//! this repo), generalized from the prototype's `is_native` boolean to the `Origin` enum (see
 //! `provenance.rs`), plus one deliberate improvement (`T1b`, see below).
 //!
 //! The empirical calibration this is built on (from `PROJECT_CONTEXT.md`,

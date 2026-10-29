@@ -48,17 +48,11 @@ fn decode_heic_via_ffmpeg(path: &Path, ffmpeg_bin: &str, hint: Option<Scheduling
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
-    #[ignore = "requires the personal ~/photo-dedup reference dataset + ffmpeg on PATH"]
+    #[ignore = "requires the private reference photo set (PHOTODEDUP_REFERENCE_SET) + ffmpeg on PATH"]
     fn heic_decode_matches_known_dimensions() {
-        let dir = PathBuf::from(std::env::var("HOME").unwrap())
-            .join("photo-dedup")
-            .join("originals");
-        if !dir.exists() {
-            return;
-        }
+        let Some(dir) = crate::reference::photos() else { return };
         let img = decode_image(&dir.join("IMG_3684.HEIC"), &crate::tools::ffmpeg(), Some(SchedulingHint::Utility))
             .expect("decode failed");
         assert_eq!((img.width(), img.height()), (4032, 3024));
