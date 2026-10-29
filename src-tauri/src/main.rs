@@ -38,6 +38,10 @@ fn main() {
             let data = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data)?;
 
+            // Thumbnails and previews are only a cache: the system's cache folder
+            // is skipped by backups and may be reclaimed, unlike app data.
+            let cache = app.path().app_cache_dir()?.join("thumbnails");
+
             let handle = app.handle().clone();
             let picker: FolderPicker = Arc::new(move || {
                 handle.dialog().file().set_title("Choose a folder to scan").blocking_pick_folder().and_then(|p| p.into_path().ok())
@@ -45,7 +49,7 @@ fn main() {
 
             let info = tauri::async_runtime::block_on(photodedup_server::run_with(
                 data.join("photodedup.sqlite3"),
-                Config { ui_dir: None, folder_picker: Some(picker) },
+                Config { ui_dir: None, folder_picker: Some(picker), cache_dir: Some(cache) },
             ))?;
 
             // Off by default: the URL carries the session token. For tests and

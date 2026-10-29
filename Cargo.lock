@@ -802,6 +802,7 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "image",
  "photodedup-core",
  "rand",
  "rusqlite",

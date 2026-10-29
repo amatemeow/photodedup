@@ -31,7 +31,9 @@ pub struct AppState {
     /// instead (a location the user already chose and controls), created
     /// owner-only -- see `routes/files.rs`'s cache functions for the
     /// owner-only creation and atomic-write half of this.
-    pub cache_dir: Arc<PathBuf>,
+    pub cache: Arc<crate::cache::ThumbCache>,
+    /// Background thumbnail/preview preparation (see `warm.rs`).
+    pub warm: Arc<crate::warm::Warmer>,
     /// The most recent scan job (running or finished), if any -- see
     /// `routes/jobs.rs`. Only one runs at a time, and only the latest is
     /// kept: a finished scan's real record is its row in the store.

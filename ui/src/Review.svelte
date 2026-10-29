@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { Review, tabInfo, tabs, type Filter, type Sort, type Tab } from './lib/review.svelte';
   import { api, type ScanInfo, type Settings } from './lib/api';
   import { changedSince, usedLine } from './lib/knobs';
@@ -55,12 +55,37 @@
   onMount(() => {
     review.load();
     loadInfo();
+    // Quietly make the grid thumbnails ahead (within the cache limit), so scrolling is instant.
+    api.prerender(scanId).catch(() => {});
+  });
+  onDestroy(() => {
+    clearTimeout(windowTimer);
+    api.prefetch([]).catch(() => {}); // nothing is on screen any more
   });
 
   // The matching sliders regrouped the scan: show the new lists, keep the view.
   async function tuned() {
     await Promise.all([review.load(true), loadInfo()]);
   }
+
+  // Where the user is looking decides which large previews are made ahead and
+  // kept: the open group and the ones either side of it, nearest first.
+  const WINDOW_GROUPS = 10;
+  let windowTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    const open = current;
+    const order = ids;
+    clearTimeout(windowTimer);
+    windowTimer = setTimeout(() => {
+      if (!open) return void api.prefetch([]).catch(() => {});
+      const at = order.indexOf(open.id);
+      const near = [open.id];
+      for (let d = 1; d <= WINDOW_GROUPS; d++) near.push(order[at + d], order[at - d]);
+      const byId = new Map(review.groups.map((g) => [g.id, g]));
+      const files = [...new Set(near.flatMap((id) => (id === undefined ? [] : (byId.get(id)?.members ?? []).map((m) => m.id))))];
+      api.prefetch(files).catch(() => {}); // a hint: the review works the same without it
+    }, 250);
+  });
 
   const current = $derived(currentId === null ? null : (review.groups.find((g) => g.id === currentId) ?? null));
   const ids = $derived(review.visible.map((g) => g.id));

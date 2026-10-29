@@ -10,7 +10,6 @@ shaped these decisions.
 | Item | Why deferred | Door left open by |
 |---|---|---|
 | **Library scale, 100k+ files** | Blocked search (4×u64 XOR+popcount under rayon) reaches ~50k files in a few seconds with no index; trip-sized (thousands) is the stated first target | `CandidateIndex` trait (`crates/core/src/search.rs`) — swap the brute-force impl for multi-index LSH (256 bits → 16-bit bands) or a BK-tree without touching anything above it |
-| **Bounded thumbnail cache** | 219 MB for 2273 files in the MVP does not extrapolate (≈10 GB at 100k files) | Content-addressed thumb store lives behind one module; serve 256px grid thumbs + on-demand 1024px previews from day one so the cache policy is a localized change |
 | **Incremental rescan** (detect new/changed files in an already-scanned folder and merge them into the existing scan, without re-hashing everything) | Not needed for one-shot trip folders. Note this is narrower than it sounds now that resume exists (see "Resolved during M2" below): reopening an *unchanged* folder already resumes instantly with no rescan at all -- this item is specifically about a folder that *gained or changed* files since its last scan | SQLite schema records `(size, mtime, inode/file-id)` per file from day one, even though nothing reads it yet |
 | **Managed libraries** (Apple Photos `.photoslibrary`, Lightroom catalogs) | Moving a file out from under a managed library corrupts its database — genuinely risky, not just unimplemented | Day one **detects and hard-refuses** to touch these trees; the detector is the hook, support is the roadmap item |
 | **External drives / NAS over SMB** | Needs disconnection-survivable apply and throttled, resumable hashing — its own engineering effort | Journalled apply and cross-volume copy-verify-delete already ship in M3; SMB only adds retry/resume on top |
@@ -696,6 +695,50 @@ it, with no re-scan. Choices are kept.
   was reverted at the user's request.)
 - **Known limit:** each regroup gives its groups new ids, so a group open in
   the detail view closes back to the overview while a slider is moved.
+
+### Bounded preview cache, pre-render and the preview window
+
+The cache used to grow without limit (about 100 KB per grid thumbnail and
+175-400 KB per large preview, so gigabytes on a big library). Now:
+
+- **A size budget**, 1 GB by default, 256 MB to 10 GB as a slider in Settings
+  ("Preview storage", available from every screen), with the current usage and
+  a Clear now button. `server/src/cache.rs` (`ThumbCache`) enforces it after
+  each write: least recently used goes first (recency is the file's
+  modification time, refreshed on reads), **large previews before grid
+  thumbnails**, files in the protected window never. If only protected files
+  are left it stays over budget rather than evict what is on screen. The size
+  is measured from the directory each time, so a running count cannot drift.
+- **Pre-render** (`server/src/warm.rs`): when a review opens, background workers
+  make the 800 px grid thumbnail of every grouped photo, in the order the
+  review lists them, and stop at 60% of the budget, leaving the rest for
+  previews. They follow the user's own **Scan speed** setting: half its workers
+  at its scheduling priority (Efficient: one worker, lowest priority; Default:
+  two, polite). A first version ran at the lowest priority regardless and made
+  about 0.3 photos a second on the reference set (HEIC needs a full ffmpeg
+  decode, and the lowest class crawls, as the throttling work already found);
+  at Default it does about 14 a second.
+- **The preview window**: the open group plus ten groups either side (nearest
+  first) get their 1600 px previews made ahead and are protected from
+  eviction; a newer window supersedes the last, leaving the review releases it.
+  They are made one at a time at the polite priority, since they are what is
+  about to be looked at.
+- **The cache moved** to the operating system's cache folder in the desktop
+  app (`~/Library/Caches/org.photodedup.desktop/thumbnails` on a Mac), which
+  backups skip and the system may reclaim; the old folder next to the database
+  is removed. Plain `serve` keeps it next to the database. Grid thumbnails are
+  now JPEG quality 78 (previews stay at 85), about a third smaller.
+- **Verified on the 2718-photo reference set** with a 256 MB budget (scratch
+  database, default scan mode): pre-render did 1228 grouped photos in about
+  90 s into ~120 MB; two successive 400-photo windows (~150 MB of previews
+  each) held the cache at 231-250 MB, evicted thumbnails first while the window
+  was protected, and after the window moved, all 400 old previews were gone and
+  all 400 new ones present. Tests cover the eviction order, the protected set,
+  the budget share and cancelling.
+- **Why 800 px and not 400:** the plan said 400 px thumbnails would be cheap
+  enough to pre-render for everything. Measured earlier the same day, a
+  portrait photo in a 270 px tile needs about 540 px across on a retina
+  screen, so 400 looked soft; 800 it stays, and the budget does the bounding.
 
 ## M4: desktop shell and packaging
 

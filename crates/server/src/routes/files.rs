@@ -12,6 +12,7 @@ use axum::extract::{Path as AxPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use photodedup_core::model::MediaClassSerde;
+use photodedup_core::platform::SchedulingHint;
 use photodedup_core::thumbnail::{image_thumbnail, video_frame_thumbnail};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -72,31 +73,45 @@ async fn serve_generated_jpeg(state: AppState, file_id: Uuid, size: u32) -> Resp
         Err(code) => return code.into_response(),
     };
 
-    if let Some(cached) = cache_read(&state.cache_dir, &file_id, size) {
+    if let Some(cached) = state.cache.read(&file_id, size) {
         return jpeg_response(cached);
     }
 
     // Decode is real CPU work (HEIC via ffmpeg, video frame extraction) --
     // run it off the async runtime's worker thread via spawn_blocking so
     // one slow thumbnail doesn't stall every other in-flight request.
-    let bytes = tokio::task::spawn_blocking(move || generate(&path, media_class, size)).await;
+    let bytes = tokio::task::spawn_blocking(move || generate(&path, media_class, size, SchedulingHint::Utility)).await;
 
     match bytes {
         Ok(Ok(bytes)) => {
-            cache_write(&state.cache_dir, &file_id, size, &bytes);
+            state.cache.write(&file_id, size, &bytes);
             jpeg_response(bytes)
         }
         _ => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
     }
 }
 
-fn generate(path: &std::path::Path, media_class: MediaClassSerde, size: u32) -> anyhow::Result<Vec<u8>> {
-    // Background hint, not AllIn/Performance: a thumbnail request serves
-    // the UI, which is by definition something the user is actively
-    // looking at -- but generation still shouldn't be allowed to peg every
-    // core just because a grid scrolled past a lot of unthumbnailed files
-    // at once. See throttle.rs/platform/ for why this matters.
-    let hint = Some(photodedup_core::platform::SchedulingHint::Utility);
+/// Makes the thumbnail or preview for a file if the cache does not have it;
+/// true if it is there afterwards. For the background warmers.
+pub(crate) fn ensure(state: &AppState, id: &Uuid, size: u32, hint: SchedulingHint) -> bool {
+    if state.cache.contains(id, size) {
+        return true;
+    }
+    let Ok((path, class)) = resolve(state, id) else { return false };
+    match generate(&path, class, size, hint) {
+        Ok(bytes) => {
+            state.cache.write(id, size, &bytes);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn generate(path: &std::path::Path, media_class: MediaClassSerde, size: u32, hint: SchedulingHint) -> anyhow::Result<Vec<u8>> {
+    // The caller picks the hint: a request the user is waiting on is polite
+    // (Utility), background preparation is as quiet as possible (Background).
+    // Neither may peg every core. See throttle.rs/platform/.
+    let hint = Some(hint);
     match media_class {
         MediaClassSerde::Video => {
             // No duration on hand here without another DB round-trip to
@@ -157,27 +172,43 @@ pub async fn original(
 /// next to `db_path`, owner-only on Unix (`0o700`) so no other local
 /// account can read or write into it.
 pub fn init_cache_dir(db_path: &std::path::Path) -> std::io::Result<PathBuf> {
+    init_cache_dir_at(&old_cache_dir(db_path))
+}
+
+/// Where earlier versions (and a plain `serve`) keep the cache: next to the database.
+fn old_cache_dir(db_path: &std::path::Path) -> PathBuf {
     let mut name = db_path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
     name.push(".thumbs");
-    let dir = db_path.with_file_name(name);
+    db_path.with_file_name(name)
+}
+
+/// Removes the cache an earlier version left next to the database (cache
+/// entries only, then the folder if that leaves it empty).
+pub fn remove_old_cache(db_path: &std::path::Path) {
+    let old = old_cache_dir(db_path);
+    clear_cache(&old);
+    let _ = std::fs::remove_dir(&old);
+}
+
+/// Creates the cache directory (and its parents) if needed, owner-only on Unix.
+pub fn init_cache_dir_at(dir: &std::path::Path) -> std::io::Result<PathBuf> {
+    let dir = dir.to_path_buf();
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        match std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir) {
             Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Re-assert the mode even if the directory already existed
-                // (e.g. created by an older version of this code, or
-                // manually) -- don't trust pre-existing permissions.
-                let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e),
         }
+        // Re-assert the mode even if the directory already existed (made by
+        // an older version, or by hand) -- don't trust pre-existing permissions.
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
     #[cfg(not(unix))]
     {
-        std::fs::create_dir_all(&dir).or_else(|e| if e.kind() == std::io::ErrorKind::AlreadyExists { Ok(()) } else { Err(e) })?;
+        std::fs::create_dir_all(&dir)?;
     }
 
     Ok(dir)
@@ -202,7 +233,7 @@ pub fn clear_cache(cache_dir: &std::path::Path) {
     }
 }
 
-fn is_cache_entry_name(name: &str) -> bool {
+pub(crate) fn is_cache_entry_name(name: &str) -> bool {
     let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     // `<uuid>_<size>`, in the canonical hyphenated lowercase form.
     let id_size = |s: &str| {
@@ -218,11 +249,11 @@ fn is_cache_entry_name(name: &str) -> bool {
     false
 }
 
-fn cache_path(cache_dir: &std::path::Path, file_id: &Uuid, size: u32) -> PathBuf {
+pub(crate) fn cache_path(cache_dir: &std::path::Path, file_id: &Uuid, size: u32) -> PathBuf {
     cache_dir.join(format!("{file_id}_{size}.jpg"))
 }
 
-fn cache_read(cache_dir: &std::path::Path, file_id: &Uuid, size: u32) -> Option<Vec<u8>> {
+pub(crate) fn cache_read(cache_dir: &std::path::Path, file_id: &Uuid, size: u32) -> Option<Vec<u8>> {
     let path = cache_path(cache_dir, file_id, size);
     // Refuse to follow a symlink -- `symlink_metadata` (not `metadata`)
     // inspects the link itself rather than its target.
@@ -233,7 +264,7 @@ fn cache_read(cache_dir: &std::path::Path, file_id: &Uuid, size: u32) -> Option<
     std::fs::read(path).ok()
 }
 
-fn cache_write(cache_dir: &std::path::Path, file_id: &Uuid, size: u32, bytes: &[u8]) {
+pub(crate) fn cache_write(cache_dir: &std::path::Path, file_id: &Uuid, size: u32, bytes: &[u8]) {
     let final_path = cache_path(cache_dir, file_id, size);
     // Write-to-temp-then-rename: atomic (same directory = same
     // filesystem), and `create_new` refuses to follow a pre-existing

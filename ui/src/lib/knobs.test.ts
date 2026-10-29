@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Counts, ScanInfo, Settings } from './api';
-import { changedSince, describeChange, usedLine } from './knobs';
+import { cacheStopIndex, cacheStops, changedSince, describeChange, sizeLabel, usedLine } from './knobs';
 
 const used: NonNullable<ScanInfo['used']> = { match_distance: 45, sequence_similarity: 80, sequence_gap_seconds: 3, include_videos: true };
 const knob = (value: number) => ({ value, default: value, min: 0, max: 100 });
@@ -13,6 +13,7 @@ const settings = (over: Partial<Record<'match_distance' | 'sequence_similarity' 
     sequence_similarity: knob(over.sequence_similarity ?? 80),
     sequence_gap_seconds: knob(over.sequence_gap_seconds ?? 3),
   },
+  cache: { budget_mb: knob(1024), used_bytes: 0 },
 });
 
 describe('settings that changed since a scan', () => {
@@ -71,5 +72,27 @@ describe('describing what a setting would change', () => {
     expect(describeChange('sequence_gap_seconds', counts({ sequence_photos: 1 }), counts({ sequences: 5, sequence_photos: 1 }))[0]).toBe(
       'Quick sequences: 4 → 5 (1 photo → 1)',
     );
+  });
+});
+
+describe('the preview cache size slider', () => {
+  it('has stops that run from the smallest to the largest allowed size', () => {
+    expect(cacheStops[0]).toBe(256);
+    expect(cacheStops.at(-1)).toBe(10240);
+    expect([...cacheStops].sort((a, b) => a - b)).toEqual(cacheStops);
+  });
+
+  it('puts a saved value on its own stop, or the nearest one below it', () => {
+    expect(cacheStopIndex(1024)).toBe(2);
+    expect(cacheStopIndex(1500)).toBe(2);
+    expect(cacheStopIndex(10)).toBe(0);
+  });
+
+  it('writes sizes the way a person would', () => {
+    expect(sizeLabel(512)).toBe('512 B');
+    expect(sizeLabel(300 * 1024)).toBe('300 KB');
+    expect(sizeLabel(312 * 1024 * 1024)).toBe('312 MB');
+    expect(sizeLabel(1024 ** 3)).toBe('1 GB');
+    expect(sizeLabel(2.5 * 1024 ** 3)).toBe('2.5 GB');
   });
 });

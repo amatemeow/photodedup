@@ -72,7 +72,7 @@ pub async fn start_scan(State(state): State<AppState>, Json(body): Json<StartBod
     // The database's thumbnail cache sits next to the database. If that is
     // inside the folder being scanned, a re-scan would read our own
     // thumbnails as photos; refuse rather than quietly pollute the results.
-    if std::fs::canonicalize(&*state.cache_dir).is_ok_and(|c| c.starts_with(&root)) {
+    if std::fs::canonicalize(state.cache.dir()).is_ok_and(|c| c.starts_with(&root)) {
         return Err((
             StatusCode::BAD_REQUEST,
             "the database (and its thumbnail cache) is inside this folder; start the app with a database path outside it".into(),
@@ -94,7 +94,7 @@ pub async fn start_scan(State(state): State<AppState>, Json(body): Json<StartBod
     };
 
     let store = state.store.clone();
-    let cache_dir = state.cache_dir.clone();
+    let (cache, warm) = (state.cache.clone(), state.warm.clone());
     tokio::task::spawn_blocking(move || {
         let opts = PipelineOptions { intensity, include_videos, thresholds, ..Default::default() };
         // `send_replace`, not `send`: it never fails when no one is
@@ -117,7 +117,8 @@ pub async fn start_scan(State(state): State<AppState>, Json(body): Json<StartBod
             Ok(Some(result)) => match save_and_record(&store, &root, &result, &opts) {
                 Ok(scan_id) => {
                     // The previous scan is gone; so are its thumbnails.
-                    super::files::clear_cache(&cache_dir);
+                    warm.cancel_prerender();
+                    cache.clear();
                     JobStatus::Done { scan_id }
                 }
                 Err(e) => JobStatus::Failed { message: format!("saving results failed: {e}") },
@@ -206,7 +207,8 @@ mod tests {
         AppState {
             store: Arc::new(Mutex::new(Store::open_in_memory().unwrap())),
             token: Arc::from("t"),
-            cache_dir: Arc::new(cache),
+            cache: Arc::new(crate::cache::ThumbCache::open(cache, 1 << 30)),
+            warm: Arc::default(),
             job: Arc::new(Mutex::new(None)),
             folder_picker: None,
         }
@@ -251,7 +253,7 @@ mod tests {
         let mut state = test_state();
         let inside = root.path().join("scan.sqlite3.thumbs");
         std::fs::create_dir(&inside).unwrap();
-        state.cache_dir = Arc::new(inside);
+        state.cache = Arc::new(crate::cache::ThumbCache::open(inside, 1 << 30));
         let err = start_scan(State(state), body(root.path(), None)).await.unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("inside this folder"));
