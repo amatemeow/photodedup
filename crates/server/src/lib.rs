@@ -8,10 +8,12 @@
 //! directly.
 
 pub mod auth;
+mod cache;
 #[cfg(feature = "embed-ui")]
 mod embedded;
 mod routes;
 mod state;
+mod warm;
 
 pub use state::FolderPicker;
 
@@ -52,6 +54,10 @@ pub struct Config {
     pub ui_dir: Option<PathBuf>,
     /// The shell's native folder dialog, if it has one.
     pub folder_picker: Option<FolderPicker>,
+    /// Where thumbnails and previews are kept. A shell passes the operating
+    /// system's cache folder, which backups skip and the system may reclaim.
+    /// Without it the cache sits next to the database.
+    pub cache_dir: Option<PathBuf>,
 }
 
 /// `build_with`, serving the built web UI from `ui_dir` when given.
@@ -68,7 +74,7 @@ pub async fn build_with_ui(
 /// opened. Without a UI folder or a compiled-in copy, `/` is a plain
 /// placeholder page.
 pub async fn build_with(db_path: &std::path::Path, config: Config) -> anyhow::Result<(TcpListener, Router, ServerInfo)> {
-    let Config { ui_dir, folder_picker } = config;
+    let Config { ui_dir, folder_picker, cache_dir } = config;
     let store = photodedup_core::store::Store::open(db_path)?;
     // A crash mid-apply leaves a journalled batch half-done; reconcile it
     // with what is actually on disk before serving anything.
@@ -78,11 +84,22 @@ pub async fn build_with(db_path: &std::path::Path, config: Config) -> anyhow::Re
         Err(e) => eprintln!("photodedup: could not check for interrupted batches: {e}"),
     }
     let token = auth::new_token();
-    let cache_dir = routes::files::init_cache_dir(db_path)?;
+    let cache_dir = match cache_dir {
+        Some(dir) => {
+            let dir = routes::files::init_cache_dir_at(&dir)?;
+            // An earlier version kept the cache next to the database; it is
+            // only a cache, so it is removed rather than moved.
+            routes::files::remove_old_cache(db_path);
+            dir
+        }
+        None => routes::files::init_cache_dir(db_path)?,
+    };
+    let budget = routes::settings::stored_cache_bytes(&store);
     let state = AppState {
         store: Arc::new(Mutex::new(store)),
         token: Arc::from(token.as_str()),
-        cache_dir: Arc::new(cache_dir),
+        cache: Arc::new(cache::ThumbCache::open(cache_dir, budget)),
+        warm: Arc::default(),
         job: Arc::new(Mutex::new(None)),
         folder_picker,
     };
@@ -95,6 +112,9 @@ pub async fn build_with(db_path: &std::path::Path, config: Config) -> anyhow::Re
         .route("/api/scans/{id}/burst-runs", get(routes::scans::list_burst_runs))
         .route("/api/scans/{id}/regroup/preview", get(routes::regroup::preview))
         .route("/api/scans/{id}/regroup", post(routes::regroup::apply))
+        .route("/api/scans/{id}/prerender", post(routes::warm::start_prerender).get(routes::warm::prerender_status))
+        .route("/api/prefetch", post(routes::warm::window))
+        .route("/api/cache", axum::routing::delete(routes::warm::clear))
         .route("/api/scans/start", post(routes::jobs::start_scan))
         .route("/api/jobs/{id}", get(routes::jobs::job_status))
         .route("/api/jobs/{id}/cancel", post(routes::jobs::cancel_job))
@@ -514,6 +534,65 @@ mod tests {
         let status = res.status().as_u16();
         let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
         (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    }
+
+    #[tokio::test]
+    async fn the_cache_size_is_a_validated_setting_that_defaults_to_one_gigabyte() {
+        let (router, info, _scan, _root, _dir) = server_over_real_files(&[("a.jpg", b"one"), ("b.jpg", b"two")]).await;
+        let t = &info.token;
+
+        let (_, s) = call(&router, "GET", format!("/api/settings?token={t}"), "").await;
+        assert_eq!(s["cache"]["budget_mb"]["value"], 1024);
+        assert_eq!((s["cache"]["budget_mb"]["min"].as_i64(), s["cache"]["budget_mb"]["max"].as_i64()), (Some(256), Some(10_240)));
+
+        let (st, s) = call(&router, "PUT", format!("/api/settings?token={t}"), r#"{"cache_budget_mb":2048}"#).await;
+        assert_eq!(st, 200);
+        assert_eq!(s["cache"]["budget_mb"]["value"], 2048);
+
+        for bad in [r#"{"cache_budget_mb":10}"#, r#"{"cache_budget_mb":999999}"#] {
+            let (st, _) = call(&router, "PUT", format!("/api/settings?token={t}"), bad).await;
+            assert_eq!(st, 400, "{bad}");
+        }
+        let (_, s) = call(&router, "GET", format!("/api/settings?token={t}"), "").await;
+        assert_eq!(s["cache"]["budget_mb"]["value"], 2048, "a refused value changes nothing");
+    }
+
+    #[tokio::test]
+    async fn prerendering_runs_over_every_grouped_photo_and_finishes_and_unknown_scans_are_not_found() {
+        let (router, info, scan, _root, _dir) = server_over_real_files(&[("a.jpg", b"one"), ("b.jpg", b"two"), ("c.jpg", b"three")]).await;
+        let t = &info.token;
+
+        let (st, _) = call(&router, "POST", format!("/api/scans/00000000-0000-0000-0000-000000000000/prerender?token={t}"), "").await;
+        assert_eq!(st, 404);
+
+        let (st, first) = call(&router, "POST", format!("/api/scans/{scan}/prerender?token={t}"), "").await;
+        assert_eq!(st, 200);
+        assert!(first["total"].as_u64().is_some());
+        let mut last = first;
+        for _ in 0..100 {
+            let (_, s) = call(&router, "GET", format!("/api/scans/{scan}/prerender?token={t}"), "").await;
+            last = s;
+            if last["running"] == false && last["total"] == 3 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!((last["running"].clone(), last["total"].as_u64(), last["done"].as_u64()), (false.into(), Some(3), Some(3)), "all three were visited");
+    }
+
+    #[tokio::test]
+    async fn a_preview_window_is_accepted_released_and_the_cache_can_be_cleared() {
+        let (router, info, _scan, _root, _dir) = server_over_real_files(&[("a.jpg", b"one")]).await;
+        let t = &info.token;
+        let id = uuid::Uuid::new_v4();
+        let (st, _) = call(&router, "POST", format!("/api/prefetch?token={t}"), &format!(r#"{{"ids":["{id}"]}}"#)).await;
+        assert_eq!(st, 202);
+        let (st, _) = call(&router, "POST", format!("/api/prefetch?token={t}"), r#"{"ids":[]}"#).await;
+        assert_eq!(st, 202, "an empty window releases the last one");
+        let (st, _) = call(&router, "POST", format!("/api/prefetch?token={t}"), r#"{"ids":["not-a-uuid"]}"#).await;
+        assert_eq!(st, 422, "ids are parsed, never trusted as strings");
+        let (st, _) = call(&router, "DELETE", format!("/api/cache?token={t}"), "").await;
+        assert_eq!(st, 204);
     }
 
     #[tokio::test]

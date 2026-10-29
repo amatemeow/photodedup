@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, ApiError, type IntensityId, type Settings, type SettingsPatch } from './lib/api';
+  import { cacheStopIndex, cacheStops, sizeLabel } from './lib/knobs';
   import Icon from './Icon.svelte';
 
   // Where it was opened from decides what can be changed here. A setting that
@@ -70,6 +71,20 @@
   }
 
   const choose = (id: IntensityId) => (settings && settings.scan_intensity !== id ? save({ scan_intensity: id }) : undefined);
+
+  // The preview cache's size limit: a slider over a few sensible stops. Always
+  // available, wherever Settings was opened from.
+  let cacheStop = $state<number | null>(null); // the stop being dragged, before it is saved
+  const stop = $derived(cacheStop ?? (settings ? cacheStopIndex(settings.cache.budget_mb.value) : 0));
+  async function clearCache() {
+    error = '';
+    try {
+      await api.clearCache();
+      settings = await api.settings();
+    } catch (e) {
+      error = say(e);
+    }
+  }
 
   const workers = (id: IntensityId) => settings?.tiers.find((t) => t.id === id)?.workers;
 
@@ -141,6 +156,41 @@
             </label>
           {/each}
         </fieldset>
+      </section>
+
+      <section>
+        <h2 class="lead">Preview storage</h2>
+        <p class="hint intro">
+          Thumbnails and large previews are kept on disk so photos appear at once. This is the most space they may use; the ones used least
+          recently are removed first, and they are made again when needed. These are only small copies for display; your photos are never touched.
+        </p>
+        <div class="knob">
+          <div class="knob-head">
+            <label for="cache-size"><strong>Up to</strong></label>
+            <span class="value">{sizeLabel(cacheStops[stop] * 1024 * 1024)}</span>
+          </div>
+          <input
+            id="cache-size"
+            type="range"
+            min="0"
+            max={cacheStops.length - 1}
+            step="1"
+            value={stop}
+            style="--p: {(stop / (cacheStops.length - 1)) * 100}%"
+            oninput={(e) => (cacheStop = Number(e.currentTarget.value))}
+            onchange={async (e) => {
+              const mb = cacheStops[Number(e.currentTarget.value)];
+              await save({ cache_budget_mb: mb });
+              cacheStop = null;
+            }}
+            aria-valuetext={sizeLabel(cacheStops[stop] * 1024 * 1024)}
+          />
+          <div class="ends hint"><span>{sizeLabel(cacheStops[0] * 1024 * 1024)}</span><span>{sizeLabel(cacheStops.at(-1)! * 1024 * 1024)}</span></div>
+        </div>
+        <div class="usage">
+          <span class="hint">Using {sizeLabel(settings.cache.used_bytes)} now</span>
+          <button class="btn" disabled={settings.cache.used_bytes === 0} onclick={clearCache} title="Delete the stored thumbnails and previews. They are made again as you look.">Clear now</button>
+        </div>
       </section>
 
       {#if scope !== 'review'}<p class="hint">
@@ -228,6 +278,32 @@
   }
   fieldset:disabled .tier {
     cursor: not-allowed;
+  }
+  .knob {
+    display: grid;
+    gap: var(--s2);
+  }
+  .knob-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--s3);
+  }
+  .value {
+    color: var(--accent);
+    font-weight: 650;
+    font-variant-numeric: tabular-nums;
+  }
+  .ends {
+    display: flex;
+    justify-content: space-between;
+  }
+  .usage {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s3);
+    margin-top: var(--s2);
   }
   .column {
     width: min(680px, 100%);

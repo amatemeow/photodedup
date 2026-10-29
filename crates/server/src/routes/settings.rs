@@ -19,6 +19,18 @@ const KEY: &str = "scan_intensity";
 const K_SIMILARITY: &str = "sequence_similarity";
 const K_GAP: &str = "sequence_gap_seconds";
 const K_MATCH: &str = "match_distance";
+const K_CACHE_MB: &str = "cache_budget_mb";
+
+/// Disk space the thumbnail and preview cache may use, in MB. The floor leaves
+/// room for a few hundred previews; the ceiling is a deliberate "this is
+/// enough for anyone" so a typo cannot hand the cache a whole disk.
+pub const CACHE_MB: Range = Range { min: 256, max: 10_240, default: 1_024 };
+
+/// The saved cache budget in bytes: the default if missing, unparseable or out of range.
+pub fn stored_cache_bytes(store: &Store) -> u64 {
+    let mb = store.get_setting(K_CACHE_MB).ok().flatten().and_then(|v| v.parse::<i64>().ok()).filter(|v| CACHE_MB.contains(*v)).unwrap_or(CACHE_MB.default);
+    mb as u64 * 1024 * 1024
+}
 
 /// The saved thresholds. Each one that is missing, unparseable or outside
 /// its range falls back to its default: a stored value is never trusted
@@ -78,19 +90,27 @@ pub struct Advanced {
     pub match_distance: Knob,
 }
 
+/// The preview cache: its budget (a slider) and how much it holds now.
+#[derive(Serialize)]
+pub struct CacheDto {
+    pub budget_mb: Knob,
+    pub used_bytes: u64,
+}
+
 #[derive(Serialize)]
 pub struct SettingsDto {
     pub scan_intensity: &'static str,
     pub tiers: Vec<Tier>,
     pub logical_cores: usize,
     pub advanced: Advanced,
+    pub cache: CacheDto,
 }
 
 fn knob(value: i64, r: Range) -> Knob {
     Knob { value, default: r.default, min: r.min, max: r.max }
 }
 
-fn dto(store: &Store) -> SettingsDto {
+fn dto(store: &Store, cache: &crate::cache::ThumbCache) -> SettingsDto {
     let t = stored_thresholds(store);
     SettingsDto {
         scan_intensity: name_of(stored_intensity(store)),
@@ -101,11 +121,12 @@ fn dto(store: &Store) -> SettingsDto {
             sequence_gap_seconds: knob(t.sequence_gap_seconds, SEQUENCE_GAP_SECONDS),
             match_distance: knob(t.match_distance as i64, MATCH_DISTANCE),
         },
+        cache: CacheDto { budget_mb: knob((stored_cache_bytes(store) / (1024 * 1024)) as i64, CACHE_MB), used_bytes: cache.used() },
     }
 }
 
 pub async fn get(State(state): State<AppState>) -> Json<SettingsDto> {
-    Json(dto(&state.store.lock().unwrap()))
+    Json(dto(&state.store.lock().unwrap(), &state.cache))
 }
 
 /// Every field is optional: send only what changed. The whole request is
@@ -116,6 +137,7 @@ pub struct SettingsBody {
     pub sequence_similarity: Option<i64>,
     pub sequence_gap_seconds: Option<i64>,
     pub match_distance: Option<i64>,
+    pub cache_budget_mb: Option<i64>,
 }
 
 pub async fn put(State(state): State<AppState>, Json(body): Json<SettingsBody>) -> Result<Json<SettingsDto>, (StatusCode, String)> {
@@ -139,6 +161,11 @@ pub async fn put(State(state): State<AppState>, Json(body): Json<SettingsBody>) 
         t.sequence_gap_seconds = v;
     }
     t.validate().map_err(bad)?;
+    if let Some(mb) = body.cache_budget_mb {
+        if !CACHE_MB.contains(mb) {
+            return Err(bad(format!("cache size must be between {} and {} MB (got {mb})", CACHE_MB.min, CACHE_MB.max)));
+        }
+    }
 
     let io = |e: rusqlite::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     if let Some(tier) = tier {
@@ -153,7 +180,11 @@ pub async fn put(State(state): State<AppState>, Json(body): Json<SettingsBody>) 
     if body.sequence_gap_seconds.is_some() {
         store.set_setting(K_GAP, &t.sequence_gap_seconds.to_string()).map_err(io)?;
     }
-    Ok(Json(dto(&store)))
+    if let Some(mb) = body.cache_budget_mb {
+        store.set_setting(K_CACHE_MB, &mb.to_string()).map_err(io)?;
+        state.cache.set_budget(mb as u64 * 1024 * 1024);
+    }
+    Ok(Json(dto(&store, &state.cache)))
 }
 
 #[cfg(test)]

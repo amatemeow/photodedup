@@ -6,6 +6,7 @@ pub mod regroup;
 pub mod scans;
 pub mod settings;
 pub mod shell;
+pub mod warm;
 
 use axum::http::StatusCode;
 use photodedup_core::store::Store;

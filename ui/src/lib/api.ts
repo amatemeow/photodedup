@@ -151,9 +151,11 @@ export interface Settings {
   tiers: { id: IntensityId; workers: number }[];
   logical_cores: number;
   advanced: Record<KnobId, Knob>;
+  /** The preview cache: its size limit, and what it holds now. */
+  cache: { budget_mb: Knob; used_bytes: number };
 }
 /** Send only what changed. */
-export type SettingsPatch = Partial<{ scan_intensity: IntensityId } & Record<KnobId, number>>;
+export type SettingsPatch = Partial<{ scan_intensity: IntensityId; cache_budget_mb: number } & Record<KnobId, number>>;
 
 /** How many entries each review tab holds (or would hold under other settings). */
 export interface Counts {
@@ -247,6 +249,11 @@ export const api = {
   /** Groups the scan again with the saved matching settings, keeping the user's choices. */
   regroup: (scanId: string) => call<Counts>(`/api/scans/${scanId}/regroup`, { method: 'POST' }),
   settings: () => call<Settings>('/api/settings'),
+  /** Start making the grid thumbnails in the background (quietly, within the cache limit). Safe to repeat. */
+  prerender: (scanId: string) => call<{ running: boolean; done: number; total: number }>(`/api/scans/${scanId}/prerender`, { method: 'POST' }),
+  /** The photos around where the user is looking, most likely first: their previews are made ahead and kept. [] releases. */
+  prefetch: (fileIds: string[]) => call<void>('/api/prefetch', { method: 'POST', body: JSON.stringify({ ids: fileIds }) }),
+  clearCache: () => call<void>('/api/cache', { method: 'DELETE' }),
   saveSettings: (patch: SettingsPatch) => call<Settings>('/api/settings', { method: 'PUT', body: JSON.stringify(patch) }),
 
   applyPlan: (scanId: string) => call<Plan>(`/api/scans/${scanId}/apply/plan`),

@@ -91,3 +91,19 @@ export const knobDefs: { id: KnobId; title: string; blurb: string; low: string; 
       'A higher value finds more copies but can also suggest wrong ones. Two untouched camera photos are never suggested as copies of each other, whatever you choose here.',
   },
 ];
+
+/** The stops on the preview-cache size slider, in MB. A slider over 256 MB to 10 GB
+ * in a straight line would put nearly every useful choice in its first tenth. */
+export const cacheStops = [256, 512, 1024, 2048, 4096, 8192, 10240];
+
+/** The nearest stop at or below `mb`, as a slider position. */
+export const cacheStopIndex = (mb: number) => Math.max(0, cacheStops.findLastIndex((s) => s <= mb));
+
+/** "512 MB", "1 GB", "2.5 GB". */
+export function sizeLabel(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1) return bytes < 1024 ? `${bytes} B` : `${Math.round(bytes / 1024)} KB`;
+  if (mb < 1024) return `${Math.round(mb)} MB`;
+  const gb = mb / 1024;
+  return `${Number.isInteger(gb) ? gb : gb.toFixed(1)} GB`;
+}

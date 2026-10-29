@@ -30,7 +30,7 @@ pub enum ThumbnailError {
 /// than `max_dimension` is returned as-is at its own size).
 pub fn image_thumbnail(path: &Path, ffmpeg_bin: &str, max_dimension: u32, hint: Option<SchedulingHint>) -> Result<Vec<u8>, ThumbnailError> {
     let img = decode_image(path, ffmpeg_bin, hint).ok_or(ThumbnailError::DecodeFailed)?;
-    encode_jpeg(&resize_capped(&img, max_dimension))
+    encode_jpeg(&resize_capped(&img, max_dimension), quality_for(max_dimension))
 }
 
 /// JPEG bytes for one frame of a video, seeked to `fraction` of its
@@ -59,7 +59,7 @@ pub fn video_frame_thumbnail(
         return Err(ThumbnailError::FrameExtractFailed);
     }
     let img = image::load_from_memory(&output.stdout).map_err(|_| ThumbnailError::FrameExtractFailed)?;
-    encode_jpeg(&resize_capped(&img, max_dimension))
+    encode_jpeg(&resize_capped(&img, max_dimension), quality_for(max_dimension))
 }
 
 fn resize_capped(img: &DynamicImage, max_dimension: u32) -> DynamicImage {
@@ -70,10 +70,21 @@ fn resize_capped(img: &DynamicImage, max_dimension: u32) -> DynamicImage {
     img.resize(max_dimension, max_dimension, FilterType::Lanczos3)
 }
 
-fn encode_jpeg(img: &DynamicImage) -> Result<Vec<u8>, ThumbnailError> {
+/// Grid thumbnails are small on screen, so a lighter quality is invisible
+/// there and saves about a third of the bytes (quality 75-85 is the usual
+/// sweet spot for thumbnails); the large previews keep the higher one.
+fn quality_for(max_dimension: u32) -> u8 {
+    if max_dimension <= 1000 {
+        78
+    } else {
+        85
+    }
+}
+
+fn encode_jpeg(img: &DynamicImage, quality: u8) -> Result<Vec<u8>, ThumbnailError> {
     let rgb = img.to_rgb8();
     let mut buf = Vec::new();
-    JpegEncoder::new_with_quality(&mut buf, 85).write_image(&rgb, rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8)?;
+    JpegEncoder::new_with_quality(&mut buf, quality).write_image(&rgb, rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8)?;
     Ok(buf)
 }
 
@@ -102,7 +113,7 @@ mod tests {
     #[test]
     fn encode_jpeg_produces_valid_jpeg_bytes() {
         let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(32, 32, Rgb([200, 100, 50])));
-        let bytes = encode_jpeg(&img).unwrap();
+        let bytes = encode_jpeg(&img, 80).unwrap();
         assert!(bytes.starts_with(&[0xFF, 0xD8])); // JPEG SOI marker
     }
 
