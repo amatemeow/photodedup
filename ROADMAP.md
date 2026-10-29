@@ -770,6 +770,27 @@ for that run is `docs/FIRST-CI-RUN.md`.
   itself. A Linux container could test the Linux leg locally if Docker's engine
   is started.
 
+### Dependency advisories, reviewed 2026-10-29
+
+Dependabot reported 1 moderate and 1 low alert after the first push. All of the
+repository's lockfiles were checked against OSV.dev (which merges GitHub's
+advisory database and RustSec), plus `npm audit` and `cargo deny`. Everything
+found, and why none of it is actionable today:
+
+| Advisory | Package | Where | Fixed in | Exposure |
+|---|---|---|---|---|
+| GHSA-gcqx-w48m-w2h4 (low) | `deepmerge` 4.3.1 | `ui/` dev dependency, via `@sveltejs/vite-plugin-svelte` | no patched version exists | Build-time only: it is in 0 files of the built UI, so it is not in the app. Prototype pollution needs attacker-controlled input to `mergeObject`; here it merges our own build config. |
+| GHSA-qwgh-2vcv-g2f7 (moderate) | `block-buffer` 0.10.4 | desktop shell only, via `sha2` 0.10 inside `tauri-codegen` and `wry` | 0.12.1 (needs `digest`/`sha2` 0.11) | Needs a panic *caught* in the middle of a hash. Our own code does not use RustCrypto (the engine hashes with blake3) and the engine's lockfile already has the patched 0.12.1. Waits on Tauri/wry. |
+| GHSA-wrw7-89jp-8q8g / RUSTSEC-2024-0429 (moderate) | `glib` 0.18.5 | Linux builds only, via Tauri's GTK 3 layer (`muda`, `gtk` 0.18) | 0.20 (needs GTK bindings 0.20) | Absent from the macOS and Windows builds. Unsound only in `VariantStrIter`, which nothing here calls. Waits on Tauri. |
+| RUSTSEC-2024-0370 | `proc-macro-error` | Linux GTK layer, compile time | n/a (unmaintained) | Already an accepted exception in `deny.toml`. |
+| RUSTSEC-2024-0436 | `paste` | `spikes/phash_spike` only | n/a (unmaintained) | A throwaway benchmark crate, never built or shipped. |
+
+Nothing can be updated from here: `cargo update` for the shell finds nothing
+newer, and `tauri` 2.12.5 and `wry` 0.57.1 are the latest stable releases
+(Tauri 3 is only in alpha). Re-check when either publishes a release; Dependabot
+will open the pull request. The two alerts can be dismissed with "no patch
+available" (deepmerge, glib, block-buffer) and "not used" where it applies.
+
 ## M4: desktop shell and packaging
 
 Built and checked on **macOS/arm64 only**. What was and wasn't verified is
