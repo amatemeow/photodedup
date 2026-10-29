@@ -88,16 +88,42 @@ and the system.
 
 ## What the first dry run found (2026-10-29)
 
-- Apple Silicon: the ffmpeg build, the licence gate, the third-party licence
-  file and `tauri build` all succeeded. The run then failed at the attestation
-  step: *"Feature not available for user-owned private repositories"*. Build
-  attestations need a public repository (or a paid organisation plan), and the
-  artifact upload came after the failing step, so the finished installer was
-  lost. The attestation step is now skipped while the repository is private
-  (`if: ${{ !github.event.repository.private }}`) and the upload always runs.
-  Once the repository is public, attestations switch on by themselves.
-- The Linux leg built ffmpeg in about 8 minutes with `nasm`; Windows reached its
-  MSYS2 toolchain step. Their results are recorded below once known.
+Three of the four legs built a complete installer; the fourth never got that far.
+
+| Leg | ffmpeg | Installer | Failed at |
+|---|---|---|---|
+| Apple Silicon | built (2 min) | `photodedup_0.1.0_aarch64.dmg` | attestation |
+| Linux | built (8 min) | `photodedup_0.1.0_amd64.AppImage` | attestation |
+| Windows | built (28 min), LGPL gate passed | `photodedup_0.1.0_x64_en-US.msi` | attestation |
+| Intel Mac | built (15 min) | not reached | cargo-about |
+
+1. **Attestation (all legs).** *"Feature not available for user-owned private
+   repositories."* Build attestations need a public repository (or a paid
+   organisation plan), and the artifact upload came after the failing step, so
+   finished installers were lost. The step is now skipped while the repository is
+   private (`if: ${{ !github.event.repository.private }}`) and the upload always
+   runs. Once the repository is public, attestations switch on by themselves.
+2. **cargo-about on Intel Mac.** There is no prebuilt binary for that platform, so
+   the install action built it from source *without* its `cli` feature and
+   reported success while installing nothing (`no such command: about`). The
+   Intel leg now builds it with `--features cli`, the version is pinned on every
+   leg, and a step runs `cargo about --version` so a silent non-install fails at
+   once.
+3. **`libwinpthread-1.dll` in the Windows sidecar.** The DLL list the workflow
+   prints showed `ffmpeg.exe` and `ffprobe.exe` importing MinGW's pthread
+   runtime, which Windows does not have, so the sidecar would not start on a
+   user's machine and every HEIC photo and video would fail to decode. The
+   Windows build now uses native Win32 threads (`--enable-w32threads
+   --disable-pthreads`, options confirmed in ffmpeg 9.0.2's `configure`), and the
+   workflow fails the build if the sidecar imports any `lib*.dll`.
+4. **New guards, so this class of bug cannot ship quietly.** macOS fails if the
+   sidecar links anything outside `/usr/lib` and `/System`; Linux prints its
+   shared libraries (read them on the next run); Windows as above.
+
+Everything before the failing step was real: the unit tests do not exercise
+ffmpeg, so these steps, and the DLL list, are the first evidence about ffmpeg on
+Windows and Linux. **Still unproven:** that the Windows and Linux sidecars decode
+a real HEIC photo, and that the installers run. That needs one of each machine.
 
 ## Settings on GitHub
 

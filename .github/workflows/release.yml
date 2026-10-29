@@ -111,14 +111,50 @@ jobs:
         run: |
           TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
           cargo run -q -p photodedup-cli -- check-sidecar "sidecar/ffmpeg-${TRIPLE}.exe" "sidecar/ffprobe-${TRIPLE}.exe"
-          # Anything beyond Windows' own DLLs would be missing on a user's machine.
-          echo "DLLs imported by the sidecar:"
-          for f in sidecar/*.exe; do echo "$f"; objdump -p "$f" 2>/dev/null | grep "DLL Name" || echo "  (objdump not available here)"; done
+          # The DLLs the sidecar needs must all be Windows' own. MinGW's runtime
+          # DLLs are named lib*.dll (libwinpthread-1, libgcc_s_seh-1, libstdc++-6)
+          # and do not exist on a user's machine, so the sidecar would not start.
+          command -v objdump >/dev/null || { echo "::error::objdump is not available to check the sidecar's DLLs"; exit 1; }
+          bad=0
+          for f in sidecar/*.exe; do
+            echo "DLLs imported by $f:"
+            dlls="$(objdump -p "$f" | grep "DLL Name" || true)"
+            echo "$dlls"
+            if echo "$dlls" | grep -qi "DLL Name: lib"; then
+              echo "::error file=$f::imports a MinGW runtime DLL that Windows does not have"
+              bad=1
+            fi
+          done
+          [ "$bad" = 0 ]
+
+      - name: Check the macOS sidecar links only system libraries
+        if: runner.os == 'macOS'
+        run: |
+          for f in sidecar/ffmpeg-* sidecar/ffprobe-*; do
+            echo "$f"; otool -L "$f" | tail -n +2
+            if otool -L "$f" | tail -n +2 | awk '{print $1}' | grep -v -E '^/usr/lib/|^/System/'; then
+              echo "::error file=$f::links a library that is not part of macOS"; exit 1
+            fi
+          done
+
+      - name: Show the Linux sidecar's shared libraries
+        if: runner.os == 'Linux'
+        run: for f in sidecar/ffmpeg-* sidecar/ffprobe-*; do echo "$f"; ldd "$f"; done
 
       - name: Install cargo-about
+        if: ${{ !(runner.os == 'macOS' && runner.arch == 'X64') }}
         uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
-          tool: cargo-about
+          tool: cargo-about@0.9.3
+      # There is no prebuilt cargo-about for Intel macOS. The action then builds
+      # it from source WITHOUT the `cli` feature and reports success while
+      # installing nothing (first dry run: "no such command: `about`"). Build it
+      # ourselves, with the feature.
+      - name: Install cargo-about (Intel macOS, built with its cli feature)
+        if: runner.os == 'macOS' && runner.arch == 'X64'
+        run: cargo install cargo-about --version 0.9.3 --locked --features cli
+      - name: Check cargo-about is really installed
+        run: cargo about --version
 
       - name: Generate the third-party licence file that ships in the app
         run: |

@@ -64,6 +64,14 @@ CONFIGURE_FLAGS=(
   --disable-network --disable-doc --disable-ffplay
   --enable-static --disable-shared --enable-pic
 )
+
+# Windows: use native Win32 threads. The default (winpthreads) makes ffmpeg.exe
+# and ffprobe.exe import libwinpthread-1.dll, a MinGW runtime that Windows does
+# not have, so the sidecar would not start on a user's machine. Found by the
+# first CI dry run (the DLL list is printed and checked in release.yml).
+case "$TRIPLE" in
+  *windows*) CONFIGURE_FLAGS+=(--enable-w32threads --disable-pthreads) ;;
+esac
 case "$TRIPLE" in
   x86_64-*|i686-*)
     if ! command -v nasm >/dev/null && ! command -v yasm >/dev/null; then
