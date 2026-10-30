@@ -23,6 +23,7 @@ shaped these decisions.
 | **Several scans alive at once** (per-folder history, switching between scans, comparing two) | For now exactly one scan is live: saving a new one deletes the previous scan, including its decisions (user's call). Needs a real design decision about when a scan may be discarded, and what a re-scan of the same folder does with the decisions already made on it (carry over by relative path?) | Every database id is a UUID, so nothing in the API assumes there is only one scan. `save_scan` is the single place that deletes the old one (`delete_all_scans`), and decisions are already keyed by relative path rather than file id, so carrying them across a re-scan is additive |
 | **Video-frame decode threads** (`-threads` on the `-ss <t> -i <video>` calls in `video_match.rs` and `thumbnail.rs`) | Not a thread-count problem (about 43 threads, unlike HEIC's ~650), so left at ffmpeg's default. Measured on a 4K HEVC clip, 12 cores: default 0.28 s wall / 1.2 s CPU / 865 MB; `-threads 1` 0.59 s / 0.64 s / 254 MB; `-threads 4` 0.32 s / 0.81 s / 468 MB. A memory-and-CPU-for-speed trade that could follow the Scan speed tier | `frame_phash` and `video_frame_thumbnail` already receive the `SchedulingHint`; a thread count could ride along with it |
 | **Bad-photo detection** (shots nobody wanted: a finger over the lens, an accidental frame while the phone comes out of a pocket or is being readied, everything blurred, black or washed out) | Needs its own measured evidence first. The one quality number saved today is Laplacian-variance sharpness, which says "softer than its neighbours", not "a bad photo": on its own it cannot tell a deliberate soft or dark shot from an accident, and a wrong "bad" label on a photo someone loves costs more than a missed one. Design notes below | Sharpness is saved per file at scan time and the review already has single-photo groups (orphan videos, kept unless the user says otherwise), a Fine-tune panel, regroup-from-saved-analysis, and plain-language reason wording (`reasonText`). Nothing is auto-decided or deleted |
+| **Large-screen scaling** (on a big display, full screen, the start screen and the controls look small) | Reported by the user on their own big screen; not measured here yet. Today every size is a fixed pixel value tuned for desktop density (type 11 / 12 / 13 / 15 / 22 / 30 px, icons and spacing in px) and the widest size ever audited is 1440 x 900, so on a 27-32 inch display the interface keeps its size and floats in a lot of empty space. Design notes below | The type and spacing sizes are already central tokens in `app.css` (`--fs-*`, `--s*`), and Appearance already has a stored per-user preference (`lib/theme.ts`, `data-theme` on `<html>`) that a size preference can follow |
 
 **Suggested UX for the resume-recognition item above (don't lose this when it gets built):**
 Silently auto-matching on content is a real risk *specifically in a dedup
@@ -91,6 +92,35 @@ frames. Out of scope at first: videos.
 *Open questions for the user:* the category's name and wording; whether a photo
 that is also in a duplicate group shows in both places; the default sensitivity;
 whether videos are ever in scope.
+
+**Design notes for large-screen scaling (don't lose this when it gets built):**
+
+*Options.* (a) Scale the whole interface with the window: sizes in `rem`, with the
+root size growing gently once the window is wider than the audited range (for
+example 100% up to about 1600 px, rising to 125-150% at 2560 px and beyond).
+(b) A permanent **Interface size** choice in Settings > Appearance (Smaller /
+Default / Larger, or a percentage), which fits the rule that Settings holds
+standing preferences, and in the desktop app also honouring Cmd/Ctrl plus,
+minus and 0. (c) Both: a modest automatic scale that the preference overrides.
+Leaning towards (b) with a light (a): "big" is subjective and only the person
+looking at the screen can say what is comfortable.
+
+*Things that must scale together, or it will look wrong.* Every `px` size, not
+only fonts: the icons (the `Icon` component takes pixel sizes), spacing, radii,
+the tile minimum width and so the number of columns, the detail view's photos,
+the lightbox, hit targets and focus rings. Thumbnails are requested at 800 px;
+larger tiles on a high-density display may need a larger request (and the
+preview cache budget accounts for that). Consider capping the width of reading
+text, so paragraphs do not become very long lines on an ultra-wide screen.
+
+*How to check it.* Add 2560 x 1440 and 3840 x 2160 at device scale 2 to
+`scripts/ui-audit` (screenshots, axe and the scrolling performance run), and then
+look at the real window: the desktop engines differ (WebKit on macOS and Linux,
+WebView2 on Windows), as the quarantined-photo tint bug showed.
+
+*Open questions for the user:* their display size, resolution and macOS scaling
+setting, and whether content should grow to fill the screen or stay at a
+comfortable maximum width.
 
 ## Resolved during M0 (moved out of "deferred", not into the table above)
 
