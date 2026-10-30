@@ -37,10 +37,24 @@ Microsoft's installer.
 
 ## Linux
 
-Download the `.AppImage`, make it executable (`chmod +x photodedup*.AppImage`),
-and run it. There is no signing step on Linux. AppImage is the supported
-format: distribution `.deb`/`.rpm` packages depend on the WebKitGTK version
-your system happens to have.
+Three formats are published; pick the one that suits your distribution.
+
+- **`.deb`** (Debian, Ubuntu, Mint and relatives):
+  `sudo apt install ./photodedup_*_amd64.deb`. It needs WebKitGTK 4.1 and
+  GTK 3, which apt installs for you; that means Ubuntu 22.04 / Debian 12 or
+  newer.
+- **`.rpm`** (Fedora and relatives): `sudo dnf install ./photodedup-*.rpm`.
+  The package asks for Fedora's `webkit2gtk4.1` and `gtk3`. openSUSE names
+  those packages differently, so use the AppImage there.
+- **`.AppImage`** (any distribution with glibc 2.35 or newer): make it
+  executable (`chmod +x photodedup*.AppImage`) and run it. It carries its own
+  libraries. It also needs FUSE 2: where it won't start, install `libfuse2`
+  (Ubuntu 22.04 and later: `sudo apt install libfuse2`) or run it with
+  `--appimage-extract-and-run`.
+
+There is no signing step on Linux. The packages install the bundled ffmpeg
+as `/usr/bin/photodedup-ffmpeg` and `photodedup-ffprobe`, so they never clash
+with your distribution's own `ffmpeg` package.
 
 ## Verifying a download
 

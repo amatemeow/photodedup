@@ -11,6 +11,8 @@ dist/
 # the desktop shell is its own workspace
 /src-tauri/target
 /src-tauri/gen
+/sidecar/photodedup-ffmpeg-*
+/sidecar/photodedup-ffprobe-*
 /sidecar/ffmpeg-*
 /sidecar/ffprobe-*
 

@@ -3,8 +3,10 @@
 #
 # Builds the ffmpeg and ffprobe we ship, from a pinned source tarball, as an
 # LGPL build (no GPL components, nothing non-free, no auto-detected extras),
-# and installs them as sidecar/ffmpeg-<target-triple> / ffprobe-<triple>,
-# the names Tauri's `externalBin` expects.
+# and installs them as sidecar/photodedup-ffmpeg-<target-triple> /
+# photodedup-ffprobe-<triple>, the names Tauri's `externalBin` expects. The
+# photodedup- prefix keeps the packaged files from colliding with a distribution's
+# own ffmpeg: a .deb or .rpm installs sidecars into /usr/bin.
 #
 # Why build rather than download: ffmpeg's licence depends on how it was
 # configured, most prebuilt binaries are GPL builds, and shipping one would
@@ -88,16 +90,16 @@ esac
 
 mkdir -p "$ROOT/sidecar"
 for tool in ffmpeg ffprobe; do
-  cp "$OUT/bin/${tool}${EXE}" "$ROOT/sidecar/${tool}-${TRIPLE}${EXE}"
+  cp "$OUT/bin/${tool}${EXE}" "$ROOT/sidecar/photodedup-${tool}-${TRIPLE}${EXE}"
 done
 
 # The gate: refuse to continue if what we just built is not redistributable.
 if [ -z "${SKIP_GATE:-}" ]; then
   ( cd "$ROOT" && cargo run -q -p photodedup-cli -- check-sidecar \
-      "sidecar/ffmpeg-${TRIPLE}${EXE}" "sidecar/ffprobe-${TRIPLE}${EXE}" )
+      "sidecar/photodedup-ffmpeg-${TRIPLE}${EXE}" "sidecar/photodedup-ffprobe-${TRIPLE}${EXE}" )
 else
   echo "SKIP_GATE set: the licence gate was NOT run. Run it before shipping:"
-  echo "  cargo run -q -p photodedup-cli -- check-sidecar sidecar/ffmpeg-${TRIPLE}${EXE} sidecar/ffprobe-${TRIPLE}${EXE}"
+  echo "  cargo run -q -p photodedup-cli -- check-sidecar sidecar/photodedup-ffmpeg-${TRIPLE}${EXE} sidecar/photodedup-ffprobe-${TRIPLE}${EXE}"
 fi
 
 # The flags as recorded: the same, but without the temporary build path.
@@ -121,4 +123,4 @@ photodedup runs these as separate programs (it never links against them),
 and you can replace them: set PHOTODEDUP_FFMPEG / PHOTODEDUP_FFPROBE to your
 own build, or put one beside the app.
 TXT
-echo "installed sidecar/ffmpeg-${TRIPLE}${EXE} and sidecar/ffprobe-${TRIPLE}${EXE}"
+echo "installed sidecar/photodedup-ffmpeg-${TRIPLE}${EXE} and sidecar/photodedup-ffprobe-${TRIPLE}${EXE}"

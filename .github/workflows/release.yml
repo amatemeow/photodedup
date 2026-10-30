@@ -50,7 +50,7 @@ jobs:
           - os: windows-latest
             bundles: msi
           - os: ubuntu-22.04
-            bundles: appimage
+            bundles: appimage,deb,rpm
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -110,7 +110,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
-          cargo run -q -p photodedup-cli -- check-sidecar "sidecar/ffmpeg-${TRIPLE}.exe" "sidecar/ffprobe-${TRIPLE}.exe"
+          cargo run -q -p photodedup-cli -- check-sidecar "sidecar/photodedup-ffmpeg-${TRIPLE}.exe" "sidecar/photodedup-ffprobe-${TRIPLE}.exe"
           # The DLLs the sidecar needs must all be Windows' own. MinGW's runtime
           # DLLs are named lib*.dll (libwinpthread-1, libgcc_s_seh-1, libstdc++-6)
           # and do not exist on a user's machine, so the sidecar would not start.
@@ -130,7 +130,7 @@ jobs:
       - name: Check the macOS sidecar links only system libraries
         if: runner.os == 'macOS'
         run: |
-          for f in sidecar/ffmpeg-* sidecar/ffprobe-*; do
+          for f in sidecar/photodedup-ffmpeg-* sidecar/photodedup-ffprobe-*; do
             echo "$f"; otool -L "$f" | tail -n +2
             if otool -L "$f" | tail -n +2 | awk '{print $1}' | grep -v -E '^/usr/lib/|^/System/'; then
               echo "::error file=$f::links a library that is not part of macOS"; exit 1
@@ -139,7 +139,7 @@ jobs:
 
       - name: Show the Linux sidecar's shared libraries
         if: runner.os == 'Linux'
-        run: for f in sidecar/ffmpeg-* sidecar/ffprobe-*; do echo "$f"; ldd "$f"; done
+        run: for f in sidecar/photodedup-ffmpeg-* sidecar/photodedup-ffprobe-*; do echo "$f"; ldd "$f"; done
 
       - name: Install cargo-about
         if: ${{ !(runner.os == 'macOS' && runner.arch == 'X64') }}
@@ -170,25 +170,13 @@ jobs:
         run: npx --yes @tauri-apps/cli@2.12.4 build --bundles ${{ matrix.bundles }} --config tauri.release.conf.json
 
       - name: Collect installers and checksums
-        id: collect
         run: |
           mkdir dist
-          find src-tauri/target/release/bundle -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.AppImage' \) -exec cp {} dist/ \;
+          find src-tauri/target/release/bundle -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) -exec cp {} dist/ \;
           cd dist
           ls
           { sha256sum -- * 2>/dev/null || shasum -a 256 -- *; } > "../SHA256SUMS-${{ matrix.os }}.txt"
           mv "../SHA256SUMS-${{ matrix.os }}.txt" .
-          # Each leg must have produced exactly one installer: it is uploaded on
-          # its own below, not zipped together with the checksums.
-          cd ..
-          installers=( dist/*.dmg dist/*.msi dist/*.AppImage )
-          found=()
-          for f in "${installers[@]}"; do [ -f "$f" ] && found+=("$f"); done
-          if [ "${#found[@]}" -ne 1 ]; then
-            echo "::error::expected exactly one installer in dist/, found ${#found[@]}"
-            exit 1
-          fi
-          echo "installer=${found[0]}" >> "$GITHUB_OUTPUT"
 
       # Build attestations are only available for public repositories (or paid
       # organisation plans): on a user-owned private repository the step fails
@@ -203,13 +191,61 @@ jobs:
             dist/*.dmg
             dist/*.msi
             dist/*.AppImage
+            dist/*.deb
+            dist/*.rpm
 
-      # archive: false uploads each file as it is (no zip around it), so the
+      # Linux packages: the sidecars are installed into /usr/bin, so they must
+      # not be called plain ffmpeg/ffprobe (that would collide with the
+      # distribution's own ffmpeg package). Print what each package contains.
+      - name: Check the Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y --no-install-recommends rpm
+          deb=(dist/*.deb); rpmf=(dist/*.rpm)
+          [ -f "${deb[0]}" ] && [ -f "${rpmf[0]}" ] || { echo "::error::the .deb or the .rpm is missing"; exit 1; }
+          dpkg-deb -I "${deb[0]}" | grep -E 'Package|Version|Depends'
+          dpkg-deb -c "${deb[0]}" | grep -E ' \./usr/bin/'
+          rpm -qp --requires "${rpmf[0]}"
+          rpm -qpl "${rpmf[0]}" | grep -E '^/usr/bin/'
+          for list in "$(dpkg-deb --fsys-tarfile "${deb[0]}" | tar -t)" "$(rpm -qpl "${rpmf[0]}")"; do
+            if echo "$list" | grep -E '(^|/)usr/bin/(ffmpeg|ffprobe)$'; then
+              echo "::error::a package installs a bare /usr/bin/ffmpeg or ffprobe"; exit 1
+            fi
+            echo "$list" | grep -q 'usr/bin/photodedup-ffmpeg$' || { echo "::error::photodedup-ffmpeg is not in a package"; exit 1; }
+          done
+
+      # archive: false uploads each file as it is (no zip around it), so an
       # installer can be downloaded and opened directly. It takes one file per
-      # upload and names the artifact after the file.
+      # upload and names the artifact after the file; each step errors if its
+      # file is missing.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: runner.os == 'macOS'
         with:
-          path: ${{ steps.collect.outputs.installer }}
+          path: dist/*.dmg
+          archive: false
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: runner.os == 'Windows'
+        with:
+          path: dist/*.msi
+          archive: false
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: runner.os == 'Linux'
+        with:
+          path: dist/*.AppImage
+          archive: false
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: runner.os == 'Linux'
+        with:
+          path: dist/*.deb
+          archive: false
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: runner.os == 'Linux'
+        with:
+          path: dist/*.rpm
           archive: false
           if-no-files-found: error
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

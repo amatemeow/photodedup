@@ -1,7 +1,7 @@
 # sidecar
 
 The ffmpeg and ffprobe programs that ship inside the app. The binaries
-(`ffmpeg-<target-triple>`, `ffprobe-<target-triple>`) are **built, not
+(`photodedup-ffmpeg-<target-triple>`, `photodedup-ffprobe-<target-triple>`) are **built, not
 committed**: run `scripts/build-sidecar.sh`. It builds a pinned ffmpeg source
 tarball as an LGPL build and refuses to finish if the result isn't
 redistributable (`photodedup check-sidecar`). `SOURCE.txt` records exactly what

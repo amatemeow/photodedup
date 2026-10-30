@@ -815,7 +815,8 @@ spelled out, because several parts could only be partly tested from here.
 - **Bundled ffmpeg, as an LGPL build we make ourselves**
   (`scripts/build-sidecar.sh`): pinned 9.0.2 source, SHA-256 verified,
   `--disable-gpl --disable-nonfree --disable-autodetect`, static; installed as
-  `sidecar/ffmpeg-<triple>` (what Tauri's `externalBin` expects); then
+  `sidecar/photodedup-ffmpeg-<triple>` (what Tauri's `externalBin` expects; the
+  prefix keeps a `.deb`/`.rpm` from installing a bare `/usr/bin/ffmpeg`); then
   `photodedup check-sidecar` refuses anything built with `--enable-gpl` or
   `--enable-nonfree` (it correctly refuses this machine's Homebrew ffmpeg).
   `sidecar/SOURCE.txt` records the exact version, source URL, checksum and

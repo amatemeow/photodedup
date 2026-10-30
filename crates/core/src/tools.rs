@@ -4,6 +4,9 @@
 //! them). A packaged app can't rely on `PATH`, so they are looked for, in
 //! order: an explicit override in the environment, next to the running
 //! executable (where the app bundle puts its sidecar copies), then `PATH`.
+//! Beside the executable the shipped name is `photodedup-ffmpeg`, so a
+//! `.deb`/`.rpm` never installs a bare `/usr/bin/ffmpeg` over a distribution's
+//! own; a plain `ffmpeg` beside the executable is still accepted.
 //!
 //! This module also holds the licence gate for anything we *ship*: a
 //! redistributed ffmpeg must be an LGPL build (no `--enable-gpl`, no
@@ -31,9 +34,11 @@ pub fn resolve_in(name: &str, env_override: Option<PathBuf>, exe_dir: Option<&Pa
         return p.to_string_lossy().into_owned();
     }
     if let Some(dir) = exe_dir {
-        let beside = dir.join(format!("{name}{EXE_SUFFIX}"));
-        if beside.is_file() {
-            return beside.to_string_lossy().into_owned();
+        for file in [format!("photodedup-{name}{EXE_SUFFIX}"), format!("{name}{EXE_SUFFIX}")] {
+            let beside = dir.join(file);
+            if beside.is_file() {
+                return beside.to_string_lossy().into_owned();
+            }
         }
     }
     name.to_string()
@@ -110,6 +115,17 @@ mod tests {
         assert_eq!(resolve_in("ffmpeg", None, Some(dir.path())), beside.to_string_lossy());
         assert_eq!(resolve_in("ffprobe", None, Some(dir.path())), "ffprobe", "nothing beside the app: fall back to PATH");
         assert_eq!(resolve_in("ffmpeg", None, None), "ffmpeg");
+    }
+
+    #[test]
+    fn the_shipped_photodedup_name_beside_the_app_is_preferred_over_a_plain_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join(format!("ffmpeg{EXE_SUFFIX}"));
+        let shipped = dir.path().join(format!("photodedup-ffmpeg{EXE_SUFFIX}"));
+        std::fs::write(&plain, b"x").unwrap();
+        assert_eq!(resolve_in("ffmpeg", None, Some(dir.path())), plain.to_string_lossy());
+        std::fs::write(&shipped, b"x").unwrap();
+        assert_eq!(resolve_in("ffmpeg", None, Some(dir.path())), shipped.to_string_lossy());
     }
 
     #[test]

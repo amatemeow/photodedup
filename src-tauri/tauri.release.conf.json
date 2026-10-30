@@ -1,8 +1,8 @@
 {
   "bundle": {
     "externalBin": [
-      "../sidecar/ffmpeg",
-      "../sidecar/ffprobe"
+      "../sidecar/photodedup-ffmpeg",
+      "../sidecar/photodedup-ffprobe"
     ],
     "resources": {
       "../sidecar/SOURCE.txt": "ffmpeg-SOURCE.txt",
