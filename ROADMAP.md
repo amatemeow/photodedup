@@ -25,6 +25,7 @@ shaped these decisions.
 | **Bad-photo detection** (shots nobody wanted: a finger over the lens, an accidental frame while the phone comes out of a pocket or is being readied, everything blurred, black or washed out) | Needs its own measured evidence first. The one quality number saved today is Laplacian-variance sharpness, which says "softer than its neighbours", not "a bad photo": on its own it cannot tell a deliberate soft or dark shot from an accident, and a wrong "bad" label on a photo someone loves costs more than a missed one. Design notes below | Sharpness is saved per file at scan time and the review already has single-photo groups (orphan videos, kept unless the user says otherwise), a Fine-tune panel, regroup-from-saved-analysis, and plain-language reason wording (`reasonText`). Nothing is auto-decided or deleted |
 | **Large-screen scaling** (on a big display, full screen, the start screen and the controls look small) | Reported by the user on their own big screen; not measured here yet. Today every size is a fixed pixel value tuned for desktop density (type 11 / 12 / 13 / 15 / 22 / 30 px, icons and spacing in px) and the widest size ever audited is 1440 x 900, so on a 27-32 inch display the interface keeps its size and floats in a lot of empty space. Design notes below | The type and spacing sizes are already central tokens in `app.css` (`--fs-*`, `--s*`), and Appearance already has a stored per-user preference (`lib/theme.ts`, `data-theme` on `<html>`) that a size preference can follow |
 | **Choosing what to do with online-only files** (skip them, or ask before a scan downloads them) | Scans read every file they analyse, and reading an online-only cloud file (OneDrive, iCloud) makes the sync client download it first: a Japan-trip folder had 87 online-only videos, 7.5 GB, so the scan waited on the network with the CPU idle. The user chose to keep reading them and show progress ("Downloading 16 of 87 online-only files...", built); skipping them by default, or asking on the start screen with a "Download and scan them" follow-up, was offered and not taken | The scan already detects online-only files and stores `is_placeholder` (only `apply` uses it, to refuse moving one), and the analysis phases already count them for the progress line, so a skip or ask would only need a filter before analysis and a notice in the review |
+| **Resuming an interrupted scan** (if a scan stops for any reason, scanning the same folder again in the same state picks up where it stopped instead of starting over) | A scan is saved once, in a single transaction at the very end (`Store::save_scan`), and a cancelled or failed one saves nothing, so any interruption (Cancel, quit, crash, sleep, power loss, a disconnected drive) throws away everything done so far. That hurts most on a long scan: the Japan trip folder spent most of its time waiting for 7.5 GB of cloud downloads. Needs checkpointing during the analysis phases and a rule for when saved progress is still valid. Design notes below | Per-file results already exist as a map (`Analyzed`, keyed by file); the store already keys files by relative path and carries decisions over on size + mtime; the "continue where you left off" card and the one-live-scan rule already exist |
 
 **Suggested UX for the resume-recognition item above (don't lose this when it gets built):**
 Silently auto-matching on content is a real risk *specifically in a dedup
@@ -122,6 +123,56 @@ WebView2 on Windows), as the quarantined-photo tint bug showed.
 *Open questions for the user:* their display size, resolution and macOS scaling
 setting, and whether content should grow to fill the screen or stay at a
 comfortable maximum width.
+
+**Design notes for resuming an interrupted scan (don't lose this when it gets built):**
+
+*What the user asked for.* However a scan is interrupted, running it again on the
+same path in the same state restores the progress already made and continues from
+there.
+
+*What is expensive, so what to checkpoint.* In order of cost: reading and
+fingerprinting each photo (decode, hashes, sharpness), reading each video (an
+ffprobe, and any cloud download it forces), the exact-copy pass over file bytes,
+and the matching of derived videos against their originals (several ffmpeg frame
+extractions each). The later steps that only combine these results (grouping,
+clustering, classification) are cheap and are simply redone. So persist, as they
+are produced, each file's analysis result, each file's exact hash, and each video
+pair's frame hashes, in small batches (every N files or a few seconds) so that a
+crash loses seconds, not hours.
+
+*Where it lives.* In its own table(s), tied to the folder, not in the live scan:
+the existing rule that the old scan stays intact until a new one fully succeeds
+must still hold, so a half-finished run can never be mistaken for a scan. When a
+scan completes, or the user discards the partial one, the checkpoint is deleted.
+
+*When saved progress is still good ("the same state").* Per file: the same size
+and modification time as when it was analysed (the test carry-over of decisions
+already uses). Per run: the same analysis-affecting settings (whether videos are
+included), the same engine and analysis version, and the same bundled ffmpeg
+(a stamp stored with the checkpoint). Matching thresholds are not part of it,
+since they only act after the analysis, which is what lets Fine-tune regroup
+without re-reading. A file that changed, appeared or disappeared since is simply
+analysed (or dropped) on its own; nothing else is invalidated.
+
+*What the user sees.* The start screen already offers to resume a finished scan;
+an interrupted one gets the same kind of card ("Your last scan of this folder was
+interrupted at 1,240 of 2,718 files. Continue, or start over"), and a continued
+scan's progress says how much was already done. Starting over deletes the
+checkpoint. Open point: whether a deliberate Cancel keeps the checkpoint too
+(the request says "any means", so the default should be yes, with a clear
+"Discard" next to it).
+
+*Shares its machinery with two other items.* A per-file result cache keyed by
+path, size and modification time is exactly what incremental rescan needs, and
+resume-by-content only changes how the folder is recognised. Build the cache once
+and use it for all three.
+
+*How to test it.* The project's habit applies: the result of an interrupted and
+resumed scan must be identical to an uninterrupted one (same groups, same
+reasons), checked on the reference set after killing the process (`kill -9`) at
+several points in each phase, plus a cancel, a changed file, a removed file, a
+changed setting and a changed ffmpeg. Also confirm a resumed scan skips the
+already-downloaded cloud files without touching them again.
 
 ## Resolved during M0 (moved out of "deferred", not into the table above)
 
