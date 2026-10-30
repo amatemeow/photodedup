@@ -54,12 +54,14 @@ impl PlatformScheduler for MacOsScheduler {
     }
 
     fn lower_process_priority(&self) {
-        // SAFETY: setpriority(PRIO_PROCESS, 0, _) is a pure scheduling
-        // hint affecting the calling process ("pid 0" = self). A failure
-        // (e.g. a sandbox denying it) is intentionally ignored.
-        unsafe {
-            libc::setpriority(libc::PRIO_PROCESS, 0, 10);
-        }
+        // Deliberately does nothing on macOS. `setpriority(PRIO_PROCESS)` here
+        // covers the whole process and a process cannot raise its own priority
+        // again, so one Efficient or Default scan left the app, its server and
+        // every later Performance scan at nice 10 for the rest of the session.
+        // The work that needs to be polite is already covered without it: the
+        // worker threads carry a QoS class, and every ffmpeg/ffprobe child gets
+        // its QoS class and a nice value set in `configure_child_process`
+        // (where most of a scan's CPU is spent).
     }
 
     fn configure_child_process(&self, cmd: &mut Command, hint: SchedulingHint) {
@@ -75,12 +77,17 @@ impl PlatformScheduler for MacOsScheduler {
         // SAFETY: `pre_exec` requires the closure be async-signal-safe
         // (no heap allocation, no locks). `pthread_set_qos_class_self_np`
         // is a direct, allocation-free syscall-backed libSystem call, so
-        // this satisfies that constraint. A nonzero return is ignored --
+        // this satisfies that constraint, and so does `setpriority`, a plain
+        // syscall. A nonzero return is ignored --
         // same best-effort contract as every other hint in this impl.
         let qc = qos_class(hint);
         unsafe {
             cmd.pre_exec(move || {
                 libc::pthread_set_qos_class_self_np(qc, 0);
+                // The child alone (pid 0 = itself, before exec), so the
+                // parent's own priority is never touched. Ten is what these
+                // children used to inherit from the lowered parent.
+                libc::setpriority(libc::PRIO_PROCESS, 0, 10);
                 Ok(())
             });
         }
@@ -108,6 +115,15 @@ fn sysctl_u32(name: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lowering_the_process_priority_leaves_the_apps_own_priority_alone() {
+        // SAFETY: getpriority only reads.
+        let before = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
+        MacOsScheduler::new().lower_process_priority();
+        let after = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
+        assert_eq!(before, after, "a scan must not leave the whole app at a lower priority");
+    }
 
     #[test]
     fn efficiency_core_count_matches_sysctl_binary_on_this_machine() {

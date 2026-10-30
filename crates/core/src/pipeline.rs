@@ -164,6 +164,15 @@ pub fn run_with_progress(root: &Path, opts: &PipelineOptions, on_progress: &(dyn
     run_cancellable(root, opts, on_progress, &AtomicBool::new(false)).expect("never cancelled")
 }
 
+/// Whether a scan at this speed lowers the priority of the whole process.
+/// Performance does not: the point of it is full speed, every worker thread and
+/// ffmpeg/ffprobe child inherits the process's priority, and a process cannot
+/// raise its own priority again afterwards. (Before this check a Performance
+/// scan ran at nice 10 like any other, and the app stayed there.)
+fn lowers_process_priority(intensity: ScanIntensity) -> bool {
+    !matches!(intensity, ScanIntensity::Performance)
+}
+
 /// Like `run_with_progress`, but stops early and returns `None` once
 /// `cancel` is set. Cancellation is cooperative: it's checked per file
 /// while analyzing, per derived video during video matching, and
@@ -176,7 +185,9 @@ pub fn run_cancellable(
     on_progress: &(dyn Fn(Progress) + Sync),
     cancel: &AtomicBool,
 ) -> Option<PipelineResult> {
-    lower_process_priority();
+    if lowers_process_priority(opts.intensity) {
+        lower_process_priority();
+    }
     let pool = build_pool(opts.intensity);
     pool.install(|| run_inner(root, opts, on_progress, cancel))
 }
@@ -469,6 +480,13 @@ mod tests {
         let seen = std::sync::Mutex::new(Vec::new());
         run_cancellable(plain.path(), &PipelineOptions::default(), &|p| seen.lock().unwrap().push(p), &AtomicBool::new(false)).unwrap();
         assert!(seen.into_inner().unwrap().iter().all(|p| !matches!(p, Progress::Analyzing { cloud: Some(_), .. })));
+    }
+
+    #[test]
+    fn only_performance_keeps_the_process_at_normal_priority() {
+        assert!(!lowers_process_priority(ScanIntensity::Performance));
+        assert!(lowers_process_priority(ScanIntensity::Default));
+        assert!(lowers_process_priority(ScanIntensity::Efficient));
     }
 
     #[test]
