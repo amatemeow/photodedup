@@ -420,3 +420,28 @@ describe('resetting choices', () => {
     expect(r.decisions['a.jpg']).toBeUndefined();
   });
 });
+
+describe('reasonText', () => {
+  it('words every reason the engine produces, with no identifiers left in them', async () => {
+    for (const code of [
+      'native_vs_derived',
+      'derived_vs_derived_no_surviving_original',
+      'derived_vs_derived_too_far_apart',
+      'native_native_review',
+      'native_native_cross_device',
+      'unknown_provenance_review',
+      'burst_same_camera',
+    ]) {
+      const { reasonText } = await import('./review.svelte');
+      const text = reasonText(code);
+      expect(text, code).not.toMatch(/_|derived|native|provenance/i);
+      expect(text.length).toBeGreaterThan(8);
+    }
+  });
+
+  it('turns a code it does not know into readable words', async () => {
+    const { reasonText } = await import('./review.svelte');
+    expect(reasonText('some_new_reason')).toBe('Some new reason');
+    expect(reasonText('')).toBe('');
+  });
+});

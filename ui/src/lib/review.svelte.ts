@@ -113,7 +113,7 @@ export class Review {
             return {
               id: p.id,
               tab: 'similar',
-              label: p.reason.replaceAll('_', ' '),
+              label: reasonText(p.reason),
               capturedAt: p.captured_at,
               reasons: [],
               members,
@@ -378,6 +378,24 @@ export function formatWhen(s: string | null): string {
   if (!s) return 'No date';
   const d = new Date(s.replace(' ', 'T'));
   return Number.isNaN(d.getTime()) ? s : d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+/** The engine's reason codes, in words a person would use. A code with no entry
+ * here (a newer engine) still reads as words, not as an identifier. */
+const reasonWords: Record<string, string> = {
+  native_vs_derived: 'An original and a copy of it',
+  derived_vs_derived_no_surviving_original: 'Copies of one photo, original gone',
+  derived_vs_derived_too_far_apart: 'Copies that look alike but were saved at different times',
+  native_native_review: 'Look alike, from the same camera',
+  native_native_cross_device: 'Look alike, from different cameras',
+  unknown_provenance_review: 'Look alike, where one came from is unclear',
+  burst_same_camera: 'A quick sequence from one camera',
+};
+export function reasonText(code: string): string {
+  const known = reasonWords[code];
+  if (known) return known;
+  const words = code.replaceAll('_', ' ').trim();
+  return words ? words[0].toUpperCase() + words.slice(1) : '';
 }
 
 export const tierLabel: Record<string, string> = {

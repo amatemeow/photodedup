@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api, type FileDto } from './lib/api';
-  import { formatBytes, formatWhen, type Group, type Review } from './lib/review.svelte';
+  import { formatBytes, formatWhen, reasonText, type Group, type Review } from './lib/review.svelte';
   import Lightbox from './Lightbox.svelte';
   import Icon from './Icon.svelte';
 
@@ -124,7 +124,7 @@
 
     <div class="summary">
       <strong>{formatWhen(group.capturedAt)}</strong>
-      <span class="hint">{group.label}{group.reasons.length ? ` · ${group.reasons.join(', ').replaceAll('_', ' ')}` : ''}</span>
+      <span class="hint">{group.label}{group.reasons.length ? ` · ${[...new Set(group.reasons.map(reasonText))].join(', ')}` : ''}</span>
     </div>
 
     <div class="actions">
