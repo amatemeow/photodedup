@@ -65,12 +65,16 @@ CONFIGURE_FLAGS=(
   --enable-static --disable-shared --enable-pic
 )
 
-# Windows: use native Win32 threads. The default (winpthreads) makes ffmpeg.exe
-# and ffprobe.exe import libwinpthread-1.dll, a MinGW runtime that Windows does
-# not have, so the sidecar would not start on a user's machine. Found by the
-# first CI dry run (the DLL list is printed and checked in release.yml).
+# Windows: ffmpeg.exe and ffprobe.exe must not import libwinpthread-1.dll, a
+# MinGW runtime that Windows does not have (the sidecar would not start on a
+# user's machine). The first CI dry run found it; the DLL list is printed and
+# checked in release.yml. Two parts, and the second dry run showed both are needed:
+#  - native Win32 threads for ffmpeg's own threading;
+#  - a fully static link, because MSYS2's GCC uses the posix thread model and its
+#    runtime (libgcc's thread-local storage and unwinder) pulls winpthreads in
+#    regardless of what ffmpeg itself uses. winpthreads is permissively licensed.
 case "$TRIPLE" in
-  *windows*) CONFIGURE_FLAGS+=(--enable-w32threads --disable-pthreads) ;;
+  *windows*) CONFIGURE_FLAGS+=(--enable-w32threads --disable-pthreads --extra-ldflags=-static) ;;
 esac
 case "$TRIPLE" in
   x86_64-*|i686-*)
