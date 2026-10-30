@@ -57,16 +57,26 @@ pub struct VideoMatch {
 /// vs `mjpeg` made no measurable difference here. Used anyway for
 /// consistency/simplicity with the image path, not as a performance claim.
 pub fn frame_phash(path: &Path, fraction: f64, duration: f64, ffmpeg_bin: &str, hint: Option<SchedulingHint>) -> Option<Hash256> {
+    frame_phash_cancellable(path, fraction, duration, ffmpeg_bin, hint, None)
+}
+
+/// `frame_phash` for a scan: the ffmpeg is killed as soon as `cancelled` turns true.
+pub fn frame_phash_cancellable(
+    path: &Path,
+    fraction: f64,
+    duration: f64,
+    ffmpeg_bin: &str,
+    hint: Option<SchedulingHint>,
+    cancelled: Option<&(dyn Fn() -> bool + Sync)>,
+) -> Option<Hash256> {
     let ts = (duration * fraction).max(0.0);
     let mut command = Command::new(ffmpeg_bin);
     let cmd = command.args(["-ss", &format!("{ts:.2}"), "-i"]).arg(path);
     if let Some(hint) = hint {
         platform().configure_child_process(cmd, hint);
     }
-    let output = cmd
-        .args(["-frames:v", "1", "-f", "image2pipe", "-vcodec", "ppm", "-"])
-        .output()
-        .ok()?;
+    let cmd = cmd.args(["-frames:v", "1", "-f", "image2pipe", "-vcodec", "ppm", "-"]);
+    let output = crate::process::output_cancellable(cmd, cancelled).ok()?;
     if output.stdout.is_empty() {
         return None;
     }
@@ -74,10 +84,10 @@ pub fn frame_phash(path: &Path, fraction: f64, duration: f64, ffmpeg_bin: &str, 
     Some(phash256(&img))
 }
 
-fn frame_sequence(path: &Path, duration: f64, ffmpeg_bin: &str, hint: Option<SchedulingHint>) -> Vec<Option<Hash256>> {
+fn frame_sequence(path: &Path, duration: f64, ffmpeg_bin: &str, hint: Option<SchedulingHint>, cancelled: &(dyn Fn() -> bool + Sync)) -> Vec<Option<Hash256>> {
     FRAME_POINTS
         .iter()
-        .map(|&f| frame_phash(path, f, duration, ffmpeg_bin, hint))
+        .map(|&f| frame_phash_cancellable(path, f, duration, ffmpeg_bin, hint, Some(cancelled)))
         .collect()
 }
 
@@ -139,14 +149,14 @@ pub fn find_video_matches(
             if cancelled() {
                 return None;
             }
-            let result = match_one(dv, &native, ffmpeg_bin, hint);
+            let result = match_one(dv, &native, ffmpeg_bin, hint, cancelled);
             on_progress(done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1, total);
             result
         })
         .collect()
 }
 
-fn match_one(dv: &VideoCandidate, native: &[&VideoCandidate], ffmpeg_bin: &str, hint: Option<SchedulingHint>) -> Option<VideoMatch> {
+fn match_one(dv: &VideoCandidate, native: &[&VideoCandidate], ffmpeg_bin: &str, hint: Option<SchedulingHint>, cancelled: &(dyn Fn() -> bool + Sync)) -> Option<VideoMatch> {
     let duration_candidates: Vec<&&VideoCandidate> = native
         .iter()
         .filter(|nv| (nv.duration_seconds - dv.duration_seconds).abs() <= DURATION_TOLERANCE_SECONDS)
@@ -155,7 +165,7 @@ fn match_one(dv: &VideoCandidate, native: &[&VideoCandidate], ffmpeg_bin: &str, 
         return None;
     }
 
-    let dv_hashes = frame_sequence(&dv.path, dv.duration_seconds, ffmpeg_bin, hint);
+    let dv_hashes = frame_sequence(&dv.path, dv.duration_seconds, ffmpeg_bin, hint, cancelled);
     if dv_hashes.iter().all(|h| h.is_none()) {
         return None;
     }
@@ -163,7 +173,7 @@ fn match_one(dv: &VideoCandidate, native: &[&VideoCandidate], ffmpeg_bin: &str, 
     duration_candidates
         .into_iter()
         .filter_map(|nv| {
-            let nv_hashes = frame_sequence(&nv.path, nv.duration_seconds, ffmpeg_bin, hint);
+            let nv_hashes = frame_sequence(&nv.path, nv.duration_seconds, ffmpeg_bin, hint, cancelled);
             mean_distance(&dv_hashes, &nv_hashes).map(|d| (nv.id, d))
         })
         .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())

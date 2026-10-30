@@ -115,6 +115,17 @@ pub fn extract_image(path: &Path) -> Result<FileMetadata, MetadataError> {
 /// `/SPIKES.md` §2 for the two concrete tag sets this was validated
 /// against.
 pub fn extract_video(path: &Path, ffprobe_bin: &str, hint: Option<SchedulingHint>) -> Result<FileMetadata, MetadataError> {
+    extract_video_cancellable(path, ffprobe_bin, hint, None)
+}
+
+/// `extract_video` for a scan: once `cancelled` turns true the ffprobe is killed
+/// and this returns at once (see `process`), instead of waiting for it.
+pub fn extract_video_cancellable(
+    path: &Path,
+    ffprobe_bin: &str,
+    hint: Option<SchedulingHint>,
+    cancelled: Option<&(dyn Fn() -> bool + Sync)>,
+) -> Result<FileMetadata, MetadataError> {
     let mut command = Command::new(ffprobe_bin);
     let cmd = command.args([
         "-v",
@@ -127,7 +138,7 @@ pub fn extract_video(path: &Path, ffprobe_bin: &str, hint: Option<SchedulingHint
     if let Some(hint) = hint {
         platform().configure_child_process(cmd, hint);
     }
-    let output = cmd.arg(path).output().map_err(MetadataError::FfprobeSpawn)?;
+    let output = crate::process::output_cancellable(cmd.arg(path), cancelled).map_err(MetadataError::FfprobeSpawn)?;
 
     if !output.status.success() {
         return Err(MetadataError::FfprobeStatus(path.display().to_string()));

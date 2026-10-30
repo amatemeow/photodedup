@@ -6,10 +6,10 @@
 use crate::classify::PairClassification;
 use crate::thresholds::Thresholds;
 use crate::grouping::{group, GroupingInput};
-use crate::decode::decode_image;
+use crate::decode::decode_image_cancellable;
 use crate::exacthash::find_exact_duplicates;
 use crate::hash::{phash256, sharpness, Hash256};
-use crate::metadata::{extract_image, extract_video};
+use crate::metadata::{extract_image, extract_video_cancellable};
 use crate::model::{FileId, FileRecord, MediaClassSerde, SiblingSet};
 use crate::provenance::{evaluate, Origin, Provenance};
 use crate::resolve::BurstRun;
@@ -245,7 +245,7 @@ fn run_inner(root: &Path, opts: &PipelineOptions, on_progress: &(dyn Fn(Progress
                     return None;
                 }
                 let rec = file_by_id[&id];
-                let a = analyze_one(rec, opts).map(|a| (id, a));
+                let a = analyze_one(rec, opts, &cancelled).map(|a| (id, a));
                 if rec.is_placeholder {
                     cloud_done.fetch_add(1, Ordering::Relaxed);
                     cloud_bytes_done.fetch_add(rec.size_bytes, Ordering::Relaxed);
@@ -482,6 +482,36 @@ mod tests {
         assert!(seen.into_inner().unwrap().iter().all(|p| !matches!(p, Progress::Analyzing { cloud: Some(_), .. })));
     }
 
+    /// The user's case: reading a video blocks for minutes (an online-only file
+    /// being downloaded), and Cancel did nothing until it finished.
+    #[cfg(unix)]
+    #[test]
+    fn cancel_does_not_wait_for_an_ffprobe_that_is_still_running() {
+        use std::os::unix::fs::PermissionsExt;
+        let tools = tempfile::tempdir().unwrap();
+        let slow = tools.path().join("slow-ffprobe");
+        std::fs::write(&slow, "#!/bin/sh\nsleep 20\n").unwrap();
+        std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let library = tempfile::tempdir().unwrap();
+        for name in ["a.mp4", "b.mp4", "c.mp4"] {
+            std::fs::write(library.path().join(name), b"not really a video").unwrap();
+        }
+        let opts = PipelineOptions { ffprobe_bin: slow.display().to_string(), ..PipelineOptions::default() };
+
+        let cancel = AtomicBool::new(false);
+        let started = std::time::Instant::now();
+        let result = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(700));
+                cancel.store(true, Ordering::Relaxed);
+            });
+            run_cancellable(library.path(), &opts, &|_| {}, &cancel)
+        });
+        assert!(result.is_none(), "a cancelled run has no result");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "cancel took {:?}: it waited for ffprobe", started.elapsed());
+    }
+
     #[test]
     fn only_performance_keeps_the_process_at_normal_priority() {
         assert!(!lowers_process_priority(ScanIntensity::Performance));
@@ -507,13 +537,13 @@ mod tests {
 
 }
 
-fn analyze_one(rec: &FileRecord, opts: &PipelineOptions) -> Option<Analyzed> {
+fn analyze_one(rec: &FileRecord, opts: &PipelineOptions, cancelled: &(dyn Fn() -> bool + Sync)) -> Option<Analyzed> {
     let hint = opts.intensity.scheduling_hint();
     match rec.media_class {
         MediaClassSerde::Image => {
             let meta = extract_image(&rec.path).ok()?;
             let provenance = evaluate(&meta, &rec.file_name);
-            let img = decode_image(&rec.path, &opts.ffmpeg_bin, hint);
+            let img = decode_image_cancellable(&rec.path, &opts.ffmpeg_bin, hint, Some(cancelled));
             let (phash, sharp, w, h) = match &img {
                 Some(img) => (
                     Some(phash256(img)),
@@ -536,7 +566,7 @@ fn analyze_one(rec: &FileRecord, opts: &PipelineOptions) -> Option<Analyzed> {
             })
         }
         MediaClassSerde::Video => {
-            let meta = extract_video(&rec.path, &opts.ffprobe_bin, hint).ok()?;
+            let meta = extract_video_cancellable(&rec.path, &opts.ffprobe_bin, hint, Some(cancelled)).ok()?;
             let provenance = evaluate(&meta, &rec.file_name);
             Some(Analyzed {
                 provenance,

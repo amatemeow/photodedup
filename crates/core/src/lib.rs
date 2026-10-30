@@ -19,6 +19,7 @@ pub mod keeper;
 pub mod metadata;
 pub mod model;
 pub mod pipeline;
+pub mod process;
 pub mod platform;
 pub mod provenance;
 pub mod reference;

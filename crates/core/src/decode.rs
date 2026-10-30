@@ -12,15 +12,26 @@ use std::path::Path;
 use std::process::Command;
 
 pub fn decode_image(path: &Path, ffmpeg_bin: &str, hint: Option<SchedulingHint>) -> Option<DynamicImage> {
+    decode_image_cancellable(path, ffmpeg_bin, hint, None)
+}
+
+/// `decode_image` for a scan: a HEIC decode that is still waiting (say, on a
+/// cloud download) is killed as soon as `cancelled` turns true.
+pub fn decode_image_cancellable(
+    path: &Path,
+    ffmpeg_bin: &str,
+    hint: Option<SchedulingHint>,
+    cancelled: Option<&(dyn Fn() -> bool + Sync)>,
+) -> Option<DynamicImage> {
     let ext = path.extension()?.to_str()?.to_lowercase();
     match ext.as_str() {
         "jpg" | "jpeg" | "png" => image::open(path).ok(),
-        "heic" | "heif" => decode_heic_via_ffmpeg(path, ffmpeg_bin, hint),
+        "heic" | "heif" => decode_heic_via_ffmpeg(path, ffmpeg_bin, hint, cancelled),
         _ => None,
     }
 }
 
-fn decode_heic_via_ffmpeg(path: &Path, ffmpeg_bin: &str, hint: Option<SchedulingHint>) -> Option<DynamicImage> {
+fn decode_heic_via_ffmpeg(path: &Path, ffmpeg_bin: &str, hint: Option<SchedulingHint>, cancelled: Option<&(dyn Fn() -> bool + Sync)>) -> Option<DynamicImage> {
     let mut command = Command::new(ffmpeg_bin);
     // `-threads 1` (an input option, so it goes before `-i`). An iPhone HEIC is
     // a grid of dozens of tiles and ffmpeg opens one decoder per tile, each
@@ -38,16 +49,15 @@ fn decode_heic_via_ffmpeg(path: &Path, ffmpeg_bin: &str, hint: Option<Scheduling
         // on its own -- this is the actual fix, not the Rust-thread hint.
         platform().configure_child_process(cmd, hint);
     }
-    let output = cmd
+    let cmd = cmd
         // Deliberately NO `-map` -- see module docs. Pipe format is `ppm`
         // (raw, uncompressed), not `png`: PNG's DEFLATE compression costs
         // ~1.1s round-trip (ffmpeg encode + Rust decode) on a 12MP source
         // -- all of it wasted, since this is a local pipe where the extra
         // bytes are free and compression CPU is not. Measured >10x faster
         // end to end with `ppm` on the reference dataset.
-        .args(["-f", "image2pipe", "-vcodec", "ppm", "-frames:v", "1", "-"])
-        .output()
-        .ok()?;
+        .args(["-f", "image2pipe", "-vcodec", "ppm", "-frames:v", "1", "-"]);
+    let output = crate::process::output_cancellable(cmd, cancelled).ok()?;
     if output.stdout.is_empty() {
         return None;
     }
