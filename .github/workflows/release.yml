@@ -26,31 +26,52 @@ on:
     tags: ["v*"]
   # A dry run from the Actions tab: builds every installer and keeps them as
   # workflow artifacts, but publishes nothing (the publish job needs a tag).
+  # Private-repository minutes are billed per platform (macOS x10, Windows x2),
+  # so a dry run builds ONE leg unless told otherwise; a tag always builds all.
   workflow_dispatch:
+    inputs:
+      legs:
+        description: "Which installer to build (macos-intel is the most expensive)"
+        type: choice
+        default: linux
+        options: [linux, windows, macos-arm, macos-intel, all]
 
 # Nothing by default; each job asks for exactly what it needs.
 permissions: {}
 
 jobs:
+  # Chooses the build matrix: every leg for a tag, the chosen one for a dry run.
+  plan:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        env:
+          LEGS: ${{ github.event_name == 'workflow_dispatch' && inputs.legs || 'all' }}
+        run: |
+          # Labels checked against GitHub's runner docs on 2026-10-29: macos-14
+          # is retired on 2026-11-02 and macos-13 no longer exists.
+          all='[
+            {"leg":"macos-arm",   "os":"macos-15",       "bundles":"dmg"},
+            {"leg":"macos-intel", "os":"macos-15-intel", "bundles":"dmg"},
+            {"leg":"windows",     "os":"windows-latest", "bundles":"msi"},
+            {"leg":"linux",       "os":"ubuntu-22.04",   "bundles":"appimage,deb,rpm"}
+          ]'
+          if [ "$LEGS" = all ]; then sel="$(jq -c . <<<"$all")"; else sel="$(jq -c --arg l "$LEGS" 'map(select(.leg == $l))' <<<"$all")"; fi
+          [ "$(jq length <<<"$sel")" -gt 0 ] || { echo "::error::no such leg: $LEGS"; exit 1; }
+          echo "matrix={\"include\":$sel}" >> "$GITHUB_OUTPUT"
+          echo "building: $(jq -r 'map(.leg) | join(", ")' <<<"$sel")"
+
   build:
+    needs: plan
     permissions:
       contents: read
       id-token: write       # build attestations
       attestations: write
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          # Labels checked against GitHub's runner docs on 2026-10-29: macos-14
-          # is retired on 2026-11-02 and macos-13 no longer exists.
-          - os: macos-15          # Apple Silicon
-            bundles: dmg
-          - os: macos-15-intel    # Intel
-            bundles: dmg
-          - os: windows-latest
-            bundles: msi
-          - os: ubuntu-22.04
-            bundles: appimage,deb,rpm
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -203,10 +224,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends rpm
           deb=(dist/*.deb); rpmf=(dist/*.rpm)
           [ -f "${deb[0]}" ] && [ -f "${rpmf[0]}" ] || { echo "::error::the .deb or the .rpm is missing"; exit 1; }
-          dpkg-deb -I "${deb[0]}" | grep -E 'Package|Version|Depends'
-          dpkg-deb -c "${deb[0]}" | grep -E ' \./usr/bin/'
-          rpm -qp --requires "${rpmf[0]}"
-          rpm -qpl "${rpmf[0]}" | grep -E '^/usr/bin/'
+          # Printouts only (never fail the step): the checks are the loop below.
+          dpkg-deb -I "${deb[0]}" | grep -E 'Package|Version|Depends' || true
+          dpkg-deb -c "${deb[0]}" | grep 'usr/bin/' || true
+          rpm -qp --requires "${rpmf[0]}" || true
+          rpm -qpl "${rpmf[0]}" | grep '^/usr/bin/' || true
           for list in "$(dpkg-deb --fsys-tarfile "${deb[0]}" | tar -t)" "$(rpm -qpl "${rpmf[0]}")"; do
             if echo "$list" | grep -E '(^|/)usr/bin/(ffmpeg|ffprobe)$'; then
               echo "::error::a package installs a bare /usr/bin/ffmpeg or ffprobe"; exit 1
