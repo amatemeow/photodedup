@@ -156,10 +156,10 @@
           {#if !sharp[m.id] && m.media_class !== 'Video'}<span class="loading" role="status"><span class="spinner"></span> Loading full resolution…</span>{/if}
           {#if i < 9}<kbd class="idx">{i + 1}</kbd>{/if}
           <span class="flags">
-            {#if group.suggested.has(m.id) && !isBurst}<span class="badge overlay accent"><Icon name="check" size={11} /> Suggested</span>{/if}
-            {#if isBurst && group.suggested.has(m.id)}<span class="badge overlay accent"><Icon name="sparkles" size={11} /> Sharpest</span>{/if}
+            {#if group.suggested.has(m.id) && !isBurst}<span class="badge overlay accent icon" role="img" aria-label="Suggested" title="Suggested"><Icon name="check" size={12} /></span>{/if}
+            {#if isBurst && group.suggested.has(m.id)}<span class="badge overlay accent icon" role="img" aria-label="Sharpest" title="Sharpest"><Icon name="sparkles" size={12} /></span>{/if}
           </span>
-          {#if !keep}<span class="dim" aria-hidden="true"></span><span class="veil"><span class="badge overlay warning">Will be quarantined</span></span>{/if}
+          {#if !keep}<span class="dim" aria-hidden="true"></span>{/if}
         </button>
 
         <div class="meta">
@@ -353,11 +353,6 @@
     border-radius: inherit;
     background: rgb(70 70 78 / 0.5);
     pointer-events: none;
-  }
-  .veil {
-    position: absolute;
-    left: var(--s2);
-    bottom: var(--s2);
   }
   .meta {
     display: flex;

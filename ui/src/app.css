@@ -492,6 +492,15 @@ progress::-moz-progress-bar {
   background: var(--accent-soft);
   color: var(--accent-ink);
 }
+/* a badge that is only an icon (its meaning is in aria-label and the tooltip) */
+.badge.icon {
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
+  padding: 0;
+  justify-content: center;
+  border-radius: 50%;
+}
 /* badges that sit on top of a photo need their own backing to stay readable */
 .badge.overlay {
   background: rgb(20 20 22 / 0.72);

@@ -68,11 +68,11 @@
         {/if}
 
         {#if status === 'accepted'}
-          <span class="badge overlay success tl"><Icon name="check" size={11} /> Accepted</span>
+          <span class="badge overlay success icon tl" role="img" aria-label="Accepted" title="Accepted"><Icon name="check" size={12} /></span>
         {:else if status === 'changed'}
-          <span class="badge overlay accent tl"><Icon name="pencil" size={11} /> Edited</span>
+          <span class="badge overlay accent icon tl" role="img" aria-label="Edited" title="Edited"><Icon name="pencil" size={12} /></span>
         {:else if status === 'partial'}
-          <span class="badge overlay warning tl">Partly decided</span>
+          <span class="badge overlay warning icon tl" role="img" aria-label="Partly decided" title="Partly decided"><Icon name="circle" size={12} /></span>
         {/if}
         <span class="badge overlay br">{c.tab === 'burst' ? `${kept} of ${c.members.length} kept` : `${c.members.length} ${c.members.length === 1 ? 'file' : 'files'}`}</span>
       </span>

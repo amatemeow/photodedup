@@ -26,9 +26,6 @@ async function run(scheme, sizeName) {
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.waitForSelector('text=Scan speed');
   await shot('02-options');
-  await page.locator('summary').click();
-  await page.waitForTimeout(200);
-  await shot('03-options-advanced');
   await page.getByRole('button', { name: 'Back' }).click();
 
   await page.fill('#root', lib);

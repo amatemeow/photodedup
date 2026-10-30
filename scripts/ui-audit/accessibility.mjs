@@ -33,8 +33,6 @@ await audit('start');
 await page.getByRole('button', { name: 'Settings' }).click();
 await page.waitForSelector('text=Scan speed');
 await audit('options');
-await page.locator('summary').click();
-await audit('options (advanced open)');
 await page.getByRole('button', { name: 'Back' }).click();
 await page.fill('#root', lib);
 await page.getByRole('button', { name: 'Scan', exact: true }).click();
@@ -42,6 +40,8 @@ await page.waitForSelector('.tile', { timeout: 180000 });
 const tab = (i) => page.locator('.sidebar .item').nth(i);
 const names = ['exact', 'true', 'sequences', 'look-alikes', 'orphans'];
 for (let i = 0; i < 5; i++) { await tab(i).click(); await page.waitForSelector('.tile, .empty'); await audit(`overview: ${names[i]}`); }
+await page.getByRole('button', { name: /fine-tune/i }).click(); await page.waitForSelector('aside.tuning'); await audit('fine-tune panel');
+await page.getByRole('button', { name: /fine-tune/i }).click();
 await tab(1).click();
 await page.locator('.tile').first().click(); await page.waitForSelector('article'); await audit('detail: duplicates');
 await page.keyboard.press('Escape');
