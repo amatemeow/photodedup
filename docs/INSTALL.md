@@ -43,9 +43,11 @@ Three formats are published; pick the one that suits your distribution.
   `sudo apt install ./photodedup_*_amd64.deb`. It needs WebKitGTK 4.1 and
   GTK 3, which apt installs for you; that means Ubuntu 22.04 / Debian 12 or
   newer.
-- **`.rpm`** (Fedora and relatives): `sudo dnf install ./photodedup-*.rpm`.
-  The package asks for Fedora's `webkit2gtk4.1` and `gtk3`. openSUSE names
-  those packages differently, so use the AppImage there.
+- **`.rpm`** (Fedora, openSUSE and relatives):
+  `sudo dnf install ./photodedup-*.rpm` (or `sudo zypper install ./photodedup-*.rpm`).
+  It asks for the GTK 3 and WebKitGTK 4.1 libraries (`libgtk-3.so.0`,
+  `libwebkit2gtk-4.1.so.0`) rather than a package name, so your package
+  manager finds whichever package provides them.
 - **`.AppImage`** (any distribution with glibc 2.35 or newer): make it
   executable (`chmod +x photodedup*.AppImage`) and run it. It carries its own
   libraries. It also needs FUSE 2: where it won't start, install `libfuse2`
