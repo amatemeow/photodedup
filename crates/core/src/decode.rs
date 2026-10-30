@@ -22,7 +22,16 @@ pub fn decode_image(path: &Path, ffmpeg_bin: &str, hint: Option<SchedulingHint>)
 
 fn decode_heic_via_ffmpeg(path: &Path, ffmpeg_bin: &str, hint: Option<SchedulingHint>) -> Option<DynamicImage> {
     let mut command = Command::new(ffmpeg_bin);
-    let cmd = command.arg("-i").arg(path);
+    // `-threads 1` (an input option, so it goes before `-i`). An iPhone HEIC is
+    // a grid of dozens of tiles and ffmpeg opens one decoder per tile, each
+    // with a thread pool sized to the CPU count: ~650 threads for one photo on
+    // a 12-core machine, multiplied by the scan's workers. A still tile has
+    // nothing to parallelise, so the pools bought nothing. Measured on the
+    // reference set: the same pixels (byte-identical output), ~15x fewer
+    // threads, ~15% less CPU, ~17% faster with 4 concurrent decodes. Without
+    // the limit a process-count cap (containers, `ulimit -u`) makes the decode
+    // fail with "Error while opening decoder".
+    let cmd = command.args(["-threads", "1", "-i"]).arg(path);
     if let Some(hint) = hint {
         // See `platform::PlatformScheduler::configure_child_process`'s
         // doc comment: thread-level QoS does NOT reach this child process
