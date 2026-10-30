@@ -22,6 +22,7 @@ shaped these decisions.
 | **More tunable settings** (the video-matching distances: duration tolerance, frame-match distance) | The three image-matching sliders now preview and apply live (see "Live sliders"). Video matching is the one stage that still needs the files: it extracts frames with ffmpeg, so its distances cannot be regrouped from saved data. They would need the per-pair frame distances saved, after which they could join the same mechanism | The thresholds are one `Thresholds` struct with named ranges (`core/src/thresholds.rs`) passed explicitly through the engine, and the `settings` table is a plain key/value store, so another knob is a field, a range and a row in the UI |
 | **Several scans alive at once** (per-folder history, switching between scans, comparing two) | For now exactly one scan is live: saving a new one deletes the previous scan, including its decisions (user's call). Needs a real design decision about when a scan may be discarded, and what a re-scan of the same folder does with the decisions already made on it (carry over by relative path?) | Every database id is a UUID, so nothing in the API assumes there is only one scan. `save_scan` is the single place that deletes the old one (`delete_all_scans`), and decisions are already keyed by relative path rather than file id, so carrying them across a re-scan is additive |
 | **Video-frame decode threads** (`-threads` on the `-ss <t> -i <video>` calls in `video_match.rs` and `thumbnail.rs`) | Not a thread-count problem (about 43 threads, unlike HEIC's ~650), so left at ffmpeg's default. Measured on a 4K HEVC clip, 12 cores: default 0.28 s wall / 1.2 s CPU / 865 MB; `-threads 1` 0.59 s / 0.64 s / 254 MB; `-threads 4` 0.32 s / 0.81 s / 468 MB. A memory-and-CPU-for-speed trade that could follow the Scan speed tier | `frame_phash` and `video_frame_thumbnail` already receive the `SchedulingHint`; a thread count could ride along with it |
+| **Bad-photo detection** (shots nobody wanted: a finger over the lens, an accidental frame while the phone comes out of a pocket or is being readied, everything blurred, black or washed out) | Needs its own measured evidence first. The one quality number saved today is Laplacian-variance sharpness, which says "softer than its neighbours", not "a bad photo": on its own it cannot tell a deliberate soft or dark shot from an accident, and a wrong "bad" label on a photo someone loves costs more than a missed one. Design notes below | Sharpness is saved per file at scan time and the review already has single-photo groups (orphan videos, kept unless the user says otherwise), a Fine-tune panel, regroup-from-saved-analysis, and plain-language reason wording (`reasonText`). Nothing is auto-decided or deleted |
 
 **Suggested UX for the resume-recognition item above (don't lose this when it gets built):**
 Silently auto-matching on content is a real risk *specifically in a dedup
@@ -40,6 +41,56 @@ strongly matches exactly one prior scan. If it matches more than one
 prior scan, or matches none strongly, fall through to a normal fresh
 scan without asking — an ambiguous or weak signal isn't worth surfacing
 as a choice.
+
+**Design notes for bad-photo detection (don't lose this when it gets built):**
+
+*What counts.* The user's own examples: something over the lens (a finger, the
+phone case, a strap), an accidental frame taken while the phone is being got
+ready or put away (pocket, floor, ceiling, motion-smeared, lens covered), and a
+photo that is blurred all over. Natural neighbours: nearly black or blown-out
+frames. Out of scope at first: videos.
+
+*Signals, cheapest first, all computed from the image the scan already decodes.*
+- A **sharpness map**, not one number: the Laplacian variance per tile of a grid.
+  "No tile is sharp" is a blurred photo; "one region sharp, the rest soft" is
+  depth of field, not a defect. This is the main guard against flagging portraits.
+- **Exposure**: the share of pixels clipped to black or white, and very low
+  contrast overall.
+- **Occlusion**: a large smooth, low-texture patch that touches a border or
+  corner, with skin-like or very dark colour.
+- **Time and neighbours**, which we already have: a frame taken seconds before a
+  sequence begins or just after it ends, on the same camera, that looks nothing
+  like the shots around it, and also scores badly above, is far more likely an
+  accident than any one metric says.
+- **EXIF**: a very long exposure or a very high ISO next to a soft frame suggests
+  motion blur (nom-exif already reads it).
+
+*Principles, the same as everywhere else in this project.*
+- **Suggestions only.** A new category (name to be chosen with the user, e.g.
+  "Probably unwanted") of single-photo groups, like orphan videos: kept unless
+  the user says otherwise, never moved by "Accept all" without the usual
+  confirmation, nothing deleted.
+- **Say why, in words**: "Blurred all over", "Something covers part of the lens",
+  "Almost black", through a mapping like `reasonText`. Never show a raw score.
+- **Tunable**: one "how picky" slider in Fine-tune (plus the existing live
+  preview), with the metrics saved at scan time so changing it needs no
+  re-decode. That means new columns and a schema bump: scans saved earlier answer
+  "scan again", as the regroup endpoint already does for old scans.
+- **Measured before shipping**: the user labels a few dozen bad photos and as
+  many ordinary ones from the reference set, thresholds are chosen on contact
+  sheets (the way the sequence-similarity value was), and precision is reported.
+  Known false-positive risks to test: portraits with background blur, night and
+  long-exposure shots, silhouettes, deliberately minimal or high-key photos,
+  screenshots and documents.
+- **Local only.** No cloud or third-party service, ever. A small on-device
+  classifier (for the finger/obstruction case) is a possible later step, but only
+  with a permissive licence, weights shipped in the app, no network, and a
+  measured cost against the Efficient and Default scan tiers; a new runtime such
+  as ONNX or Core ML is a large added dependency, so classical measures come first.
+
+*Open questions for the user:* the category's name and wording; whether a photo
+that is also in a duplicate group shows in both places; the default sensitivity;
+whether videos are ever in scope.
 
 ## Resolved during M0 (moved out of "deferred", not into the table above)
 
