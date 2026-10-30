@@ -21,7 +21,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 pub struct PipelineOptions {
     pub ffmpeg_bin: String,
@@ -80,15 +80,39 @@ pub struct Cluster {
 /// library (decode + hash per file); every other phase is short enough, or
 /// has no natural unit, that "which phase" is all a progress display can
 /// usefully say.
+/// How far the files that exist only in cloud storage have got. Reading one
+/// makes the sync client (OneDrive, iCloud, ...) download it first, which can
+/// take far longer than the reading itself and leaves the CPU idle, so a scan
+/// that has to wait for them says so instead of looking stuck.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct CloudProgress {
+    /// Online-only files finished (downloaded and read) so far, and in all.
+    pub done: usize,
+    pub total: usize,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum Progress {
     Scanning,
     /// Photos read and fingerprinted so far (everything that isn't a
     /// video). Photos go first; videos are a separate phase below.
-    Analyzing { done: usize, total: usize },
+    /// `cloud` is present only when some of them are online-only.
+    Analyzing {
+        done: usize,
+        total: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cloud: Option<CloudProgress>,
+    },
     /// Video metadata read so far (an ffprobe each: cheap next to a photo).
-    AnalyzingVideos { done: usize, total: usize },
+    AnalyzingVideos {
+        done: usize,
+        total: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cloud: Option<CloudProgress>,
+    },
     ExactDuplicates,
     Matching,
     /// Derived videos matched so far -- few units, each slow (a run of
@@ -185,8 +209,22 @@ fn run_inner(root: &Path, opts: &PipelineOptions, on_progress: &(dyn Fn(Progress
         }
         let total = ids.len();
         let done = AtomicUsize::new(0);
+        // The online-only files among them: reading one downloads it first.
+        let (cloud_total, cloud_bytes_total) = ids
+            .iter()
+            .map(|id| file_by_id[id])
+            .filter(|f| f.is_placeholder)
+            .fold((0usize, 0u64), |(n, b), f| (n + 1, b + f.size_bytes));
+        let cloud_done = AtomicUsize::new(0);
+        let cloud_bytes_done = AtomicU64::new(0);
         let report = |done: usize| {
-            on_progress(if are_videos { Progress::AnalyzingVideos { done, total } } else { Progress::Analyzing { done, total } })
+            let cloud = (cloud_total > 0).then(|| CloudProgress {
+                done: cloud_done.load(Ordering::Relaxed),
+                total: cloud_total,
+                bytes_done: cloud_bytes_done.load(Ordering::Relaxed),
+                bytes_total: cloud_bytes_total,
+            });
+            on_progress(if are_videos { Progress::AnalyzingVideos { done, total, cloud } } else { Progress::Analyzing { done, total, cloud } })
         };
         report(0);
         let batch: Vec<(FileId, Analyzed)> = ids
@@ -197,6 +235,10 @@ fn run_inner(root: &Path, opts: &PipelineOptions, on_progress: &(dyn Fn(Progress
                 }
                 let rec = file_by_id[&id];
                 let a = analyze_one(rec, opts).map(|a| (id, a));
+                if rec.is_placeholder {
+                    cloud_done.fetch_add(1, Ordering::Relaxed);
+                    cloud_bytes_done.fetch_add(rec.size_bytes, Ordering::Relaxed);
+                }
                 report(done.fetch_add(1, Ordering::Relaxed) + 1);
                 a
             })
@@ -378,8 +420,8 @@ mod tests {
         let last_photo = seen.iter().rposition(|p| matches!(p, Progress::Analyzing { .. })).unwrap();
         let first_video = seen.iter().position(|p| matches!(p, Progress::AnalyzingVideos { .. })).unwrap();
         assert!(last_photo < first_video, "photos finish before videos start");
-        assert!(seen.contains(&Progress::Analyzing { done: 3, total: 3 }));
-        assert!(seen.contains(&Progress::AnalyzingVideos { done: 2, total: 2 }));
+        assert!(seen.contains(&Progress::Analyzing { done: 3, total: 3, cloud: None }));
+        assert!(seen.contains(&Progress::AnalyzingVideos { done: 2, total: 2, cloud: None }));
     }
 
     #[test]
@@ -396,6 +438,37 @@ mod tests {
         let is_video_phase = |p: &Progress| matches!(p, Progress::AnalyzingVideos { .. } | Progress::Videos { .. });
         assert!(phases(true).iter().any(is_video_phase));
         assert!(!phases(false).iter().any(is_video_phase));
+    }
+
+    /// A sparse file has no allocated blocks, which is how an online-only
+    /// (cloud) file looks to the scan: a stand-in that needs no sync client.
+    #[cfg(unix)]
+    #[test]
+    fn online_only_files_are_counted_in_the_progress_and_ordinary_runs_report_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::File::create(tmp.path().join("cloud.jpg")).unwrap().set_len(100_000).unwrap();
+        if !scan(tmp.path()).files.iter().any(|f| f.is_placeholder) {
+            return; // this filesystem has no sparse files: nothing to stand in for the cloud
+        }
+        std::fs::write(tmp.path().join("local.jpg"), b"x").unwrap();
+
+        let seen = std::sync::Mutex::new(Vec::new());
+        run_cancellable(tmp.path(), &PipelineOptions::default(), &|p| seen.lock().unwrap().push(p), &AtomicBool::new(false)).unwrap();
+        let seen = seen.into_inner().unwrap();
+        let cloud: Vec<CloudProgress> = seen.iter().filter_map(|p| if let Progress::Analyzing { cloud: Some(c), .. } = p { Some(*c) } else { None }).collect();
+
+        assert!(!cloud.is_empty(), "photos that are online-only must be reported");
+        assert!(cloud.iter().all(|c| c.total == 1 && c.bytes_total == 100_000), "{cloud:?}");
+        let last = cloud.last().unwrap();
+        assert_eq!((last.done, last.bytes_done), (1, 100_000), "the one online-only file is finished by the end");
+        assert_eq!(cloud[0].done, 0, "and the count starts at zero");
+
+        // With nothing online-only there is nothing to report.
+        let plain = tempfile::tempdir().unwrap();
+        std::fs::write(plain.path().join("a.jpg"), b"x").unwrap();
+        let seen = std::sync::Mutex::new(Vec::new());
+        run_cancellable(plain.path(), &PipelineOptions::default(), &|p| seen.lock().unwrap().push(p), &AtomicBool::new(false)).unwrap();
+        assert!(seen.into_inner().unwrap().iter().all(|p| !matches!(p, Progress::Analyzing { cloud: Some(_), .. })));
     }
 
     #[test]

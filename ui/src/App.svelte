@@ -4,6 +4,8 @@
   import Options from './Options.svelte';
   import Icon from './Icon.svelte';
   import ConfirmRescan from './ConfirmRescan.svelte';
+  import { cloudLine } from './lib/cloud';
+  import { formatBytes } from './lib/review.svelte';
 
   type View =
     | { kind: 'start' }
@@ -348,6 +350,7 @@
           </div>
           <progress max="100" value={pct ?? undefined} aria-label="Scan progress"></progress>
           <p class="hint">{detail(s) || ' '}</p>
+          {#if s.state === 'running' && cloudLine(s.cloud, formatBytes)}<p class="hint cloud" role="status">{cloudLine(s.cloud, formatBytes)}</p>{/if}
           <ol class="steps">
             {#each shownPhases(view.withVideos) as p, i (p.id)}
               <li class:done={i < current} class:now={i === current}>

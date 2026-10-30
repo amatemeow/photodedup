@@ -27,8 +27,16 @@ const token = loadToken();
 
 export type Phase = 'scanning' | 'analyzing' | 'analyzing_videos' | 'exact_duplicates' | 'matching' | 'videos' | 'clustering';
 
+/** Files that exist only in cloud storage: reading one makes the sync client download it first. */
+export interface CloudProgress {
+  done: number;
+  total: number;
+  bytes_done: number;
+  bytes_total: number;
+}
+
 export type JobStatus =
-  | ({ state: 'running'; phase: Phase } & { done?: number; total?: number })
+  | ({ state: 'running'; phase: Phase } & { done?: number; total?: number; cloud?: CloudProgress })
   | { state: 'done'; scan_id: string }
   | { state: 'cancelled' }
   | { state: 'failed'; message: string };
