@@ -76,6 +76,8 @@ EOF
 
 for c in "${CASES[@]}"; do
   IFS='|' read -r name base family extra <<<"$c"
+  # ONLY="debian12 fedora" runs just those cases.
+  [ -z "${ONLY:-}" ] || [[ " $ONLY " == *" $name "* ]] || continue
   echo "=== $name ($base)"
   ctx="$work/$name"; mkdir -p "$ctx/pkg"
   if [ "$family" = deb ]; then cp "$deb" "$ctx/pkg/package.deb"; else cp "$rpm" "$ctx/pkg/package.rpm"; fi

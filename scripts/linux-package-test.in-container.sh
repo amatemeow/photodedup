@@ -31,16 +31,30 @@ done
 #    see SPIKES.md (multi-stream HEIC) and crates/core/src/decode.rs.
 /usr/bin/photodedup-ffmpeg -version 2>&1 | head -1
 /usr/bin/photodedup-ffprobe -version 2>&1 | head -1
+# The app's own decode invocation (crates/core/src/decode.rs, keep in step):
+# `-threads 1` before `-i`, raw PPM to a pipe, no explicit -map. The thread count
+# is sampled and bounded: without the limit one iPhone HEIC starts ~650 threads
+# (a decoder per tile), which a process-count cap turns into a failed decode.
+MAX_THREADS=150
 n=0
 for h in /samples/*.HEIC /samples/*.heic; do
   [ -f "$h" ] || continue
-  n=$((n + 1)); out=/tmp/out$n.jpg
-  if /usr/bin/photodedup-ffmpeg -v error -y -i "$h" -frames:v 1 "$out" 2>/tmp/ffmpeg.err \
-     && [ "$(head -c 2 "$out" | od -An -tx1 | tr -d ' ')" = ffd8 ]; then
-    pass "HEIC decode: $(basename "$h") -> JPEG, $(wc -c < "$out") bytes"
+  n=$((n + 1)); out=/tmp/out$n.ppm
+  /usr/bin/photodedup-ffmpeg -v error -y -threads 1 -i "$h" -f image2pipe -vcodec ppm -frames:v 1 - >"$out" 2>/tmp/ffmpeg.err &
+  pid=$!; peak=0
+  while kill -0 "$pid" 2>/dev/null; do
+    t=$(awk '/^Threads:/{print $2}' "/proc/$pid/status" 2>/dev/null)
+    [ -n "$t" ] && [ "$t" -gt "$peak" ] && peak=$t
+  done
+  wait "$pid"; rc=$?
+  size=$(wc -c < "$out")
+  if [ "$rc" = 0 ] && [ "$(head -c 2 "$out")" = P6 ] && [ "$size" -gt 1000000 ]; then
+    pass "HEIC decode: $(basename "$h") -> PPM, $size bytes"
   else
-    bad "HEIC decode failed: $(basename "$h"): $(head -3 /tmp/ffmpeg.err)"
+    bad "HEIC decode failed (status $rc): $(basename "$h"): $(head -3 /tmp/ffmpeg.err)"
   fi
+  if [ "$peak" -le "$MAX_THREADS" ]; then pass "  threads while decoding: peak $peak (limit $MAX_THREADS)"
+  else bad "  threads while decoding: peak $peak exceeds $MAX_THREADS"; fi
 done
 [ "$n" -gt 0 ] || bad "no HEIC samples were mounted"
 for v in /samples/*.MP4 /samples/*.mp4 /samples/*.MOV /samples/*.mov; do
