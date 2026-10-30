@@ -170,6 +170,7 @@ jobs:
         run: npx --yes @tauri-apps/cli@2.12.4 build --bundles ${{ matrix.bundles }} --config tauri.release.conf.json
 
       - name: Collect installers and checksums
+        id: collect
         run: |
           mkdir dist
           find src-tauri/target/release/bundle -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.AppImage' \) -exec cp {} dist/ \;
@@ -177,6 +178,17 @@ jobs:
           ls
           { sha256sum -- * 2>/dev/null || shasum -a 256 -- *; } > "../SHA256SUMS-${{ matrix.os }}.txt"
           mv "../SHA256SUMS-${{ matrix.os }}.txt" .
+          # Each leg must have produced exactly one installer: it is uploaded on
+          # its own below, not zipped together with the checksums.
+          cd ..
+          installers=( dist/*.dmg dist/*.msi dist/*.AppImage )
+          found=()
+          for f in "${installers[@]}"; do [ -f "$f" ] && found+=("$f"); done
+          if [ "${#found[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one installer in dist/, found ${#found[@]}"
+            exit 1
+          fi
+          echo "installer=${found[0]}" >> "$GITHUB_OUTPUT"
 
       # Build attestations are only available for public repositories (or paid
       # organisation plans): on a user-owned private repository the step fails
@@ -192,10 +204,18 @@ jobs:
             dist/*.msi
             dist/*.AppImage
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      # archive: false uploads each file as it is (no zip around it), so the
+      # installer can be downloaded and opened directly. It takes one file per
+      # upload and names the artifact after the file.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: installers-${{ matrix.os }}
-          path: dist/*
+          path: ${{ steps.collect.outputs.installer }}
+          archive: false
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: dist/SHA256SUMS-${{ matrix.os }}.txt
+          archive: false
           if-no-files-found: error
 
   publish:
@@ -206,9 +226,9 @@ jobs:
     permissions:
       contents: write         # the only job that can touch the release
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      # Every artifact of this run is an installer or a checksum file.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: installers-*
           merge-multiple: true
           path: dist
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
