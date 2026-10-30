@@ -7,6 +7,7 @@
   import Detail from './Detail.svelte';
   import Apply from './Apply.svelte';
   import Tuning from './Tuning.svelte';
+  import { followGroup } from './lib/follow';
   import Options from './Options.svelte';
   import ConfirmRescan from './ConfirmRescan.svelte';
   import Icon, { type Name } from './Icon.svelte';
@@ -64,8 +65,20 @@
   });
 
   // The matching sliders regrouped the scan: show the new lists, keep the view.
+  // Regrouping gives every group a new id, so a group that is open is followed
+  // by its photos: wherever they ended up (merged, split, another category) is
+  // what stays on screen. If none of them is in a group any more, it closes.
   async function tuned() {
+    const before = current ? { tab: current.tab, fileIds: current.members.map((m) => m.id) } : null;
     await Promise.all([review.load(true), loadInfo()]);
+    if (!before) return;
+    const next = followGroup(before, review.groups);
+    if (next && next.tab !== review.tab) {
+      review.tab = next.tab;
+      review.filter = 'all';
+    }
+    currentId = next?.id ?? null;
+    focusId = next?.id ?? null;
   }
 
   // Where the user is looking decides which large previews are made ahead and

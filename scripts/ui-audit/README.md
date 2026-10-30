@@ -19,7 +19,14 @@ cargo build --release -p photodedup-cli && (cd ui && npm ci && npm run build)
 node scripts/ui-audit/screenshots.mjs  "<url>" <library> <outdir> light wide     # or dark/narrow/medium
 node scripts/ui-audit/accessibility.mjs "<url>" <library> light 1280 800
 node scripts/ui-audit/performance.mjs   "<url>" light            # needs a big scan already in the database
+node scripts/ui-audit/follow-open-group.mjs "<url>" <library>     # exit 0 = a group open in the detail view survives a Fine-tune slider move
 ```
+
+The server serves a `ui/dist` folder on disk in preference to the UI embedded
+in the binary (`PHOTODEDUP_UI_DIR` picks another folder), so rebuild `ui/dist`
+before a check and remember an older binary will show the newer UI. To compare
+with an older UI, build it into another folder (`vite build --outDir`) and
+point `PHOTODEDUP_UI_DIR` at it.
 
 Use a **fresh server and database per run** for the screenshots and the
 accessibility audit: a second run on the same folder meets the "you scanned
