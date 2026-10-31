@@ -199,6 +199,10 @@ pub struct StoredFile {
     pub size_bytes: u64,
     pub mtime_unix: i64,
     pub is_placeholder: bool,
+    /// From the analysis, when the file has one (an exact copy of another file does not):
+    /// the review lays its cards out by shape.
+    pub width: Option<u32>,
+    pub height: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -560,8 +564,8 @@ impl Store {
     pub fn get_file(&self, file_id: &str) -> rusqlite::Result<Option<StoredFile>> {
         self.conn
             .query_row(
-                "SELECT id, relative_path, file_name, media_class, size_bytes, mtime_unix, is_placeholder
-                 FROM files WHERE id = ?1",
+                "SELECT f.id, f.relative_path, f.file_name, f.media_class, f.size_bytes, f.mtime_unix, f.is_placeholder, a.width, a.height
+                 FROM files f LEFT JOIN analysis a ON a.file_id = f.id WHERE f.id = ?1",
                 params![file_id],
                 |row| {
                     Ok(StoredFile {
@@ -572,6 +576,8 @@ impl Store {
                         size_bytes: row.get::<_, i64>(4)? as u64,
                         mtime_unix: row.get(5)?,
                         is_placeholder: row.get::<_, i64>(6)? != 0,
+                        width: row.get::<_, Option<i64>>(7)?.map(|v| v as u32),
+                        height: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
                     })
                 },
             )
@@ -969,8 +975,8 @@ impl Store {
 
     pub fn load_files(&self, scan_id: &str) -> rusqlite::Result<Vec<StoredFile>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, relative_path, file_name, media_class, size_bytes, mtime_unix, is_placeholder
-             FROM files WHERE scan_id = ?1 ORDER BY rowid",
+            "SELECT f.id, f.relative_path, f.file_name, f.media_class, f.size_bytes, f.mtime_unix, f.is_placeholder, a.width, a.height
+             FROM files f LEFT JOIN analysis a ON a.file_id = f.id WHERE f.scan_id = ?1 ORDER BY f.rowid",
         )?;
         let rows = stmt.query_map(params![scan_id], |row| {
             Ok(StoredFile {
@@ -981,6 +987,8 @@ impl Store {
                 size_bytes: row.get::<_, i64>(4)? as u64,
                 mtime_unix: row.get(5)?,
                 is_placeholder: row.get::<_, i64>(6)? != 0,
+                width: row.get::<_, Option<i64>>(7)?.map(|v| v as u32),
+                height: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
             })
         })?;
         rows.collect()

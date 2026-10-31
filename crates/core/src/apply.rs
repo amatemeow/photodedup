@@ -14,6 +14,7 @@
 //!    actually on disk.
 
 use crate::fsguard::{GuardError, Workspace};
+use crate::model::MediaClassSerde;
 use crate::store::{Store, StoredBatch};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -43,6 +44,8 @@ pub struct PlanItem {
     /// A companion (RAW, XMP, the video of a Live Photo) moving with a file
     /// the user marked.
     pub is_sibling: bool,
+    /// So the confirmation can say how many photos and how many videos move.
+    pub media_class: MediaClassSerde,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -57,15 +60,17 @@ pub struct Plan {
     pub items: Vec<PlanItem>,
     pub blocked: Vec<Blocked>,
     pub total_bytes: u64,
+    /// Groups of look-alikes with every member marked: allowed, but worth a warning.
+    pub emptied_groups: usize,
 }
 
 /// What a decision-driven apply would do, without touching anything.
 ///
 /// Only files the user explicitly marked quarantine are candidates;
 /// undecided files and anything marked keep are never planned. Two refusals
-/// protect the user's last copies: a group of look-alikes may not lose every
-/// member (the UI prevents this, but the engine does not trust the UI), and
-/// cloud-only placeholders are left alone.
+/// protect the user's last copies: cloud-only placeholders are left alone,
+/// and a group of look-alikes losing every member is counted so the
+/// confirmation can warn (the user may mean it).
 pub fn plan(store: &Store, scan_id: &str) -> Result<Plan, ApplyError> {
     let scan = store.get_scan(scan_id)?.ok_or(ApplyError::NoSuchScan)?;
     let ws = Workspace::open(Path::new(&scan.root_path))?;
@@ -106,22 +111,11 @@ pub fn plan(store: &Store, scan_id: &str) -> Result<Plan, ApplyError> {
         groups.push(("pair of look-alikes".into(), vec![p.file_a_id, p.file_b_id]));
     }
 
+    // Keeping none of a group is allowed -- the user may want every copy
+    // gone -- and quarantine is undoable, so it is only counted, for the
+    // confirmation to warn about.
+    let emptied_groups = groups.iter().filter(|(_, members)| members.len() >= 2 && members.iter().all(|m| quarantine.contains(m.as_str()))).count();
     let mut blocked: Vec<Blocked> = Vec::new();
-    let mut blocked_ids: HashSet<&str> = HashSet::new();
-    for (kind, members) in &groups {
-        if members.len() >= 2 && members.iter().all(|m| quarantine.contains(m.as_str())) {
-            for m in members {
-                if blocked_ids.insert(m.as_str()) {
-                    if let Some(f) = by_id.get(m.as_str()) {
-                        blocked.push(Blocked {
-                            relative_path: f.relative_path.clone(),
-                            reason: format!("would leave no copy in a {kind}"),
-                        });
-                    }
-                }
-            }
-        }
-    }
 
     let siblings = store.load_siblings(scan_id)?;
     let mut items: Vec<PlanItem> = Vec::new();
@@ -135,11 +129,11 @@ pub fn plan(store: &Store, scan_id: &str) -> Result<Plan, ApplyError> {
         } else if let Err(e) = ws.validate_relative(&f.relative_path) {
             blocked.push(Blocked { relative_path: f.relative_path.clone(), reason: e.to_string() });
         } else {
-            items.push(PlanItem { relative_path: f.relative_path.clone(), size_bytes: f.size_bytes, mtime_unix: f.mtime_unix, is_sibling });
+            items.push(PlanItem { relative_path: f.relative_path.clone(), size_bytes: f.size_bytes, mtime_unix: f.mtime_unix, is_sibling, media_class: f.media_class });
         }
     };
     for f in &files {
-        if !quarantine.contains(f.id.as_str()) || blocked_ids.contains(f.id.as_str()) {
+        if !quarantine.contains(f.id.as_str()) {
             continue;
         }
         add(f, false, &mut items, &mut blocked);
@@ -151,7 +145,7 @@ pub fn plan(store: &Store, scan_id: &str) -> Result<Plan, ApplyError> {
     }
 
     let total_bytes = items.iter().map(|i| i.size_bytes).sum();
-    Ok(Plan { root_path: ws.root().to_string_lossy().into_owned(), items, blocked, total_bytes })
+    Ok(Plan { root_path: ws.root().to_string_lossy().into_owned(), items, blocked, total_bytes, emptied_groups })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -564,20 +558,20 @@ mod tests {
     }
 
     #[test]
-    fn the_engine_refuses_to_quarantine_every_member_of_a_group_even_if_asked() {
+    fn quarantining_every_member_of_a_group_is_allowed_and_counted_for_a_warning() {
         let fx = fixture(&[("a.jpg", BIG), ("b.jpg", SMALL), ("c.jpg", SMALL), ("d.jpg", SMALL)], &[&["a.jpg", "b.jpg"], &["c.jpg", "d.jpg"]], &[]);
-        // a bypassed UI: both members of the first group marked, one of the second
+        // both members of the first group marked, one of the second
         fx.decide("a.jpg", false);
         fx.decide("b.jpg", false);
         fx.decide("d.jpg", false);
 
+        assert_eq!(plan(&fx.store, &fx.scan).unwrap().emptied_groups, 1);
         let r = execute(&fx.store, &fx.scan).unwrap();
-        assert_eq!(r.moved, 1);
-        assert!(fx.exists("a.jpg") && fx.exists("b.jpg"), "the whole group was left alone");
-        assert!(!fx.exists("d.jpg"));
-        let mut names: Vec<_> = r.blocked.iter().map(|b| b.relative_path.as_str()).collect();
-        names.sort();
-        assert_eq!(names, ["a.jpg", "b.jpg"]);
+        assert_eq!(r.moved, 3);
+        assert!(!fx.exists("a.jpg") && !fx.exists("b.jpg") && !fx.exists("d.jpg"));
+        assert!(r.blocked.is_empty());
+        undo(&fx.store, r.batch_id.as_ref().unwrap()).unwrap();
+        assert!(fx.exists("a.jpg") && fx.exists("b.jpg") && fx.exists("d.jpg"), "and it is undoable");
     }
 
     #[test]
@@ -804,12 +798,12 @@ mod tests {
                     _ => {}
                 }
             }
+            let planned_empty = plan(&fx.store, &fx.scan).map(|p| p.emptied_groups).unwrap_or(0);
             match execute(&fx.store, &fx.scan) {
                 Ok(r) => {
-                    // whatever moved, no group lost all its members
-                    for g in &groups {
-                        assert!(g.iter().any(|m| fx.exists(m)) || g.len() < 2, "round {round}: a whole group disappeared");
-                    }
+                    // whatever moved, the plan said how many groups lost every member
+                    let emptied = groups.iter().filter(|g| g.len() >= 2 && !g.iter().any(|m| fx.exists(m))).count();
+                    assert_eq!(emptied, planned_empty, "round {round}");
                     if let Some(id) = r.batch_id {
                         undo(&fx.store, &id).unwrap();
                     }

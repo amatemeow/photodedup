@@ -63,7 +63,9 @@ pub async fn preview(
     AxPath(file_id): AxPath<Uuid>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let size: u32 = params.get("size").and_then(|s| s.parse().ok()).unwrap_or(1600);
+    // The full-screen view asks for a file a browser can't show itself (HEIC, RAW, TIFF) at its
+    // full size, so the bound is high; it only stops a request asking for an absurd one.
+    let size: u32 = params.get("size").and_then(|s| s.parse().ok()).unwrap_or(1600).clamp(256, 16384);
     serve_generated_jpeg(state, file_id, size).await
 }
 

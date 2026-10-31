@@ -82,6 +82,9 @@ pub struct FileDto {
     pub media_class: MediaClassSerde,
     pub size_bytes: u64,
     pub is_placeholder: bool,
+    /// Pixel size when known; the overview shapes its cards by it.
+    pub width: Option<u32>,
+    pub height: Option<u32>,
 }
 
 impl From<&StoredFile> for FileDto {
@@ -93,6 +96,8 @@ impl From<&StoredFile> for FileDto {
             media_class: f.media_class,
             size_bytes: f.size_bytes,
             is_placeholder: f.is_placeholder,
+            width: f.width,
+            height: f.height,
         }
     }
 }
