@@ -23,3 +23,6 @@ dist/
 .mcp.json
 .env
 .env.*
+
+# Additional local dir to work with agents
+.agents
