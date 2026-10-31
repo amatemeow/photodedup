@@ -384,10 +384,10 @@
     display: flex;
     justify-content: flex-end;
     padding: var(--s3) var(--s4);
-    min-height: 54px;
+    min-height: calc(54px * var(--k));
   }
   .column {
-    width: min(520px, 100%);
+    width: min(calc(520px * var(--k)), 100%);
     margin: 0 auto;
     padding: var(--s2) var(--s4) var(--s7);
     display: grid;
@@ -402,8 +402,8 @@
     text-align: center;
   }
   .mark {
-    width: 72px;
-    height: 72px;
+    width: calc(72px * var(--k));
+    height: calc(72px * var(--k));
     filter: drop-shadow(0 6px 14px rgb(0 0 0 / 0.22));
   }
   .display {
@@ -418,8 +418,10 @@
     box-shadow: var(--shadow-sm);
   }
   .resume {
-    grid-template-columns: 1fr auto;
+    display: flex;
+    flex-wrap: wrap;
     align-items: center;
+    justify-content: space-between;
   }
   .resume-actions {
     display: flex;
@@ -431,6 +433,7 @@
     display: grid;
     gap: 2px;
     min-width: 0;
+    flex: 1 1 calc(200px * var(--k));
   }
   .name {
     display: flex;

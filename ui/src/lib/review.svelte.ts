@@ -13,6 +13,23 @@ export type Filter = 'all' | 'undecided' | 'changed';
 export type Tab = 'exact' | 'true' | 'burst' | 'similar' | 'orphans';
 export const tabs: Tab[] = ['exact', 'true', 'burst', 'similar', 'orphans'];
 export type Sort = 'oldest' | 'newest';
+/** Photos and videos are reviewed apart: bulk actions only ever reach the
+ * kind on screen, so a video is never swept in by a click made on photos. */
+export type Media = 'photo' | 'video';
+export const mediaKinds: Media[] = ['photo', 'video'];
+
+/** The three shapes a card takes in the overview, by the shape of its photo. */
+export type Shape = 'portrait' | 'landscape' | 'square';
+export const shapeOfRatio = (r: number): Shape => (r > 1.15 ? 'landscape' : r < 0.87 ? 'portrait' : 'square');
+/** `measured`: shapes read off loaded thumbnails, for files whose size the scan did not record. */
+export function shapeOf(g: Group, measured: Record<string, Shape> = {}): Shape {
+  if (g.tab === 'similar') return 'landscape'; // a pair: two photos side by side
+  const m = g.members.find((f) => f.width && f.height);
+  if (m) return shapeOfRatio(m.width! / m.height!);
+  return g.members.map((f) => measured[f.id]).find(Boolean) ?? 'landscape';
+}
+export const mediaOf = (g: { members: { media_class: string }[] }): Media =>
+  g.members.length > 0 && g.members.every((m) => m.media_class === 'Video') ? 'video' : 'photo';
 
 /** One thing the user decides on: a duplicate cluster, a sequence, a pair
  * of look-alikes or a single orphan video. `suggested` holds the file ids
@@ -45,13 +62,14 @@ interface UndoEntry {
  * burst frame that also has a messenger copy) has one decision, shown in
  * both. The engine's pick is only a suggestion until the user acts on it.
  *
- * Safety rule everywhere a decision is written: no group may be left with
- * nothing kept. Files marked keep are never quarantined by a bulk action. */
+ * A person may keep none of a group (a warning says so); a bulk action never
+ * empties a group on its own, and never quarantines a file marked keep. */
 export class Review {
   groups = $state.raw<Group[]>([]);
   sort = $state<Sort>(loadSort());
   decisions = $state<Record<string, boolean>>({});
   tab = $state<Tab>('true');
+  media = $state<Media>('photo');
   filter = $state<Filter>('all');
   loaded = $state(false);
   error = $state('');
@@ -136,7 +154,10 @@ export class Review {
       ];
       this.decisions = decisions;
       // Open on the first category that has anything to review.
-      if (!keepView) this.tab = tabs.find((t) => this.tabCount(t) > 0) ?? 'true';
+      if (!keepView) {
+        this.media = this.mediaCounts.photo.all > 0 || this.mediaCounts.video.all === 0 ? 'photo' : 'video';
+        this.tab = tabs.find((t) => this.tabCount(t) > 0) ?? 'true';
+      }
       this.loaded = true;
     } catch (e) {
       this.error = e instanceof Error ? e.message : String(e);
@@ -169,7 +190,7 @@ export class Review {
     const dir = this.sort === 'oldest' ? 1 : -1;
     return this.groups
       .filter((g) => {
-        if (g.tab !== this.tab) return false;
+        if (g.tab !== this.tab || mediaOf(g) !== this.media) return false;
         const s = this.statuses.get(g.id);
         if (this.filter === 'undecided') return s === 'undecided' || s === 'partial';
         if (this.filter === 'changed') return s === 'changed';
@@ -194,6 +215,7 @@ export class Review {
   countsByTab = $derived.by(() => {
     const out = Object.fromEntries(tabs.map((t) => [t, { all: 0, undecided: 0, changed: 0, reviewed: 0 }])) as Record<Tab, Counts>;
     for (const g of this.groups) {
+      if (mediaOf(g) !== this.media) continue;
       const c = out[g.tab];
       const s = this.statuses.get(g.id);
       c.all++;
@@ -206,6 +228,22 @@ export class Review {
 
   counts = $derived(this.countsByTab[this.tab]);
 
+  /** Per kind, across all categories: what the Photos / Videos switch shows. */
+  mediaCounts = $derived.by(() => {
+    const out: Record<Media, { all: number; undecided: number; reviewed: number }> = {
+      photo: { all: 0, undecided: 0, reviewed: 0 },
+      video: { all: 0, undecided: 0, reviewed: 0 },
+    };
+    for (const g of this.groups) {
+      const c = out[mediaOf(g)];
+      const s = this.statuses.get(g.id);
+      c.all++;
+      if (s === 'undecided' || s === 'partial') c.undecided++;
+      else c.reviewed++;
+    }
+    return out;
+  });
+
   /** Files the user has marked Quarantine, so far (a rough count: the exact
    * plan, with companions and refusals, comes from the server). */
   markedCount = $derived(Object.values(this.decisions).filter((keep) => keep === false).length);
@@ -214,29 +252,28 @@ export class Review {
     return this.countsByTab[t].all;
   }
 
+  /** True when every member of a group of two or more is marked quarantine. Allowed,
+   * since the user may want all of them gone, but shown as a warning. A lone file
+   * (an orphan video) has no other copy to compare, so it never counts. */
+  keepsNone = (g: Group): boolean => g.members.length > 1 && g.members.every((m) => !this.effective(g, m));
+
+  /** How many groups in view would lose every member: what the Apply confirmation warns about. */
+  emptiedCount = $derived(this.groups.filter((g) => this.keepsNone(g)).length);
+
   /** The first multi-member group containing `path` that would be left with
    * nothing kept if `path` were set to `keep`, ignoring `rows`' other
-   * overrides. */
+   * overrides. Only bulk "accept" uses this: a click on a single file may
+   * leave a group empty, but accepting many suggestions at once never does
+   * it behind the user's back. */
   private leavesNoneKept(path: string, rows: Map<string, boolean>): Group | undefined {
     return (this.groupsByPath.get(path) ?? []).find(
-      // A group of one (an orphan video) has no other copy to keep, so
-      // quarantining it is the user's explicit call, not an accident.
       (g) => g.members.length > 1 && !g.members.some((m) => (m.relative_path === path ? false : (rows.get(m.relative_path) ?? this.effective(g, m)))),
     );
   }
 
-  /** Flips one member between keep and quarantine. Refuses when that would
-   * leave this group, or any other group the file is in, with no kept copy. */
+  /** Flips one member between keep and quarantine. */
   async toggle(g: Group, f: FileDto) {
     const next = !this.effective(g, f);
-    if (!next) {
-      const blocked = this.leavesNoneKept(f.relative_path, new Map());
-      if (blocked) {
-        this.error =
-          blocked === g ? 'Keep at least one copy of each photo.' : `That file is the only kept copy in another group (${blocked.label}).`;
-        return;
-      }
-    }
     await this.commit(g.members.map((m) => ({ path: m.relative_path, keep: m.id === f.id ? next : this.effective(g, m) })));
   }
 
@@ -274,11 +311,13 @@ export class Review {
    * move to quarantine -- shown to the user before they confirm. */
   undecidedPlan() {
     const groups = this.visibleTabGroups().filter((g) => this.statuses.get(g.id) === 'undecided');
-    return { groups, quarantine: this.planAccept(groups).filter((r) => !r.keep && !this.isPathDecided(r.path)).length };
+    const paths = new Set(this.planAccept(groups).filter((r) => !r.keep && !this.isPathDecided(r.path)).map((r) => r.path));
+    const files = groups.flatMap((g) => g.members).filter((m, i, all) => paths.has(m.relative_path) && all.findIndex((o) => o.id === m.id) === i);
+    return { groups, quarantine: files.length, files, bytes: files.reduce((n, f) => n + f.size_bytes, 0) };
   }
 
   private isPathDecided = (path: string) => path in this.decisions;
-  private visibleTabGroups = () => this.groups.filter((g) => g.tab === this.tab);
+  private visibleTabGroups = () => this.groups.filter((g) => g.tab === this.tab && mediaOf(g) === this.media);
 
   async acceptAllUndecided() {
     await this.accept(this.undecidedPlan().groups);
@@ -308,8 +347,12 @@ export class Review {
     }
   }
 
-  /** The groups of one category, or of every category. */
-  groupsOf = (scope: 'tab' | 'all'): Group[] => (scope === 'all' ? this.groups : this.groups.filter((g) => g.tab === this.tab));
+  /** The other kind's groups still waiting, so a bulk action can say they are untouched. */
+  otherWaiting = $derived(this.mediaCounts[this.media === 'photo' ? 'video' : 'photo'].undecided);
+
+  /** The on-screen kind's groups in one category, or in every category. */
+  groupsOf = (scope: 'tab' | 'all'): Group[] =>
+    this.groups.filter((g) => mediaOf(g) === this.media && (scope === 'all' || g.tab === this.tab));
 
   async undo() {
     const entry = this.undoStack.pop();
@@ -418,7 +461,7 @@ export const tabInfo: Record<Tab, { title: string; blurb: string }> = {
   similar: {
     title: 'Same-device review',
     blurb:
-      'Photos that look alike but were taken moments apart. Nothing is suggested for removal: everything is kept unless you choose otherwise. You can dismiss one of a pair, not both.',
+      'Photos that look alike but were taken moments apart. Nothing is suggested for removal: everything is kept unless you choose otherwise. You can dismiss either photo of a pair, or both.',
   },
   orphans: {
     title: 'Orphan videos',

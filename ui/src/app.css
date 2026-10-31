@@ -13,27 +13,37 @@
   --font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI Variable Text', 'Segoe UI', system-ui, Roboto, 'Helvetica Neue', sans-serif;
   --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 
+  /* Everything below scales with --k, which grows with the window (see the
+     media queries after this block), so a big or high-resolution screen
+     does not leave the app looking small. */
+  --k: 1;
+
   /* type scale (macOS body is 13px) */
-  --fs-caption: 11px;
-  --fs-small: 12px;
-  --fs-body: 13px;
-  --fs-lead: 15px;
-  --fs-title: 22px;
-  --fs-display: 30px;
+  --fs-caption: calc(11px * var(--k));
+  --fs-small: calc(12px * var(--k));
+  --fs-body: calc(13px * var(--k));
+  --fs-lead: calc(15px * var(--k));
+  --fs-title: calc(22px * var(--k));
+  --fs-display: calc(30px * var(--k));
 
   /* 4px spacing grid */
-  --s1: 4px;
-  --s2: 8px;
-  --s3: 12px;
-  --s4: 16px;
-  --s5: 24px;
-  --s6: 32px;
-  --s7: 48px;
+  --s1: calc(4px * var(--k));
+  --s2: calc(8px * var(--k));
+  --s3: calc(12px * var(--k));
+  --s4: calc(16px * var(--k));
+  --s5: calc(24px * var(--k));
+  --s6: calc(32px * var(--k));
+  --s7: calc(48px * var(--k));
 
-  --radius-sm: 6px;
-  --radius: 10px;
-  --radius-lg: 14px;
-  --control-h: 30px;
+  --radius-sm: calc(6px * var(--k));
+  --radius: calc(10px * var(--k));
+  --radius-lg: calc(14px * var(--k));
+  --control-h: calc(30px * var(--k));
+  --sidebar-w: calc(248px * var(--k));
+  --panel-w: calc(320px * var(--k));
+  /* the biggest a photo card grows, however wide the window */
+  --card-max: calc(380px * var(--k));
+  --member-max: calc(620px * var(--k));
 
   --ease: cubic-bezier(0.2, 0, 0, 1);
   --t-fast: 120ms;
@@ -64,6 +74,27 @@
   --ring: 0 0 0 3px rgb(10 95 214 / 0.4);
   --scrim: rgb(0 0 0 / 0.32);
   color-scheme: light;
+}
+
+@media (min-width: 1600px) {
+  :root {
+    --k: 1.08;
+  }
+}
+@media (min-width: 2000px) {
+  :root {
+    --k: 1.18;
+  }
+}
+@media (min-width: 2600px) {
+  :root {
+    --k: 1.35;
+  }
+}
+@media (min-width: 3400px) {
+  :root {
+    --k: 1.6;
+  }
 }
 
 /* Dark palette: when the system is dark and the person has not pinned light,
@@ -249,7 +280,7 @@ button.btn {
   background: var(--accent-soft);
 }
 .btn.large {
-  min-height: 40px;
+  min-height: calc(40px * var(--k));
   padding: 0 var(--s5);
   font-size: var(--fs-lead);
   border-radius: 10px;
@@ -259,7 +290,7 @@ button.btn {
   padding: 0;
 }
 .btn.small {
-  min-height: 26px;
+  min-height: calc(26px * var(--k));
   padding: 0 var(--s2);
   font-size: var(--fs-small);
 }
@@ -285,7 +316,7 @@ button.btn {
   border-radius: 9px;
 }
 .seg > button {
-  min-height: 26px;
+  min-height: calc(var(--control-h) - 4px);
   padding: 0 var(--s3);
   border: 0;
   border-radius: 7px;
@@ -316,7 +347,7 @@ button.btn {
 }
 .seg.block > button {
   flex: 1;
-  min-height: 32px;
+  min-height: calc(32px * var(--k));
 }
 /* a decision control: the chosen side takes the meaning's colour */
 .seg > button.keep[aria-pressed='true'] {
@@ -541,7 +572,7 @@ kbd {
   animation: fade var(--t) var(--ease);
 }
 .sheet {
-  width: min(560px, 100%);
+  width: min(calc(560px * var(--k)), 100%);
   max-height: 88vh;
   overflow: auto;
   padding: var(--s5);
@@ -551,7 +582,7 @@ kbd {
   animation: pop var(--t) var(--ease);
 }
 .sheet.wide {
-  width: min(720px, 100%);
+  width: min(calc(720px * var(--k)), 100%);
 }
 @keyframes fade {
   from {

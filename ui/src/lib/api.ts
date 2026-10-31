@@ -53,6 +53,9 @@ export interface FileDto {
   media_class: 'Image' | 'Video' | string;
   size_bytes: number;
   is_placeholder: boolean;
+  /** Pixel size when known (an exact copy of another file has none). */
+  width?: number | null;
+  height?: number | null;
 }
 
 export interface Cluster {
@@ -109,6 +112,7 @@ export interface PlanItem {
   relative_path: string;
   size_bytes: number;
   is_sibling: boolean;
+  media_class: 'Raw' | 'Image' | 'Video' | 'Sidecar';
 }
 export interface Blocked {
   relative_path: string;
@@ -119,6 +123,8 @@ export interface Plan {
   items: PlanItem[];
   blocked: Blocked[];
   total_bytes: number;
+  /** Groups of look-alikes with every member marked: allowed, but warned about. */
+  emptied_groups: number;
 }
 export interface Skipped {
   relative_path: string;
@@ -271,12 +277,12 @@ export const api = {
   undoBatch: (batchId: string) => call<UndoResult>(`/api/batches/${batchId}/undo`, { method: 'POST' }),
 
   /** For `<img>`/`<video>` `src`, which can't send an Authorization header.
-   * Grid thumbnails ask for `THUMB_SIZE`: tiles are 220+ CSS px wide and cropped to
-   * fill (`object-fit: cover`), so a portrait photo needs about 700-800 px on its long
-   * edge to stay sharp on a retina screen. One size everywhere, so the grid and the
-   * detail view's placeholder share a cache entry. */
-  fileUrl: (fileId: string, kind: 'thumb' | 'preview' | 'original') =>
-    `/files/${fileId}/${kind}?token=${encodeURIComponent(token)}${kind === 'thumb' ? `&size=${THUMB_SIZE}` : ''}`,
+   * Grid thumbnails ask for `THUMB_SIZE`: tiles are 220+ CSS px wide, so a portrait
+   * photo needs about 700-800 px on its long edge to stay sharp on a retina screen.
+   * One size everywhere, so the grid and the detail view's placeholder share a cache
+   * entry. A preview takes an optional `size` (long edge, px) for the full-screen view. */
+  fileUrl: (fileId: string, kind: 'thumb' | 'preview' | 'original', size?: number) =>
+    `/files/${fileId}/${kind}?token=${encodeURIComponent(token)}${kind === 'thumb' ? `&size=${THUMB_SIZE}` : size ? `&size=${size}` : ''}`,
 
   /** Streams a job's status. EventSource can't send headers, hence the
    * query token. Returns a function that closes the stream. */

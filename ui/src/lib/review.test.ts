@@ -142,7 +142,7 @@ describe('look-alikes and orphan videos are decided too, with everything kept by
     expect(r.statuses.get('p1')).toBe('accepted');
   });
 
-  it('lets the user dismiss one photo of a pair but never both', async () => {
+  it('lets the user dismiss one photo of a pair, or both', async () => {
     server.clusters = [];
     server.pairs = [pair('p1', 'T2NativeReview', A, B)];
     const r = await loaded();
@@ -151,8 +151,9 @@ describe('look-alikes and orphan videos are decided too, with everything kept by
     expect(server.decisions).toEqual({ 'a.jpg': true, 'b.jpg': false });
     expect(r.statuses.get('p1')).toBe('changed');
     await r.toggle(g, A);
-    expect(r.error).toMatch(/at least one/i);
-    expect(server.decisions).toEqual({ 'a.jpg': true, 'b.jpg': false });
+    expect(r.error).toBe('');
+    expect(server.decisions).toEqual({ 'a.jpg': false, 'b.jpg': false });
+    expect(r.keepsNone(g)).toBe(true);
   });
 
   it('lets the user dismiss a lone orphan video, since it has no other copy to keep', async () => {
@@ -247,28 +248,28 @@ describe('deciding', () => {
     expect(r.countsByTab.true.changed).toBe(1);
   });
 
-  it('never leaves a group with nothing kept', async () => {
+  it('lets the user keep none of a group, and says so', async () => {
     const r = await loaded();
-    await r.toggle(group(r, 'c2'), D); // D is the only kept member
-    expect(r.error).toMatch(/at least one/i);
-    expect(server.decisions).toEqual({});
+    await r.toggle(group(r, 'c2'), D); // D was the only kept member
+    expect(r.error).toBe('');
+    expect(server.decisions['d.jpg']).toBe(false);
+    expect(r.keepsNone(group(r, 'c2'))).toBe(true);
+    expect(r.emptiedCount).toBe(1);
+    await r.toggle(group(r, 'c2'), D);
+    expect(r.keepsNone(group(r, 'c2'))).toBe(false);
   });
 
-  it('refuses to quarantine a file that is the only kept copy in a different group', async () => {
-    // x is in both clusters; in cB it is the suggested keeper (z is not).
+  it('quarantining a file that is the only kept copy in another group is allowed too', async () => {
     const x = file('fx', 'x.jpg');
     const y = file('fy', 'y.jpg');
     const z = file('fz', 'z.jpg');
     server.clusters = [cluster('cA', 'T1', 'fy', [x, y]), cluster('cB', 'T1', 'fx', [x, z])];
     const r = await loaded();
-
-    await r.toggle(group(r, 'cA'), x); // keep x in cA as well: fine
+    await r.toggle(group(r, 'cA'), x); // keep x in cA as well
+    await r.toggle(group(r, 'cA'), x); // quarantine x: cB now keeps nothing, and that is the user's call
     expect(r.error).toBe('');
-    const before = { ...server.decisions };
-
-    await r.toggle(group(r, 'cA'), x); // quarantine x: cA still has y, but cB would have nothing
-    expect(r.error).toMatch(/only kept copy in another group/i);
-    expect(server.decisions).toEqual(before);
+    expect(server.decisions['x.jpg']).toBe(false);
+    expect(r.keepsNone(group(r, 'cB'))).toBe(true); // x was cB's keeper and z is suggested for quarantine
   });
 
   it('bulk accept never quarantines a file that another group still needs', async () => {
@@ -305,6 +306,25 @@ describe('deciding', () => {
     expect(r.undecidedPlan().quarantine).toBe(2); // b.jpg, c.jpg
     r.tab = 'exact';
     expect(r.undecidedPlan().quarantine).toBe(1); // e.jpg
+  });
+
+  it('photos and videos are reviewed apart: accept-all never reaches the other kind', async () => {
+    const V1 = { ...file('v1', 'orig.mp4'), media_class: 'Video' };
+    const V2 = { ...file('v2', 'copy.mp4'), media_class: 'Video' };
+    server.clusters = [...server.clusters, { id: 'vc', tier: 'T1', keeper_file_id: 'v1', captured_at: null, reasons: [], members: [V1, V2] }];
+    const r = await loaded();
+    r.tab = 'true';
+    r.media = 'photo';
+    const photos = r.undecidedPlan();
+    expect(photos.files.map((f) => f.relative_path)).not.toContain('copy.mp4');
+    expect(r.otherWaiting).toBe(1);
+    await r.acceptAllUndecided();
+    expect(server.decisions['copy.mp4']).toBeUndefined();
+
+    r.media = 'video';
+    const videos = r.undecidedPlan();
+    expect(videos.files.map((f) => f.relative_path)).toEqual(['copy.mp4']);
+    expect(r.visible.map((g) => g.id)).toEqual(['vc']);
   });
 
   it('accept-all only touches groups nobody has decided yet', async () => {
@@ -443,5 +463,25 @@ describe('reasonText', () => {
     const { reasonText } = await import('./review.svelte');
     expect(reasonText('some_new_reason')).toBe('Some new reason');
     expect(reasonText('')).toBe('');
+  });
+});
+
+describe('card shapes', () => {
+  const g = (members: FileDto[], tab: 'exact' | 'similar' = 'exact') => ({ id: 'g', tab, label: '', capturedAt: null, reasons: [], members, suggested: new Set<string>(), sharpness: {} });
+  const sized = (w: number, h: number): FileDto => ({ ...file('s', 's.jpg'), width: w, height: h });
+
+  it('is portrait, landscape or square by the photo, with a pair always landscape', async () => {
+    const { shapeOf } = await import('./review.svelte');
+    expect(shapeOf(g([sized(3000, 4000)]))).toBe('portrait');
+    expect(shapeOf(g([sized(4000, 3000)]))).toBe('landscape');
+    expect(shapeOf(g([sized(3000, 3100)]))).toBe('square');
+    expect(shapeOf(g([sized(3000, 4000), sized(3000, 4000)], 'similar'))).toBe('landscape');
+  });
+
+  it('uses a measured thumbnail when the scan recorded no size, and landscape when nothing is known', async () => {
+    const { shapeOf } = await import('./review.svelte');
+    const a = file('fa', 'a.jpg');
+    expect(shapeOf(g([a]))).toBe('landscape');
+    expect(shapeOf(g([a]), { fa: 'portrait' })).toBe('portrait');
   });
 });

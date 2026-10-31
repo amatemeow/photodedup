@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api, type FileDto } from './lib/api';
-  import { formatBytes, formatWhen, reasonText, type Group, type Review } from './lib/review.svelte';
+  import { formatBytes, formatWhen, reasonText, tabInfo, type Group, type Review } from './lib/review.svelte';
   import Lightbox from './Lightbox.svelte';
   import Icon from './Icon.svelte';
 
@@ -45,6 +45,7 @@
   const sharpest = $derived(Math.max(0, ...Object.values(group.sharpness)));
   const undoKey = /Mac|iPhone|iPad/i.test(navigator.userAgent) ? '⌘Z' : 'Ctrl+Z';
   const undecided = $derived(status === 'undecided' || status === 'partial');
+  const keepsNone = $derived(review.keepsNone(group));
   const keepsAll = $derived(group.tab === 'similar' || group.tab === 'orphans');
   const primaryLabel = $derived(!undecided ? 'Next' : isBurst ? 'Keep suggested only' : keepsAll ? 'Keep all' : 'Accept suggestion');
 
@@ -101,6 +102,19 @@
     (e.currentTarget as HTMLImageElement).classList.add('in');
     sharp[id] = true;
   };
+  // A preview that fails to arrive is asked for once more, then given up on with a plain
+  // message, so a photo never sits under "Loading full resolution…" for good.
+  let unavailable = $state<Record<string, boolean>>({});
+  const retried = new Set<string>();
+  const failed = (m: FileDto) => (e: Event) => {
+    const img = e.currentTarget as HTMLImageElement;
+    if (retried.has(m.id)) {
+      unavailable[m.id] = true;
+      return;
+    }
+    retried.add(m.id);
+    setTimeout(() => (img.src = `${api.fileUrl(m.id, 'preview')}&retry=1`), 1500);
+  };
   const ready = (node: HTMLImageElement, id: string) => {
     if (node.complete && node.naturalWidth) {
       node.classList.add('in');
@@ -139,21 +153,31 @@
       >
         Reset
       </button>
-      <button class="btn primary" onclick={onAccept} title="{primaryLabel} and continue (Enter)">{primaryLabel} <kbd class="on-accent">⏎</kbd></button>
+      <button class="btn primary" onclick={onAccept} title="{primaryLabel} and continue (Enter)">{primaryLabel}</button>
     </div>
   </div>
+
+  {#if keepsNone}
+    <p class="notice warning none-kept" role="status">
+      <Icon name="info" size={16} />
+      <span><strong>Nothing is kept in this group.</strong> {group.members.length === 1 ? 'This file' : 'All ' + group.members.length + ' files'} will be moved to quarantine when you apply. Choose Keep on one to change that.</span>
+    </p>
+  {/if}
 
   <div class="members" style="--n:{group.members.length}">
     {#each group.members as m, i (m.id)}
       {@const keep = review.effective(group, m)}
       <article class:aside={!keep} class:active={active === i}>
         <button class="photo" onclick={() => { active = i; previewing = i; }}  title="Large preview (Space)">
-          <span class="backdrop" style="background-image:url({api.fileUrl(m.id, 'thumb')})" aria-hidden="true"></span>
           <!-- the small thumbnail is already cached (the overview used it), so the view opens at once;
                the sharp preview fades in over it when it arrives -->
           <img class="low" src={api.fileUrl(m.id, 'thumb')} alt="" decoding="async" aria-hidden="true" />
-          <img class="high" src={api.fileUrl(m.id, 'preview')} alt={m.file_name} decoding="async" onload={loaded(m.id)} use:ready={m.id} />
-          {#if !sharp[m.id] && m.media_class !== 'Video'}<span class="loading" role="status"><span class="spinner"></span> Loading full resolution…</span>{/if}
+          <img class="high" src={api.fileUrl(m.id, 'preview')} alt={m.file_name} decoding="async" onload={loaded(m.id)} onerror={failed(m)} use:ready={m.id} />
+          {#if unavailable[m.id]}
+            <span class="loading" role="status">Full-size preview unavailable</span>
+          {:else if !sharp[m.id] && m.media_class !== 'Video'}
+            <span class="loading" role="status"><span class="spinner"></span> Loading full resolution…</span>
+          {/if}
           {#if i < 9}<kbd class="idx">{i + 1}</kbd>{/if}
           <span class="flags">
             {#if group.suggested.has(m.id) && !isBurst}<span class="badge overlay accent icon" role="img" aria-label="Suggested" title="Suggested"><Icon name="check" size={12} /></span>{/if}
@@ -177,8 +201,8 @@
             {/if}
           </div>
           <div class="seg decide" role="group" aria-label="Decision for {m.file_name}">
-            <button class="keep" aria-pressed={keep} aria-label="Keep" title="Keep" onclick={(e) => choose(i, true, e)}><Icon name="check" size={16} /></button>
-            <button class="aside" aria-pressed={!keep} aria-label="Quarantine" title="Quarantine (moved aside, never deleted)" onclick={(e) => choose(i, false, e)}><Icon name="archive" size={16} /></button>
+            <button class="keep" aria-pressed={keep} aria-label="Keep" title="Keep" onclick={(e) => choose(i, true, e)}><Icon name="check" size={22} /></button>
+            <button class="aside" aria-pressed={!keep} aria-label="Quarantine" title="Quarantine (moved aside, never deleted)" onclick={(e) => choose(i, false, e)}><Icon name="archive" size={22} /></button>
           </div>
         </div>
       </article>
@@ -192,7 +216,12 @@
 </section>
 
 {#if previewing !== null}
-  <Lightbox files={group.members} index={previewing} onIndex={(i) => ((previewing = i), (active = i))} onClose={() => (previewing = null)} />
+  <Lightbox
+    files={group.members}
+    index={previewing}
+    context="Group {position} of {total} · {tabInfo[group.tab].title}" onIndex={(i) => ((previewing = i), (active = i))}
+    onClose={() => (previewing = null)}
+  />
 {/if}
 
 <style>
@@ -243,15 +272,25 @@
     white-space: nowrap;
     max-width: 100%;
   }
-  .on-accent {
-    background: rgb(255 255 255 / 0.22);
-    color: inherit;
-    box-shadow: none;
+  /* every control in the bar is the same height, whatever is inside it */
+  .bar .btn,
+  .bar .seg {
+    height: var(--control-h);
+    box-sizing: border-box;
+  }
+  .actions .btn {
+    min-width: calc(76px * var(--k));
+  }
+  .bar .seg > button {
+    height: 100%;
+    min-height: 0;
   }
 
   .members {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+    /* cards grow with the window up to a limit, then stay that size and centre */
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, calc(280px * var(--k))), var(--member-max)));
+    justify-content: center;
     gap: var(--s4);
     align-items: start;
   }
@@ -269,32 +308,24 @@
   }
   .photo {
     position: relative;
-    display: grid;
-    place-items: center;
-    height: clamp(240px, 46vh, 520px);
+    display: block;
+    height: clamp(240px, 46vh, calc(520px * var(--k)));
     padding: 0;
     border: 0;
     border-radius: var(--radius);
     overflow: hidden;
-    background: var(--surface-2);
+    /* the photo keeps its proportions; what it does not cover stays black */
+    background: #000;
     cursor: zoom-in;
   }
-  /* the photo's own colours, blurred, fill the space around it instead of grey bars */
-  .backdrop {
-    position: absolute;
-    inset: -20px;
-    background-size: cover;
-    background-position: center;
-    filter: blur(26px) saturate(1.2) brightness(0.88);
-    opacity: 0.9;
-  }
+  /* drawn against the card itself, not a grid track, so no engine can size them by the
+     photo's own pixels (that cropped them) or by a percentage it fails to resolve (no photo) */
   .photo img {
-    grid-area: 1 / 1;
-    position: relative;
+    position: absolute;
+    inset: 0;
     width: 100%;
     height: 100%;
     object-fit: contain;
-    filter: drop-shadow(0 4px 14px rgb(0 0 0 / 0.35));
   }
   /* the placeholder is always there; the sharp one fades in on top of it */
   .photo img.high {
@@ -377,8 +408,8 @@
   .decide > button {
     display: grid;
     place-items: center;
-    width: 34px;
-    min-height: 28px;
+    width: calc(52px * var(--k));
+    min-height: calc(40px * var(--k));
     padding: 0;
     border-radius: 999px;
     color: var(--label-3);
@@ -422,6 +453,12 @@
     min-width: 2px;
     background: var(--accent);
     border-radius: 2px;
+  }
+  .none-kept {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    margin: 0;
   }
   .foot {
     display: flex;

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from './lib/api';
-  import { formatWhen, type Review } from './lib/review.svelte';
+  import { formatWhen, shapeOf, shapeOfRatio, type Review, type Shape } from './lib/review.svelte';
   import Icon from './Icon.svelte';
 
   let {
@@ -40,9 +40,21 @@
   }
 
   // A photo fades in once it has loaded, so the grid never flashes empty boxes.
-  const loaded = (e: Event) => (e.currentTarget as HTMLImageElement).classList.add('in');
-  const ready = (node: HTMLImageElement) => {
-    if (node.complete) node.classList.add('in');
+  // Where a file's size was not recorded, its card takes its shape from the thumbnail once that arrives.
+  let measured = $state<Record<string, Shape>>({});
+  const measure = (id: string, img: HTMLImageElement) => {
+    if (img.naturalWidth && img.naturalHeight && !measured[id]) measured[id] = shapeOfRatio(img.naturalWidth / img.naturalHeight);
+  };
+  const loaded = (id: string) => (e: Event) => {
+    const img = e.currentTarget as HTMLImageElement;
+    img.classList.add('in');
+    measure(id, img);
+  };
+  const ready = (node: HTMLImageElement, id: string) => {
+    if (node.complete) {
+      node.classList.add('in');
+      measure(id, node);
+    }
   };
 </script>
 
@@ -53,7 +65,7 @@
     {@const shown = c.members.find((m) => review.effective(c, m)) ?? c.members[0]}
     {@const kept = c.members.filter((m) => review.effective(c, m)).length}
     <button
-      class="tile {status}"
+      class="tile {status} {shapeOf(c, measured)}"
       data-id={c.id}
       onclick={() => onOpen(c.id)}
       onfocus={() => onFocus(c.id)}
@@ -61,13 +73,15 @@
       <span class="thumb" class:pair={c.tab === 'similar'}>
         {#if c.tab === 'similar'}
           {#each c.members as m (m.id)}
-            <img src={api.fileUrl(m.id, 'thumb')} alt="" loading="lazy" decoding="async" onload={loaded} use:ready />
+            <img src={api.fileUrl(m.id, 'thumb')} alt="" loading="lazy" decoding="async" onload={loaded(m.id)} use:ready={m.id} />
           {/each}
         {:else}
-          <img src={api.fileUrl(shown.id, 'thumb')} alt="" loading="lazy" decoding="async" onload={loaded} use:ready />
+          <img src={api.fileUrl(shown.id, 'thumb')} alt="" loading="lazy" decoding="async" onload={loaded(shown.id)} use:ready={shown.id} />
         {/if}
 
-        {#if status === 'accepted'}
+        {#if review.keepsNone(c)}
+          <span class="badge overlay warning icon tl" role="img" aria-label="Nothing kept" title="Nothing kept: every file here is marked for quarantine"><Icon name="info" size={12} /></span>
+        {:else if status === 'accepted'}
           <span class="badge overlay success icon tl" role="img" aria-label="Accepted" title="Accepted"><Icon name="check" size={12} /></span>
         {:else if status === 'changed'}
           <span class="badge overlay accent icon tl" role="img" aria-label="Edited" title="Edited"><Icon name="pencil" size={12} /></span>
@@ -85,32 +99,53 @@
 </div>
 
 <style>
+  /* Cards come in three shapes -- portrait, landscape, square -- set by the photo, and are
+     packed into columns of one width. Rows are a fine unit, and a card spans as many as its
+     shape needs (see .tile), so the grid has no holes. */
   .grid {
+    --col: calc(250px * var(--k));
+    --unit: calc(var(--col) / 16);
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-    gap: var(--s4);
+    grid-template-columns: repeat(auto-fill, var(--col));
+    grid-auto-rows: var(--unit);
+    grid-auto-flow: row dense;
+    column-gap: var(--s4);
+    row-gap: 0;
   }
   .tile {
     display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
     gap: var(--s2);
-    padding: 0;
+    padding: 0 0 var(--s4);
     border: 0;
     background: transparent;
     color: inherit;
     text-align: left;
     cursor: pointer;
     border-radius: var(--radius);
+    grid-row: span 16;
     /* long libraries stay fast: off-screen tiles are not laid out or painted */
     content-visibility: auto;
-    contain-intrinsic-size: 220px 250px;
+    contain-intrinsic-size: var(--col) calc(var(--unit) * 16);
+  }
+  /* picture (4:3, 1:1 or 3:4 of the column) + the date lines + the gap below */
+  .tile.landscape {
+    grid-row: span 16;
+  }
+  .tile.square {
+    grid-row: span 20;
+  }
+  .tile.portrait {
+    grid-row: span 26;
   }
   .thumb {
     position: relative;
     display: block;
-    aspect-ratio: 4 / 3;
+    min-height: 0;
     overflow: hidden;
     border-radius: var(--radius);
-    background: var(--surface-2);
+    /* the photo keeps its proportions; what it does not cover stays black */
+    background: #000;
     box-shadow: var(--shadow-sm);
     transition: transform var(--t) var(--ease), box-shadow var(--t) var(--ease);
   }
@@ -132,7 +167,7 @@
   img {
     width: 100%;
     height: 100%;
-    object-fit: cover;
+    object-fit: contain;
     display: block;
     opacity: 0;
     transition: opacity 0.25s var(--ease);

@@ -9,6 +9,7 @@
   type Phase = 'loading' | 'preview' | 'applying' | 'done';
   let phase = $state<Phase>('loading');
   let plan = $state<Plan | null>(null);
+  const videoCount = $derived(plan?.items.filter((i) => i.media_class === 'Video').length ?? 0);
   let result = $state<ApplyResult | null>(null);
   let batches = $state<Batch[]>([]);
   let undoing = $state<string | null>(null);
@@ -130,16 +131,26 @@
       {#if plan.items.length === 0}
         <p class="secondary">No file is marked for quarantine{plan.blocked.length ? ', apart from the ones listed below as refused' : ''}.</p>
       {:else}
+        {#if plan.emptied_groups > 0}
+          <p class="notice warning" role="status">
+            <Icon name="info" size={16} />
+            <span><strong>{plan.emptied_groups} group{plan.emptied_groups === 1 ? '' : 's'} will keep nothing.</strong> Every file in {plan.emptied_groups === 1 ? 'it is' : 'them are'} marked for quarantine. Nothing is deleted, and undoing this puts them back.</span>
+          </p>
+        {/if}
         <div class="stats">
           <div><span class="big">{plan.items.length}</span><span class="hint">file{plan.items.length === 1 ? '' : 's'}</span></div>
+          <div>
+            <span class="big">{plan.items.length - videoCount}<span class="sep"> / </span>{videoCount}</span>
+            <span class="hint">photos / videos</span>
+          </div>
           <div><span class="big">{formatBytes(plan.total_bytes)}</span><span class="hint">to be moved</span></div>
           <div class="where"><span class="hint">Destination</span><code title="{plan.root_path}/.photodedup-quarantine/">{shorten(plan.root_path)}/.photodedup-quarantine/…</code></div>
         </div>
         <ul class="list">
-          {#each plan.items.slice(0, SHOW) as i (i.relative_path)}
+          {#each [...plan.items].sort((a, b) => Number(b.media_class === 'Video') - Number(a.media_class === 'Video')).slice(0, SHOW) as i (i.relative_path)}
             {@const p = split(i.relative_path)}
             <li>
-              <span class="file"><span class="dir">{p.dir}</span><span class="nm">{p.name}</span>{#if i.is_sibling}<span class="badge">companion</span>{/if}</span>
+              <span class="file"><span class="dir">{p.dir}</span><span class="nm">{p.name}</span>{#if i.media_class === 'Video'}<span class="badge">video</span>{/if}{#if i.is_sibling}<span class="badge">companion</span>{/if}</span>
               <span class="hint">{formatBytes(i.size_bytes)}</span>
             </li>
           {/each}

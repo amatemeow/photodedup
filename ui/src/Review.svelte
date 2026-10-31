@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { Review, tabInfo, tabs, type Filter, type Sort, type Tab } from './lib/review.svelte';
+  import { Review, formatBytes, mediaKinds, tabInfo, tabs, type Filter, type Media, type Sort, type Tab } from './lib/review.svelte';
   import { api, type ScanInfo, type Settings } from './lib/api';
   import { changedSince, usedLine } from './lib/knobs';
   import Overview from './Overview.svelte';
@@ -34,7 +34,7 @@
   const rescan = () => onRescan(info?.root_path ?? '', info?.used?.include_videos ?? true);
   // Set once files have actually moved: the results below no longer match disk.
   let moved = $state(false);
-  let plan = $state<{ groups: number; quarantine: number } | null>(null); // pending "accept all" confirmation
+  let plan = $state<ReturnType<Review['undecidedPlan']> | null>(null); // pending "accept all" confirmation
 
   const undoKey = /Mac|iPhone|iPad/i.test(navigator.userAgent) ? '⌘Z' : 'Ctrl+Z';
 
@@ -113,15 +113,20 @@
   });
 
   const icons: Record<Tab, Name> = { exact: 'layers', true: 'compare', burst: 'burst', similar: 'photo', orphans: 'film' };
-  const overall = $derived.by(() => {
-    let all = 0;
-    let reviewed = 0;
-    for (const t of tabs) {
-      all += review.countsByTab[t].all;
-      reviewed += review.countsByTab[t].reviewed;
-    }
-    return { all, reviewed };
+  const overall = $derived({
+    all: review.mediaCounts.photo.all + review.mediaCounts.video.all,
+    reviewed: review.mediaCounts.photo.reviewed + review.mediaCounts.video.reviewed,
   });
+  const mediaLabel: Record<Media, string> = { photo: 'Photos', video: 'Videos' };
+  const mediaNoun = (m: Media, n: number) => (m === 'photo' ? (n === 1 ? 'photo' : 'photos') : n === 1 ? 'video' : 'videos');
+
+  function setMedia(m: Media) {
+    review.media = m;
+    review.filter = 'all';
+    currentId = null;
+    focusId = null;
+    plan = null;
+  }
 
   function open(id: string) {
     currentId = id;
@@ -165,7 +170,7 @@
 
   function askAcceptAll() {
     const p = review.undecidedPlan();
-    plan = { groups: p.groups.length, quarantine: p.quarantine };
+    plan = p;
   }
 
   async function doAcceptAll() {
@@ -283,6 +288,13 @@
 
   <div class="body">
     <nav class="sidebar" aria-label="Categories">
+      <div class="seg media" role="group" aria-label="Show">
+        {#each mediaKinds as m (m)}
+          <button aria-pressed={review.media === m} onclick={() => setMedia(m)}>
+            {mediaLabel[m]}<span class="n" title="{review.mediaCounts[m].undecided} still to review">{review.mediaCounts[m].undecided || '✓'}</span>
+          </button>
+        {/each}
+      </div>
       <ul>
         {#each tabs as t (t)}
           {@const c = review.countsByTab[t]}
@@ -370,15 +382,27 @@
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
   <div class="scrim" onclick={() => (plan = null)}>
     <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="accept-title" tabindex="-1" onclick={(e) => e.stopPropagation()}>
-      <h2 id="accept-title" class="lead">Accept {plan.groups} suggestion{plan.groups === 1 ? '' : 's'}?</h2>
+      <h2 id="accept-title" class="lead">Accept {plan.groups.length} suggestion{plan.groups.length === 1 ? '' : 's'} for {mediaLabel[review.media].toLowerCase()}?</h2>
       <p class="secondary sheet-text">
         {#if plan.quarantine > 0}
-          <strong>{plan.quarantine} file{plan.quarantine === 1 ? '' : 's'}</strong> would be marked for quarantine. Nothing moves until you choose
-          Apply.
+          <strong>{plan.quarantine} {mediaNoun(review.media, plan.quarantine)}</strong> ({formatBytes(plan.bytes)}) in {tabInfo[review.tab].title.toLowerCase()} would be marked
+          for quarantine. Nothing moves until you choose Apply.
         {:else}
           Everything in these groups would be kept. Nothing moves until you choose Apply.
         {/if}
+        {#if review.otherWaiting > 0}
+          {mediaLabel[review.media === 'photo' ? 'video' : 'photo']} are reviewed separately and are not touched
+          ({review.otherWaiting} group{review.otherWaiting === 1 ? '' : 's'} waiting).
+        {/if}
       </p>
+      {#if plan.files.length > 0}
+        <details class="accept-files">
+          <summary>Show the {plan.files.length} file{plan.files.length === 1 ? '' : 's'}</summary>
+          <ul>
+            {#each plan.files as f (f.id)}<li><span class="name">{f.relative_path}</span><span class="hint">{formatBytes(f.size_bytes)}</span></li>{/each}
+          </ul>
+        </details>
+      {/if}
       <div class="sheet-actions">
         <button class="btn" onclick={() => (plan = null)}>Cancel</button>
         <button class="btn primary" onclick={doAcceptAll}>Accept</button>
@@ -506,7 +530,7 @@
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: 248px 1fr;
+    grid-template-columns: var(--sidebar-w) 1fr;
   }
   .in-detail .body {
     grid-template-columns: 1fr;
@@ -516,10 +540,10 @@
     box-shadow: inset 0 0 0 1.5px var(--accent);
   }
   .tuning .body {
-    grid-template-columns: 248px 1fr 320px;
+    grid-template-columns: var(--sidebar-w) 1fr var(--panel-w);
   }
   .tuning.in-detail .body {
-    grid-template-columns: 1fr 320px;
+    grid-template-columns: 1fr var(--panel-w);
   }
   .in-detail .sidebar {
     display: none;
@@ -529,7 +553,6 @@
   .sidebar {
     display: flex;
     flex-direction: column;
-    justify-content: space-between;
     gap: var(--s4);
     padding: var(--s4) var(--s3);
     background: var(--sidebar);
@@ -593,6 +616,7 @@
     transition: width var(--t) var(--ease);
   }
   .overall {
+    margin-top: auto;
     display: grid;
     gap: 6px;
     padding: var(--s3);
@@ -639,7 +663,7 @@
   }
   .skeleton-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(calc(220px * var(--k)), var(--card-max)));
     gap: var(--s4);
   }
   .empty {
@@ -738,5 +762,40 @@
     .controls .spacer {
       display: none;
     }
+  }
+  .media {
+    margin: 0 0 var(--space-3, 12px);
+    width: 100%;
+  }
+  .media button {
+    flex: 1;
+  }
+  @media (max-width: 860px) {
+    .media {
+      width: auto;
+      flex: none;
+      margin: 0 var(--s3) 0 0;
+    }
+  }
+  .accept-files {
+    margin: 0 0 var(--space-3, 12px);
+  }
+  .accept-files ul {
+    list-style: none;
+    margin: 8px 0 0;
+    padding: 0;
+    max-height: 40vh;
+    overflow: auto;
+  }
+  .accept-files li {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 3px 0;
+  }
+  .accept-files .name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

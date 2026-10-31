@@ -211,7 +211,7 @@
     align-items: center;
     gap: var(--s4);
     padding: var(--s3) var(--s4);
-    min-height: 54px;
+    min-height: calc(54px * var(--k));
   }
   .status {
     margin-left: auto;
@@ -236,7 +236,7 @@
     inset: 0;
     margin: auto; /* with a fixed size, centres it both ways */
     height: fit-content;
-    width: min(480px, calc(100vw - 2 * var(--s3)));
+    width: min(calc(480px * var(--k)), calc(100vw - 2 * var(--s3)));
     max-height: calc(100vh - 2 * var(--s5));
     overflow-y: auto;
     border-radius: var(--radius-lg);
@@ -306,7 +306,7 @@
     margin-top: var(--s2);
   }
   .column {
-    width: min(680px, 100%);
+    width: min(calc(680px * var(--k)), 100%);
     margin: 0 auto;
     padding: var(--s2) var(--s4) var(--s7);
     display: grid;
