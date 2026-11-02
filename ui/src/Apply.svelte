@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api, ApiError, type ApplyResult, type Batch, type Plan, type Skipped } from './lib/api';
+  import { api, ApiError, type ApplyResult, type Batch, type Plan, type Skipped, type UndoResult } from './lib/api';
   import { formatBytes } from './lib/review.svelte';
   import Icon from './Icon.svelte';
 
-  let { scanId, onClose, onChanged }: { scanId: string; onClose: () => void; onChanged: () => void } = $props();
+  let { scanId, onClose, onChanged }: { scanId: string; onClose: () => void; onChanged: (reviewUpdated: boolean) => void } = $props();
 
   type Phase = 'loading' | 'preview' | 'applying' | 'done';
   let phase = $state<Phase>('loading');
@@ -13,7 +13,7 @@
   let result = $state<ApplyResult | null>(null);
   let batches = $state<Batch[]>([]);
   let undoing = $state<string | null>(null);
-  let undoNote = $state<{ restored: number; skipped: Skipped[] } | null>(null);
+  let undoNote = $state<UndoResult | null>(null);
   let error = $state('');
 
   const SHOW = 200;
@@ -43,7 +43,7 @@
     try {
       result = await api.apply(scanId);
       phase = 'done';
-      onChanged();
+      onChanged(result.review_updated);
     } catch (e) {
       error = say(e);
       phase = 'preview';
@@ -57,7 +57,7 @@
     undoNote = null;
     try {
       undoNote = await api.undoBatch(id);
-      onChanged();
+      onChanged(undoNote.review_updated);
     } catch (e) {
       error = say(e);
     } finally {
@@ -116,7 +116,7 @@
       {#if result.moved > 0}
         <div class="notice success">
           <Icon name="check" size={18} />
-          <p><strong>Moved {result.moved} file{result.moved === 1 ? '' : 's'}</strong> ({formatBytes(result.moved_bytes)}) to quarantine. The review is now out of date: scan the folder again to refresh it. You can undo this from the list below.</p>
+          <p><strong>Moved {result.moved} file{result.moved === 1 ? '' : 's'}</strong> ({formatBytes(result.moved_bytes)}) to quarantine. {result.review_updated ? 'The review is up to date: groups you resolved are gone from it.' : 'The review is now out of date: scan the folder again to refresh it.'} You can undo this from the list below.</p>
         </div>
       {:else}
         <p class="secondary">Nothing was moved.</p>

@@ -72,6 +72,8 @@ export class Review {
   media = $state<Media>('photo');
   filter = $state<Filter>('all');
   loaded = $state(false);
+  /** Counts the (re)loads, so a view that lists files knows when to fetch its list again. */
+  version = $state(0);
   error = $state('');
   canUndo = $state(false);
 
@@ -159,6 +161,7 @@ export class Review {
         this.tab = tabs.find((t) => this.tabCount(t) > 0) ?? 'true';
       }
       this.loaded = true;
+      this.version++;
     } catch (e) {
       this.error = e instanceof Error ? e.message : String(e);
     }
@@ -277,6 +280,31 @@ export class Review {
     await this.commit(g.members.map((m) => ({ path: m.relative_path, keep: m.id === f.id ? next : this.effective(g, m) })));
   }
 
+  /** The groups a file is in (a file can be in more than one), for the library overview. */
+  groupsFor = (path: string): Group[] => this.groupsByPath.get(path) ?? [];
+
+  /** Marks single files Quarantine from the library overview, or clears the mark. Such a mark
+   * counts for a file that is in no group too. Undoable like any other choice. */
+  async markLibrary(paths: string[], quarantine: boolean) {
+    if (!quarantine) {
+      const had = paths.filter((p) => p in this.decisions);
+      if (had.length === 0) return;
+      this.error = '';
+      const prev = had.map((path) => ({ path, keep: this.decisions[path] }));
+      for (const p of had) delete this.decisions[p];
+      try {
+        await api.clearDecisions(this.scanId, had);
+        this.undoStack.push({ prev });
+        this.canUndo = true;
+      } catch (e) {
+        for (const p of prev) this.decisions[p.path] = p.keep!;
+        this.error = `Couldn't save: ${e instanceof Error ? e.message : e}`;
+      }
+      return;
+    }
+    await this.commit(paths.map((path) => ({ path, keep: false })), true);
+  }
+
   async keepAll(g: Group) {
     await this.commit(g.members.map((m) => ({ path: m.relative_path, keep: true })));
   }
@@ -375,12 +403,12 @@ export class Review {
 
   /** Write-through: the screen updates at once, and rolls back with an
    * error if the server refuses. */
-  private async commit(rows: { path: string; keep: boolean }[]) {
+  private async commit(rows: { path: string; keep: boolean }[], manual = false) {
     this.error = '';
     const prev = rows.map((r) => ({ path: r.path, keep: this.decisions[r.path] }));
     for (const r of rows) this.decisions[r.path] = r.keep;
     try {
-      await api.putDecisions(this.scanId, rows.map((r) => ({ relative_path: r.path, keep: r.keep })));
+      await api.putDecisions(this.scanId, rows.map((r) => ({ relative_path: r.path, keep: r.keep })), manual);
       this.undoStack.push({ prev });
       this.canUndo = true;
     } catch (e) {

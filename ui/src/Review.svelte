@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { Review, formatBytes, mediaKinds, tabInfo, tabs, type Filter, type Media, type Sort, type Tab } from './lib/review.svelte';
+  import { Review, formatBytes, mediaKinds, mediaOf, tabInfo, tabs, type Filter, type Group, type Media, type Sort, type Tab } from './lib/review.svelte';
   import { api, type ScanInfo, type Settings } from './lib/api';
   import { changedSince, usedLine } from './lib/knobs';
   import Overview from './Overview.svelte';
   import Detail from './Detail.svelte';
   import Apply from './Apply.svelte';
+  import Quarantine from './Quarantine.svelte';
+  import Library from './Library.svelte';
   import Tuning from './Tuning.svelte';
   import { followGroup } from './lib/follow';
   import Options from './Options.svelte';
@@ -27,12 +29,15 @@
   let focusId = $state<string | null>(null); // overview keyboard focus
   let helpOpen = $state(false);
   let applyOpen = $state(false);
+  let quarantineOpen = $state(false);
+  // The review (groups to decide) or the whole library (every file, grouped or not).
+  let mode = $state<'review' | 'library'>('review');
   let tuningOpen = $state(false);
   let settingsOpen = $state(false); // the floating Settings panel
   let resetAsk = $state(false);
   let rescanAsk = $state(false);
   const rescan = () => onRescan(info?.root_path ?? '', info?.used?.include_videos ?? true);
-  // Set once files have actually moved: the results below no longer match disk.
+  // Set once files have moved and the review could not be updated: the results below no longer match disk.
   let moved = $state(false);
   let plan = $state<ReturnType<Review['undecidedPlan']> | null>(null); // pending "accept all" confirmation
 
@@ -168,6 +173,25 @@
     currentId = null;
   }
 
+  // Files moved to quarantine (or came back): the server has made the groups again without (or with)
+  // them, so show the new lists. A scan too old for that keeps the "scan again" banner instead.
+  async function appliedOrUndone(reviewUpdated: boolean) {
+    if (!reviewUpdated) {
+      moved = true;
+      return;
+    }
+    await tuned();
+  }
+
+  // A group opened from the library overview: show it in the review.
+  function openFromLibrary(g: Group) {
+    mode = 'review';
+    review.media = mediaOf(g);
+    review.tab = g.tab;
+    review.filter = 'all';
+    open(g.id);
+  }
+
   function askAcceptAll() {
     const p = review.undecidedPlan();
     plan = p;
@@ -180,7 +204,7 @@
 
   function onKey(e: KeyboardEvent) {
     if (resetAsk && e.key === 'Escape') resetAsk = false;
-    if (applyOpen || rescanAsk || resetAsk || settingsOpen) return; // the apply panel and the re-scan question own the keyboard while open
+    if (applyOpen || quarantineOpen || rescanAsk || resetAsk || settingsOpen) return; // the apply panel and the re-scan question own the keyboard while open
     const t = e.target as HTMLElement;
     if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
     // Undo is the platform's own chord: Cmd+Z on a Mac, Ctrl+Z elsewhere.
@@ -227,6 +251,10 @@
   <header class="toolbar">
     <div class="left">
       <button class="btn plain" onclick={onExit}><Icon name="chevron-left" /> Folders</button>
+      <div class="seg" role="group" aria-label="View">
+        <button aria-pressed={mode === 'review'} onclick={() => (mode = 'review')}>Review</button>
+        <button aria-pressed={mode === 'library'} onclick={() => ((mode = 'library'), (currentId = null))}>Library</button>
+      </div>
     </div>
     <h1 class="folder" title={info?.root_path}>{folderName || 'Review'}</h1>
     <div class="right">
@@ -248,6 +276,7 @@
       >
         Apply{review.markedCount ? ` (${review.markedCount})` : ''}…
       </button>
+      <button class="btn" onclick={() => (quarantineOpen = true)} title="See what is in quarantine, and put files back"><Icon name="archive" /> Quarantine</button>
       <button class="btn icon" onclick={() => (helpOpen = true)} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts"><Icon name="help" /></button>
       <button
         class="btn icon"
@@ -286,6 +315,11 @@
     </div>
   {/if}
 
+  {#if mode === 'library'}
+    <div class="body library-body">
+      <Library {review} onOpenGroup={openFromLibrary} />
+    </div>
+  {:else}
   <div class="body">
     <nav class="sidebar" aria-label="Categories">
       <div class="seg media" role="group" aria-label="Show">
@@ -343,13 +377,15 @@
           <p class="caption narrow-only">{overall.reviewed} of {overall.all} reviewed overall</p>
         </div>
 
-        <div class="controls">
+        <div class="controls rowbar">
+          <div class="l">
           <div class="seg" role="group" aria-label="Filter">
             {#each filterLabels as [key, label] (key)}
               <button aria-pressed={review.filter === key} onclick={() => setFilter(key)}>{label}<span class="n">{filterCount(key)}</span></button>
             {/each}
           </div>
-          <span class="spacer"></span>
+          </div>
+          <div class="r">
           <label class="sort">
             <span class="hint">Sort</span>
             <select class="field" value={review.sort} onchange={(e) => review.setSort(e.currentTarget.value as Sort)}>
@@ -359,6 +395,7 @@
           </label>
           <button class="btn" disabled={review.counts.undecided === 0} onclick={askAcceptAll}><Icon name="check" /> Accept all suggestions</button>
           <button class="btn" disabled={review.resetPaths(review.groupsOf('all')).length === 0} onclick={() => (resetAsk = true)} title="Forget your choices and go back to the suggestions"><Icon name="undo" /> Reset…</button>
+          </div>
         </div>
 
         {#if review.visible.length === 0}
@@ -376,6 +413,7 @@
       <Tuning {scanId} onChanged={tuned} onClose={() => (tuningOpen = false)} onRescan={() => (rescanAsk = true)} />
     {/if}
   </div>
+  {/if}
 </div>
 
 {#if plan}
@@ -458,8 +496,12 @@
   <ConfirmRescan folder={folderName || 'this folder'} onCancel={() => (rescanAsk = false)} onConfirm={rescan} />
 {/if}
 
+{#if quarantineOpen}
+  <Quarantine onClose={() => (quarantineOpen = false)} onChanged={appliedOrUndone} />
+{/if}
+
 {#if applyOpen}
-  <Apply {scanId} onClose={() => (applyOpen = false)} onChanged={() => (moved = true)} />
+  <Apply {scanId} onClose={() => (applyOpen = false)} onChanged={appliedOrUndone} />
 {/if}
 
 {#if helpOpen}
@@ -532,8 +574,13 @@
     display: grid;
     grid-template-columns: var(--sidebar-w) 1fr;
   }
-  .in-detail .body {
+  .in-detail .body,
+  .library-body {
     grid-template-columns: 1fr;
+  }
+  .library-body {
+    min-height: 0;
+    overflow: hidden;
   }
   .btn.on {
     background: color-mix(in srgb, var(--accent) 16%, var(--surface));
@@ -647,14 +694,15 @@
     display: none;
   }
   .controls {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--s3);
     margin-bottom: var(--s5);
   }
-  .spacer {
-    flex: 1;
+  /* once the row cannot hold both groups on a line, the right group's controls sit one over another,
+     aligned right (em = the row's font size, so this follows the UI scale) */
+  @container (max-width: 54em) {
+    .controls .r {
+      flex-direction: column;
+      align-items: flex-end;
+    }
   }
   .sort {
     display: inline-flex;
@@ -758,9 +806,6 @@
   @media (max-width: 640px) {
     .toolbar :global(.btn:not(.icon):not(.primary)) {
       padding: 0 var(--s2);
-    }
-    .controls .spacer {
-      display: none;
     }
   }
   .media {

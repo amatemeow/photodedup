@@ -2,6 +2,7 @@
   import { api, ApiError, type IntensityId, type JobStatus, type Phase, type ScanSummary, type Shell } from './lib/api';
   import Review from './Review.svelte';
   import Options from './Options.svelte';
+  import Quarantine from './Quarantine.svelte';
   import Icon from './Icon.svelte';
   import ConfirmRescan from './ConfirmRescan.svelte';
   import { cloudLine } from './lib/cloud';
@@ -76,6 +77,7 @@
   // Settings opens over whatever screen is showing without replacing it, so a
   // scan keeps running behind it and closing it returns to exactly where you were.
   let settingsOpen = $state(false);
+  let quarantineOpen = $state(false);
   let error = $state('');
   let stopWatching: (() => void) | undefined;
 
@@ -237,6 +239,7 @@
 {:else}
   <main>
     <header class="top">
+      <button class="btn plain" onclick={() => (quarantineOpen = true)}><Icon name="archive" /> Quarantine</button>
       <button class="btn plain" onclick={() => (settingsOpen = true)}><Icon name="sliders" /> Settings</button>
     </header>
 
@@ -374,6 +377,10 @@
   </main>
 {/if}
 
+{#if quarantineOpen && view.kind !== 'review'}
+  <Quarantine onClose={() => (quarantineOpen = false)} onChanged={() => {}} />
+{/if}
+
 <style>
   main {
     min-height: 100%;
@@ -383,6 +390,7 @@
   .top {
     display: flex;
     justify-content: flex-end;
+    gap: var(--s2);
     padding: var(--s3) var(--s4);
     min-height: calc(54px * var(--k));
   }

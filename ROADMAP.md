@@ -1105,3 +1105,26 @@ letterbox bars in the detail view, and a start screen that was a bare form.
   videos") is unchanged and is still jargon in places; a copy pass belongs with
   the design review.
 
+## Library enhancement (2026-10-31, from user feedback; plan in `.agents/311026_improvements_plan.md`)
+
+- **A scan knows what is in quarantine.** `files.quarantined` is set when Apply moves a file and cleared
+  when it is put back (all of a batch, or some of it). A flagged file is left out of grouping, the orphan
+  list and the library list; `apply::refresh_groups` makes the scan's groups again from its saved analysis
+  with the thresholds it was made with, so only the removal changes. The review therefore stays current
+  after Apply and Undo with no re-scan. A scan too old to regroup keeps the "scan again" banner. A database
+  from before this learns it once at startup (`backfill_quarantine_state`).
+  - The choices recorded for a file that leaves the library are forgotten (they were about a copy that is
+    gone); applying the same choices twice now answers "nothing to apply" instead of "skipped".
+- **Quarantine screen** (`Quarantine.svelte`, start screen and review toolbar): every batch, the files in
+  it with thumbnails made from the quarantine folder through the path guard (`/files/q/{batch}/{seq}/...`,
+  never a path from the request), put back selected or all. Nothing is deleted from here either.
+- **Library overview** (`Library.svelte`, "Library" next to "Review"): every photo and video of the scan
+  in a virtualised grid, filters (in a group / not in a group / marked, photos / videos), a quiet group
+  marker, a hover card to decide a file's group in place, and a quarantine mark on any file. A mark made
+  here is `decisions.manual`: it counts for a file that is in no group (a choice made in the review only
+  counts while its file is in a group, which is what voids stale choices after Fine-tune).
+- **Not built, see `.agents/311026_ai_spike.md`:** a bundled AI model (people, defects). The recommendation
+  is classical defect checks first, then a measurement spike, then a licence and delivery decision.
+- Known limits: library tiles are uniform squares (the three card shapes are the review overview's);
+  a re-scan does not carry the "in quarantine" state, it reads the folder, where those files no longer are.
+

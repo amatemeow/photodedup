@@ -144,7 +144,6 @@
     min-height: 0;
     overflow: hidden;
     border-radius: var(--radius);
-    /* the photo keeps its proportions; what it does not cover stays black */
     background: #000;
     box-shadow: var(--shadow-sm);
     transition: transform var(--t) var(--ease), box-shadow var(--t) var(--ease);
@@ -167,7 +166,9 @@
   img {
     width: 100%;
     height: 100%;
-    object-fit: contain;
+    /* the card has the photo's own shape, so it is filled edge to edge, centred, with only a sliver trimmed */
+    object-fit: cover;
+    object-position: center;
     display: block;
     opacity: 0;
     transition: opacity 0.25s var(--ease);

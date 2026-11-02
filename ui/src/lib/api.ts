@@ -58,6 +58,20 @@ export interface FileDto {
   height?: number | null;
 }
 
+/** One file of the library overview: every photo and video of the scan, grouped or not. */
+export interface LibraryFile {
+  id: string;
+  relative_path: string;
+  file_name: string;
+  media_class: 'Raw' | 'Image' | 'Video';
+  size_bytes: number;
+  width: number | null;
+  height: number | null;
+  /** `YYYY-MM-DD HH:MM:SS` from the file's own metadata, when it has any. */
+  captured_at: string | null;
+  mtime_unix: number;
+}
+
 export interface Cluster {
   id: string;
   tier: string;
@@ -136,10 +150,27 @@ export interface ApplyResult {
   moved_bytes: number;
   skipped: Skipped[];
   blocked: Blocked[];
+  /** The review was made again without the moved files; false means scan the folder again. */
+  review_updated: boolean;
 }
 export interface UndoResult {
   restored: number;
+  review_updated: boolean;
   skipped: Skipped[];
+}
+export interface BatchItem {
+  seq: number;
+  relative_path: string;
+  size_bytes: number;
+  is_sibling: boolean;
+  /** `moved` = in quarantine now. */
+  state: 'moved' | 'restored' | 'skipped';
+  note: string | null;
+  media_class: 'Raw' | 'Image' | 'Video' | 'Sidecar';
+  /** When the photo was taken (`YYYY-MM-DD HH:MM:SS`), if its metadata said. */
+  taken_at: string | null;
+  /** The file's own modification time: the date when there is no other. */
+  mtime_unix: number;
 }
 export interface Batch {
   id: string;
@@ -150,6 +181,9 @@ export interface Batch {
   in_quarantine: number;
   in_quarantine_bytes: number;
   restored: number;
+}
+export interface BatchDetail extends Batch {
+  items: BatchItem[];
 }
 
 export type IntensityId = 'efficient' | 'default' | 'performance';
@@ -244,8 +278,10 @@ export const api = {
   orphanVideos: (scanId: string) => call<OrphanVideo[]>(`/api/scans/${scanId}/orphan-videos`),
   analysis: (fileId: string) => call<Analysis>(`/api/files/${fileId}/analysis`),
   decisions: (scanId: string) => call<Record<string, boolean>>(`/api/scans/${scanId}/decisions`),
-  putDecisions: (scanId: string, rows: DecisionRow[]) =>
-    call<void>(`/api/scans/${scanId}/decisions/bulk`, { method: 'POST', body: JSON.stringify(rows) }),
+  /** `manual`: chosen on single files in the library overview, which counts even for a file in no group. */
+  putDecisions: (scanId: string, rows: DecisionRow[], manual = false) =>
+    call<void>(`/api/scans/${scanId}/decisions/bulk${manual ? '?manual=1' : ''}`, { method: 'POST', body: JSON.stringify(rows) }),
+  library: (scanId: string) => call<LibraryFile[]>(`/api/scans/${scanId}/library`),
   /** Back to undecided for every path, in one transaction. */
   clearDecisions: (scanId: string, relativePaths: string[]) =>
     call<void>(`/api/scans/${scanId}/decisions/clear`, { method: 'POST', body: JSON.stringify(relativePaths) }),
@@ -274,6 +310,12 @@ export const api = {
   apply: (scanId: string) =>
     call<ApplyResult>(`/api/scans/${scanId}/apply`, { method: 'POST', body: JSON.stringify({ confirm: true }) }),
   batches: () => call<Batch[]>('/api/batches'),
+  batch: (id: string) => call<BatchDetail>(`/api/batches/${id}`),
+  restoreItems: (id: string, seqs: number[]) =>
+    call<UndoResult>(`/api/batches/${id}/restore`, { method: 'POST', body: JSON.stringify({ seqs }) }),
+  /** A picture of a file that is in quarantine, found by its place in the batch. */
+  quarantineUrl: (batchId: string, seq: number, kind: 'thumb' | 'preview', size?: number) =>
+    `/files/q/${batchId}/${seq}/${kind}?token=${encodeURIComponent(token)}${size ? `&size=${size}` : ''}`,
   undoBatch: (batchId: string) => call<UndoResult>(`/api/batches/${batchId}/undo`, { method: 'POST' }),
 
   /** For `<img>`/`<video>` `src`, which can't send an Authorization header.

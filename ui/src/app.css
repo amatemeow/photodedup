@@ -560,6 +560,31 @@ kbd {
   text-align: center;
 }
 
+/* A row of controls is two groups, a left one and a right one. Each wraps on its own, so what
+   belongs together stays together; the right group keeps to the right edge, and a component
+   can stack it (one control over another, right-aligned) once the row gets too narrow for both
+   groups, with an @container rule on the row. The row is the container. */
+.rowbar {
+  container-type: inline-size;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s2) var(--s4);
+}
+.rowbar > .l,
+.rowbar > .r {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  min-width: 0;
+}
+.rowbar > .r {
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
 /* ---- sheets (dialogs) ---- */
 .scrim {
   position: fixed;

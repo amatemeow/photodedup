@@ -15,6 +15,8 @@
     onNext,
     onAccept,
     upcoming = [],
+    backLabel = 'Overview',
+    pager = true,
   }: {
     review: Review;
     /** A dialog is open elsewhere: ignore keys. */
@@ -28,6 +30,9 @@
     onAccept: () => void;
     /** Photos of the next groups: fetched quietly now so they are ready when you get there. */
     upcoming?: FileDto[];
+    /** What the back button says, and whether it shows the previous/next pager (not in a panel of one group). */
+    backLabel?: string;
+    pager?: boolean;
   } = $props();
 
   let active = $state(0); // highlighted member: target of Space
@@ -128,12 +133,14 @@
 <section class="detail">
   <div class="bar">
     <div class="nav">
-      <button class="btn" onclick={onBack}><Icon name="chevron-left" /> Overview</button>
+      <button class="btn" onclick={onBack}><Icon name="chevron-left" /> {backLabel}</button>
+      {#if pager}
       <div class="seg pager" role="group" aria-label="Navigate groups">
         <button onclick={onPrev} disabled={position <= 1} title="Previous (←)" aria-label="Previous group"><Icon name="chevron-left" /></button>
         <span class="pos" aria-live="polite">{position} of {total}</span>
         <button onclick={onNext} disabled={position >= total} title="Next (→)" aria-label="Next group"><Icon name="chevron-right" /></button>
       </div>
+      {/if}
     </div>
 
     <div class="summary">
@@ -288,9 +295,12 @@
 
   .members {
     display: grid;
-    /* cards grow with the window up to a limit, then stay that size and centre */
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, calc(280px * var(--k))), var(--member-max)));
-    justify-content: center;
+    /* as many cards per row as fit, sharing the width; the whole block stops growing once every
+       card is at its largest, and centres */
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, calc(280px * var(--k))), 1fr));
+    max-width: calc(var(--n) * var(--member-max) + (var(--n) - 1) * var(--s4));
+    margin-inline: auto;
+    width: 100%;
     gap: var(--s4);
     align-items: start;
   }

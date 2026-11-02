@@ -8,6 +8,9 @@
     onIndex,
     onClose,
     context = '',
+    urls,
+    mark,
+    group,
   }: {
     files: FileDto[];
     index: number;
@@ -15,10 +18,18 @@
     onClose: () => void;
     /** Where this group is, shown quietly in the caption ("Group 12 of 87 · Exact duplicates"). */
     context?: string;
+    /** Where the pictures come from when the files are not the scan's own (files in quarantine). */
+    urls?: (f: FileDto) => { low: string; high: string };
+    /** Lets the person discard what they are looking at: a Quarantine toggle on the picture. */
+    mark?: { is: (f: FileDto) => boolean; toggle: (f: FileDto) => void };
+    /** For a file that is in a group of look-alikes: a button that opens the group. */
+    group?: { size: (f: FileDto) => number; open: (f: FileDto) => void };
   } = $props();
 
   const file = $derived(files[index]);
   const many = $derived(files.length > 1);
+  // A video plays from its original; one in quarantine shows its first frame instead.
+  const playsVideo = $derived(file.media_class === 'Video' && !urls);
   const go = (delta: number) => onIndex((index + delta + files.length) % files.length);
 
   // The picture shown is the original file itself wherever a browser can display it, so
@@ -26,7 +37,8 @@
   // decoded by the server at their full size instead. The default preview, already in the
   // cache from the detail view, shows at once underneath while the full one loads.
   const showsItself = (f: FileDto) => /\.(jpe?g|png|gif|webp|bmp|avif)$/i.test(f.file_name);
-  const fullUrl = (f: FileDto) => (showsItself(f) ? api.fileUrl(f.id, 'original') : api.fileUrl(f.id, 'preview', 16384));
+  const lowUrl = (f: FileDto) => (urls ? urls(f).low : api.fileUrl(f.id, 'preview'));
+  const fullUrl = (f: FileDto) => (urls ? urls(f).high : showsItself(f) ? api.fileUrl(f.id, 'original') : api.fileUrl(f.id, 'preview', 16384));
 
   // Zoom: 1 is "fit the window"; the view is moved by `tx`/`ty` (px from centre).
   const MAX_ZOOM = 16;
@@ -86,7 +98,7 @@
   };
 
   function onWheel(e: WheelEvent) {
-    if (file.media_class === 'Video') return;
+    if (playsVideo) return;
     e.preventDefault();
     const c = fromCentre(e);
     zoomTo(scale * Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0016)), c.x, c.y);
@@ -127,7 +139,7 @@
     moved = false;
     if (was) return;
     const f = fitted();
-    if (!f || file.media_class === 'Video') return void (e.target === stage && onClose());
+    if (!f || playsVideo) return void (e.target === stage && onClose());
     const c = fromCentre(e);
     const halfW = (f.w * scale) / 2;
     const halfH = (f.h * scale) / 2;
@@ -150,14 +162,26 @@
     else if (e.key === '+' || e.key === '=') zoomTo(scale * 1.4);
     else if (e.key === '-' || e.key === '_') zoomTo(scale / 1.4);
     else if (e.key === '0') reset();
+    else if ((e.key === 'q' || e.key === 'Q') && mark) mark.toggle(file);
+    else if ((e.key === 'g' || e.key === 'G') && group && group.size(file) > 0) group.open(file);
     e.preventDefault();
     e.stopImmediatePropagation();
   }
 
   let sharp = $state(false);
+  // The full-size picture can fail (a file a browser will not show, a slow disk): the original is
+  // then asked of the server as a full-size decode instead, and if that fails too, it is said.
+  let viaServer = $state(false);
+  let failed = $state(false);
+  const failedLoad = () => {
+    if (!urls && !viaServer && showsItself(file)) viaServer = true;
+    else failed = true;
+  };
   $effect(() => {
     file.id;
     sharp = false;
+    viaServer = false;
+    failed = false;
   });
 </script>
 
@@ -196,29 +220,55 @@
     onpointerup={up}
     onpointercancel={up}
   >
-    {#if file.media_class === 'Video'}
+    {#if playsVideo}
       <!-- svelte-ignore a11y_media_has_caption -->
       <video src={api.fileUrl(file.id, 'original')} controls autoplay></video>
     {:else}
       <div class="pic" style="transform: translate({tx}px, {ty}px) scale({scale})">
-        <img class="low" src={api.fileUrl(file.id, 'preview')} alt="" aria-hidden="true" draggable="false" bind:this={img} />
+        <img class="low" src={lowUrl(file)} alt="" aria-hidden="true" draggable="false" bind:this={img} />
         <img
           class="high"
           class:in={sharp}
-          src={fullUrl(file)}
+          src={viaServer ? api.fileUrl(file.id, 'preview', 16384) : fullUrl(file)}
           alt={file.file_name}
           draggable="false"
           bind:this={hi}
           onload={() => (sharp = true)}
+          onerror={failedLoad}
         />
       </div>
     {/if}
   </div>
 
+  {#if mark || group}
+    <div class="acts">
+      {#if mark}
+        {@const on = mark.is(file)}
+        <button class="btn act" class:on aria-pressed={on} onclick={() => mark.toggle(file)} title="Mark this one for quarantine (Q)">
+          <Icon name="archive" /> {on ? 'Marked for quarantine' : 'Quarantine'} <span class="k">Q</span>
+        </button>
+      {/if}
+      {#if group && group.size(file) > 0}
+        <button class="btn act" onclick={() => group.open(file)} title="See and decide the group this is in (G)">
+          <Icon name="layers" /> Group of {group.size(file)} <span class="k">G</span>
+        </button>
+      {/if}
+    </div>
+  {/if}
+
   <span class="caption">
     {file.file_name}{context ? ` · ${context}` : ''}
-    {#if file.media_class !== 'Video'}<span class="zoom">{Math.round(scale * 100)}%</span>{/if}
-    <span class="keys"><kbd>Esc</kbd> close{many ? ' · ← → switch' : ''}{file.media_class !== 'Video' ? ' · scroll or + − zoom · drag to move · double-click 100% · 0 fit' : ''}</span>
+    {#if !playsVideo}
+      <span class="zoom">{Math.round(scale * 100)}%</span>
+      {#if failed}
+        <span class="res warn">full size unavailable: showing a smaller copy</span>
+      {:else if !sharp}
+        <span class="res"><span class="spinner"></span> loading full size…</span>
+      {:else if hi}
+        <span class="res" title="The size of the picture you are looking at">{hi.naturalWidth} × {hi.naturalHeight}</span>
+      {/if}
+    {/if}
+    <span class="keys"><kbd>Esc</kbd> close{many ? ' · ← → switch' : ''}{!playsVideo ? ' · scroll or + − zoom · drag to move · double-click 100% · 0 fit' : ''}</span>
   </span>
 </div>
 
@@ -329,6 +379,50 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .acts {
+    position: absolute;
+    left: var(--s4);
+    top: var(--s4);
+    z-index: 2;
+    display: flex;
+    gap: var(--s2);
+  }
+  .act {
+    background: rgb(40 40 44 / 0.86);
+    color: #f5f5f7;
+    box-shadow: none;
+    backdrop-filter: blur(10px);
+  }
+  .act.on {
+    background: var(--warning);
+    color: #0b0b0c;
+  }
+  .act .k {
+    padding: 0 6px;
+    border-radius: 4px;
+    background: rgb(255 255 255 / 0.16);
+    font: 600 var(--fs-caption) var(--mono);
+  }
+  .act.on .k {
+    background: rgb(0 0 0 / 0.16);
+  }
+  .res {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s2);
+    font-variant-numeric: tabular-nums;
+    color: #d8d8de;
+  }
+  .res.warn {
+    color: var(--warning);
+  }
+  .res .spinner {
+    width: 11px;
+    height: 11px;
+    border-width: 1.5px;
+    border-color: rgb(255 255 255 / 0.35);
+    border-top-color: #fff;
   }
   .zoom {
     font-variant-numeric: tabular-nums;
