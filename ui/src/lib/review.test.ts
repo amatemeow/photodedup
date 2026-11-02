@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { BurstRun, Cluster, FileDto, OrphanVideo, ReviewPair } from './api';
+import type { BurstRun, Cluster, DefectItem, FileDto, OrphanVideo, ReviewPair } from './api';
 
 // The backend, faked in memory: what matters here is the client-side
 // decision logic, not HTTP.
@@ -10,6 +10,7 @@ const server = vi.hoisted(() => ({
   bursts: [] as BurstRun[],
   pairs: [] as ReviewPair[],
   orphans: [] as OrphanVideo[],
+  defects: [] as DefectItem[],
 }));
 
 vi.mock('./api', () => ({
@@ -18,6 +19,7 @@ vi.mock('./api', () => ({
     burstRuns: async () => server.bursts,
     reviewPairs: async () => server.pairs,
     orphanVideos: async () => server.orphans,
+    defects: async () => ({ measured: true, items: server.defects }),
     decisions: async () => ({ ...server.decisions }),
     putDecisions: async (_: string, rows: { relative_path: string; keep: boolean }[]) => {
       if (server.failNextWrite) {
@@ -71,6 +73,7 @@ function seed() {
   server.bursts = [];
   server.pairs = [];
   server.orphans = [];
+  server.defects = [];
 }
 
 async function loaded() {
@@ -176,6 +179,30 @@ describe('look-alikes and orphan videos are decided too, with everything kept by
     ];
     const r = await loaded();
     expect(r.groups.map((g) => g.label)).toEqual(['No original found', 'Source not identified']);
+  });
+});
+
+describe('possible defects are suggestions: decided like the rest, kept by default, and say who found them', () => {
+  it('makes one group per photo, labelled with what was found and by what', async () => {
+    server.clusters = [];
+    server.defects = [
+      { file: file('fd', 'dark.jpg'), captured_at: null, findings: [{ kind: 'black', source: 'measured', strength: 0.9 }, { kind: 'blurry', source: 'measured', strength: 0.4 }] },
+    ];
+    const r = await loaded();
+    const g = group(r, 'fd');
+    expect(g.tab).toBe('defects');
+    expect(g.label).toBe('Measured: almost black, maybe a covered lens · Measured: out of focus');
+    expect(r.effective(g, g.members[0])).toBe(true);
+  });
+
+  it('lets the user quarantine the photo, and opens on this tab when nothing else has anything', async () => {
+    server.clusters = [];
+    const f = file('fd', 'dark.jpg');
+    server.defects = [{ file: f, captured_at: null, findings: [{ kind: 'bright', source: 'measured', strength: 0.5 }] }];
+    const r = await loaded();
+    expect(r.tab).toBe('defects');
+    await r.toggle(group(r, 'fd'), f);
+    expect(server.decisions).toEqual({ 'dark.jpg': false });
   });
 });
 

@@ -14,6 +14,10 @@ use tokio::sync::watch;
 /// means the dialog was cancelled. Blocks until the user answers.
 pub type FolderPicker = Arc<dyn Fn() -> Option<PathBuf> + Send + Sync>;
 
+/// How many pictures are rendered at the same time. Each render is an ffmpeg process or a decode, so a
+/// handful keeps the machine usable; the rest wait in line.
+pub const RENDER_PERMITS: usize = 4;
+
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<Mutex<Store>>,
@@ -38,6 +42,11 @@ pub struct AppState {
     /// `routes/jobs.rs`. Only one runs at a time, and only the latest is
     /// kept: a finished scan's real record is its row in the store.
     pub job: Arc<Mutex<Option<Job>>>,
+    /// Where pictures are served from when they have a port of their own (see `lib.rs::run_with`).
+    pub media_addr: Arc<std::sync::OnceLock<std::net::SocketAddr>>,
+    /// How many pictures may be rendered at once. The rest wait here, in the media server, so a flood
+    /// of thumbnails is a queue of its own and never delays the app's other requests.
+    pub render_gate: Arc<tokio::sync::Semaphore>,
     /// Present only when running inside a shell that can show a native dialog.
     pub folder_picker: Option<FolderPicker>,
 }

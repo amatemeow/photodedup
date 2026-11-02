@@ -210,6 +210,8 @@ mod tests {
             cache: Arc::new(crate::cache::ThumbCache::open(cache, 1 << 30)),
             warm: Arc::default(),
             job: Arc::new(Mutex::new(None)),
+            media_addr: Arc::default(),
+            render_gate: Arc::new(tokio::sync::Semaphore::new(crate::state::RENDER_PERMITS)),
             folder_picker: None,
         }
     }

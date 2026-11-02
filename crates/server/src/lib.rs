@@ -74,6 +74,21 @@ pub async fn build_with_ui(
 /// opened. Without a UI folder or a compiled-in copy, `/` is a plain
 /// placeholder page.
 pub async fn build_with(db_path: &std::path::Path, config: Config) -> anyhow::Result<(TcpListener, Router, ServerInfo)> {
+    let parts = build_parts(db_path, config).await?;
+    Ok((parts.listener, parts.router, parts.info))
+}
+
+/// Everything a running server is made of: the app's own routes, and the pictures' routes, which get
+/// a port, a thread pool and a database connection of their own in `run_with`.
+struct Parts {
+    listener: TcpListener,
+    router: Router,
+    media: Router,
+    info: ServerInfo,
+    state: AppState,
+}
+
+async fn build_parts(db_path: &std::path::Path, config: Config) -> anyhow::Result<Parts> {
     let Config { ui_dir, folder_picker, cache_dir } = config;
     let mut store = photodedup_core::store::Store::open(db_path)?;
     // A database from before a scan knew what is in quarantine learns it once.
@@ -107,7 +122,15 @@ pub async fn build_with(db_path: &std::path::Path, config: Config) -> anyhow::Re
         cache: Arc::new(cache::ThumbCache::open(cache_dir, budget)),
         warm: Arc::default(),
         job: Arc::new(Mutex::new(None)),
+        media_addr: Arc::default(),
+        render_gate: Arc::new(tokio::sync::Semaphore::new(state::RENDER_PERMITS)),
         folder_picker,
+    };
+    // Pictures get their own connection to the database. One connection behind one lock is a single
+    // queue: a picture's lookup would wait behind the app's requests, and the other way round.
+    let media_state = match photodedup_core::store::Store::open(db_path) {
+        Ok(store) => AppState { store: Arc::new(Mutex::new(store)), ..state.clone() },
+        Err(_) => state.clone(),
     };
 
     let protected = Router::new()
@@ -127,6 +150,7 @@ pub async fn build_with(db_path: &std::path::Path, config: Config) -> anyhow::Re
         .route("/api/jobs/{id}/cancel", post(routes::jobs::cancel_job))
         .route("/api/jobs/{id}/events", get(routes::jobs::job_events))
         .route("/api/scans/{id}/orphan-videos", get(routes::scans::list_orphan_videos))
+        .route("/api/scans/{id}/defects", get(routes::scans::list_defects))
         .route("/api/scans/{id}/apply/plan", get(routes::apply::preview))
         .route("/api/scans/{id}/apply", post(routes::apply::run))
         .route("/api/batches", get(routes::apply::batches))
@@ -148,6 +172,7 @@ pub async fn build_with(db_path: &std::path::Path, config: Config) -> anyhow::Re
         .route("/api/scans/{id}/decisions/clear", post(routes::decisions::clear_decisions_bulk))
         .route("/api/resume", get(routes::decisions::resume))
         .route("/api/shell", get(routes::shell::status))
+        .route("/api/media", get(media_base))
         .route("/api/pick-folder", post(routes::shell::pick_folder))
         .route("/files/{id}/thumb", get(routes::files::thumbnail))
         .route("/files/{id}/preview", get(routes::files::preview))
@@ -155,7 +180,7 @@ pub async fn build_with(db_path: &std::path::Path, config: Config) -> anyhow::Re
         .route("/files/q/{batch}/{seq}/thumb", get(routes::files::quarantined_thumbnail))
         .route("/files/q/{batch}/{seq}/preview", get(routes::files::quarantined_preview))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth::require_token))
-        .with_state(state);
+        .with_state(state.clone());
 
     let public = Router::new().route("/health", get(|| async { "ok" }));
     let public = match ui_dir {
@@ -167,11 +192,34 @@ pub async fn build_with(db_path: &std::path::Path, config: Config) -> anyhow::Re
     };
 
     let router = public.merge(protected);
+    let media = media_router(media_state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
 
-    Ok((listener, router, ServerInfo { addr, token }))
+    Ok(Parts { listener, router, media, info: ServerInfo { addr, token }, state })
+}
+
+/// Just the pictures, behind the same token. Served on a second port by its own threads (`run_with`).
+fn media_router(state: AppState) -> Router {
+    Router::new()
+        .route("/files/{id}/thumb", get(routes::files::thumbnail))
+        .route("/files/{id}/preview", get(routes::files::preview))
+        .route("/files/{id}/original", get(routes::files::original))
+        .route("/files/q/{batch}/{seq}/thumb", get(routes::files::quarantined_thumbnail))
+        .route("/files/q/{batch}/{seq}/preview", get(routes::files::quarantined_preview))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), auth::require_token))
+        .with_state(state)
+        .route("/health", get(|| async { "ok" }))
+}
+
+/// Where the UI should ask for pictures: a different host name and port than the app's own requests, so
+/// the browser keeps a separate set of connections for them and a page full of slow thumbnails cannot
+/// hold up a settings request. `null` when there is no separate picture server (the UI then uses the
+/// one it came from).
+async fn media_base(axum::extract::State(state): axum::extract::State<AppState>) -> axum::Json<serde_json::Value> {
+    let base = state.media_addr.get().map(|a| format!("http://localhost:{}", a.port()));
+    axum::Json(serde_json::json!({ "base": base }))
 }
 
 #[cfg(feature = "embed-ui")]
@@ -213,7 +261,30 @@ pub async fn run(db_path: PathBuf, ui_dir: Option<PathBuf>) -> anyhow::Result<Se
 
 /// `run`, with a full `Config` (what a shell that embeds the server uses).
 pub async fn run_with(db_path: PathBuf, config: Config) -> anyhow::Result<ServerInfo> {
-    let (listener, router, info) = build_with(&db_path, config).await?;
+    let Parts { listener, router, media, info, state } = build_parts(&db_path, config).await?;
+
+    // Pictures are served by their own threads on their own port: rendering and streaming can be as
+    // busy as they like without taking a thread, a connection or the database from the app's requests.
+    match TcpListener::bind("127.0.0.1:0").await {
+        Ok(media_listener) => {
+            if let Ok(addr) = media_listener.local_addr() {
+                let _ = state.media_addr.set(addr);
+                let std_listener = media_listener.into_std()?;
+                std::thread::Builder::new().name("media".into()).spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("media-worker").enable_all().build();
+                    let Ok(runtime) = runtime else { return };
+                    runtime.block_on(async move {
+                        let Ok(listener) = TcpListener::from_std(std_listener) else { return };
+                        if let Err(e) = axum::serve(listener, media).await {
+                            eprintln!("media server error: {e}");
+                        }
+                    });
+                })?;
+            }
+        }
+        Err(e) => eprintln!("photodedup: no separate port for pictures ({e}); they share the app's"),
+    }
+
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, router).await {
             eprintln!("server error: {e}");
@@ -423,6 +494,7 @@ mod tests {
             provenance: Provenance { origin: Origin::CameraOriginal, confidence: 1.0, evidence: vec![] },
             phash: None,
             sharpness: Some(sharpness),
+            light: None,
             width: None,
             height: None,
             size_bytes: 10,
@@ -483,6 +555,11 @@ mod tests {
     /// A server over real files on disk: `files` are created under a temp
     /// root and scanned into one cluster whose keeper is the first.
     async fn server_over_real_files(files: &[(&str, &[u8])]) -> (Router, ServerInfo, String, std::path::PathBuf, tempfile::TempDir) {
+        let (parts, scan_id, root, dir) = parts_over_real_files(files).await;
+        (parts.router, parts.info, scan_id, root, dir)
+    }
+
+    async fn parts_over_real_files(files: &[(&str, &[u8])]) -> (Parts, String, std::path::PathBuf, tempfile::TempDir) {
         use photodedup_core::model::{FileRecord, MediaClassSerde};
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
@@ -526,9 +603,9 @@ mod tests {
         // The database lives OUTSIDE the scanned folder, as it must.
         let db = tempfile::NamedTempFile::new().unwrap();
         let scan_id = photodedup_core::store::Store::open(db.path()).unwrap().save_scan(&root, &result).unwrap();
-        let (_l, router, info) = build(db.path()).await.unwrap();
+        let parts = build_parts(db.path(), Config::default()).await.unwrap();
         std::mem::forget(db);
-        (router, info, scan_id, root, dir)
+        (parts, scan_id, root, dir)
     }
 
     async fn call(router: &Router, method: &str, uri: String, body: &str) -> (u16, serde_json::Value) {
@@ -545,6 +622,75 @@ mod tests {
         let status = res.status().as_u16();
         let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
         (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    }
+
+    /// A bare HTTP/1.0 GET over a real socket: `(status, body)`.
+    async fn http_get(addr: std::net::SocketAddr, path: String) -> (u16, String) {
+        tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Write};
+            let mut s = std::net::TcpStream::connect(addr).unwrap();
+            s.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            write!(s, "GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n").unwrap();
+            let mut out = String::new();
+            s.read_to_string(&mut out).unwrap();
+            let status = out.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+            (status, out.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn pictures_have_a_port_of_their_own_and_the_app_says_where() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache");
+        let info = run_with(tmp.path().join("db.sqlite3"), Config { cache_dir: Some(cache), ..Config::default() }).await.unwrap();
+
+        let (status, body) = http_get(info.addr, format!("/api/media?token={}", info.token)).await;
+        assert_eq!(status, 200);
+        let media: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let base = media["base"].as_str().expect("a separate picture server is advertised");
+        let port: u16 = base.rsplit(':').next().unwrap().parse().unwrap();
+        assert_ne!(port, info.addr.port(), "a different port, so the browser keeps different connections");
+        assert!(base.starts_with("http://localhost:"), "and a different host name, which is what the browser counts connections by");
+
+        let media_addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        assert_eq!(http_get(media_addr, "/health".into()).await.0, 200);
+        // Same token rule as everywhere, and nothing but pictures is served there.
+        let id = "00000000-0000-0000-0000-000000000000";
+        assert_eq!(http_get(media_addr, format!("/files/{id}/thumb")).await.0, 401);
+        assert_eq!(http_get(media_addr, format!("/files/{id}/thumb?token={}", info.token)).await.0, 404);
+        assert_eq!(http_get(media_addr, format!("/api/settings?token={}", info.token)).await.0, 404, "the app's own routes are not there");
+    }
+
+    #[tokio::test]
+    async fn the_apps_own_requests_never_wait_for_pictures_to_render() {
+        use std::time::Duration;
+        let (parts, scan, _root, _dir) = parts_over_real_files(&[("a.jpg", b"one")]).await;
+        let t = parts.info.token.clone();
+        let (_, library) = call(&parts.router, "GET", format!("/api/scans/{scan}/library?token={t}"), "").await;
+        let id = library[0]["id"].as_str().expect("the file's id").to_string();
+
+        // Every render slot is taken, as a page full of slow HEIC thumbnails would take them.
+        let held = parts.state.render_gate.clone().acquire_many_owned(state::RENDER_PERMITS as u32).await.unwrap();
+
+        // A picture that needs rendering now waits in line ...
+        let media = parts.media.clone();
+        let req = axum::http::Request::builder().uri(format!("/files/{id}/thumb?token={t}&size=64")).body(axum::body::Body::empty()).unwrap();
+        let waiting = tokio::spawn(async move { send(&media, req).await.status().as_u16() });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!waiting.is_finished(), "the picture should be queued behind the render slots");
+
+        // ... while the app's own requests are answered at once.
+        for uri in ["/api/settings", "/api/batches", "/api/media"] {
+            let answered = tokio::time::timeout(Duration::from_secs(1), call(&parts.router, "GET", format!("{uri}?token={t}"), "")).await;
+            assert_eq!(answered.expect("answered without waiting").0, 200, "{uri}");
+        }
+
+        // Once a slot frees, the picture is made (this file is not a real image, so it is refused).
+        drop(held);
+        let status = tokio::time::timeout(Duration::from_secs(10), waiting).await.expect("served after a slot freed").unwrap();
+        assert_eq!(status, 422);
     }
 
     #[tokio::test]
@@ -669,6 +815,7 @@ mod tests {
                     provenance: Provenance { origin: Origin::CameraOriginal, confidence: 1.0, evidence: vec![] },
                     phash: Some(Hash256(1, 1)),
                     sharpness: Some(1.0),
+                    light: None,
                     width: Some(8),
                     height: Some(8),
                     size_bytes: 10,

@@ -1,4 +1,4 @@
-import { api, type Analysis, type FileDto } from './api';
+import { api, type Analysis, type DefectFinding, type FileDto } from './api';
 
 /** `partial` = some but not all members decided (e.g. an interrupted
  * write); `accepted` = decided exactly as suggested; `changed` = decided
@@ -9,9 +9,9 @@ export type Filter = 'all' | 'undecided' | 'changed';
 /** The categories the review is split into. Every one is decided the same
  * way (keep / quarantine per file); they differ in what the engine
  * suggests: duplicates and sequences suggest dropping the extras, while
- * look-alikes and orphan videos suggest keeping everything. */
-export type Tab = 'exact' | 'true' | 'burst' | 'similar' | 'orphans';
-export const tabs: Tab[] = ['exact', 'true', 'burst', 'similar', 'orphans'];
+ * look-alikes, orphan videos and possible defects suggest keeping everything. */
+export type Tab = 'exact' | 'true' | 'burst' | 'similar' | 'orphans' | 'defects';
+export const tabs: Tab[] = ['exact', 'true', 'burst', 'similar', 'orphans', 'defects'];
 export type Sort = 'oldest' | 'newest';
 /** Photos and videos are reviewed apart: bulk actions only ever reach the
  * kind on screen, so a video is never swept in by a click made on photos. */
@@ -86,11 +86,12 @@ export class Review {
    * settings are being tuned; the first load opens on the first category with anything in it. */
   async load(keepView = false) {
     try {
-      const [clusters, bursts, pairs, orphans, decisions] = await Promise.all([
+      const [clusters, bursts, pairs, orphans, defects, decisions] = await Promise.all([
         api.clusters(this.scanId),
         api.burstRuns(this.scanId),
         api.reviewPairs(this.scanId),
         api.orphanVideos(this.scanId),
+        api.defects(this.scanId),
         api.decisions(this.scanId),
       ]);
       // A burst frame that is some duplicate cluster's suggested keeper
@@ -151,6 +152,17 @@ export class Review {
           reasons: [],
           members: [o.file],
           suggested: new Set([o.file.id]),
+          sharpness: {},
+        })),
+        // Photos that look like mistakes: one per group, kept unless the user says otherwise.
+        ...defects.items.map<Group>((d) => ({
+          id: d.file.id,
+          tab: 'defects',
+          label: defectText(d.findings),
+          capturedAt: d.captured_at,
+          reasons: [],
+          members: [d.file],
+          suggested: new Set([d.file.id]),
           sharpness: {},
         })),
       ];
@@ -439,6 +451,19 @@ function loadSort(): Sort {
   }
 }
 
+const defectWords: Record<DefectFinding['kind'], string> = {
+  black: 'Almost black, maybe a covered lens',
+  dark: 'Very dark',
+  bright: 'Washed out',
+  flat: 'Hardly any detail',
+  blurry: 'Out of focus',
+};
+const sourceWords: Record<DefectFinding['source'], string> = { measured: 'Measured' };
+/** What was found, in words, and who found it. Several findings read as one line. */
+export function defectText(findings: DefectFinding[]): string {
+  return findings.map((f) => `${sourceWords[f.source]}: ${defectWords[f.kind].toLowerCase()}`).join(' · ');
+}
+
 const orphanReason: Record<string, string> = {
   no_match: 'No original found',
   unknown_origin: 'Source not identified',
@@ -490,6 +515,11 @@ export const tabInfo: Record<Tab, { title: string; blurb: string }> = {
     title: 'Same-device review',
     blurb:
       'Photos that look alike but were taken moments apart. Nothing is suggested for removal: everything is kept unless you choose otherwise. You can dismiss either photo of a pair, or both.',
+  },
+  defects: {
+    title: 'Possible defects',
+    blurb:
+      'Photos that look like mistakes: nearly black or washed out, almost no detail, or out of focus. Each says what was found and how. These are suggestions to look at, not verdicts: everything is kept unless you choose otherwise.',
   },
   orphans: {
     title: 'Orphan videos',

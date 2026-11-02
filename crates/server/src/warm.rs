@@ -206,6 +206,8 @@ mod tests {
             cache: Arc::new(ThumbCache::open(cache_dir, budget)),
             warm: Arc::default(),
             job: Arc::new(Mutex::new(None)),
+            media_addr: Arc::default(),
+            render_gate: Arc::new(tokio::sync::Semaphore::new(crate::state::RENDER_PERMITS)),
             folder_picker: None,
         };
         (state, scan, dir)

@@ -21,6 +21,7 @@
     | 'pencil'
     | 'circle'
     | 'tray'
+    | 'warning'
     | 'info';
 </script>
 
@@ -37,6 +38,8 @@
     dial: 'M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16ZM12 12l3.6-3.6M12 6.5v.01M7.6 8.2l.01.01M6.5 12h.01',
     // a box with a lid: put away, not thrown away
     archive: 'M4 5h16v4H4ZM5.5 9v9a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5V9M10 13h4',
+    // a triangle with an exclamation mark: look at this
+    warning: 'M12 4 3 20h18L12 4ZM12 10v4.5M12 17.5v.01',
     undo: 'M9 14 4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3',
     check: 'm5 12 5 5 9-10',
     'chevron-left': 'm15 5-7 7 7 7',

@@ -284,6 +284,45 @@ pub async fn list_orphan_videos(
     Ok(Json(out))
 }
 
+#[derive(Serialize)]
+pub struct DefectDto {
+    pub file: FileDto,
+    pub captured_at: Option<String>,
+    pub findings: Vec<photodedup_core::defects::Finding>,
+}
+
+#[derive(Serialize)]
+pub struct DefectsDto {
+    /// False for a scan made before the checks existed: it needs one more scan, and is not "clean".
+    pub measured: bool,
+    /// Photos with something to look at, the strongest finding first.
+    pub items: Vec<DefectDto>,
+}
+
+/// Photos that look like mistakes (black, washed out, flat, out of focus), measured from numbers saved at
+/// scan time. Suggestions only; decided like everything else, with everything kept by default.
+pub async fn list_defects(
+    State(state): State<AppState>,
+    AxPath(scan_id): AxPath<String>,
+) -> Result<Json<DefectsDto>, StatusCode> {
+    let store = state.store.lock().unwrap();
+    super::require_scan(&store, &scan_id)?;
+    let measured = store.has_light_stats(&scan_id).map_err(internal)?;
+    let files = file_lookup(&store, &scan_id).map_err(internal)?;
+    let mut items = Vec::new();
+    for (file_id, light, sharpness) in store.load_light_stats(&scan_id).map_err(internal)? {
+        let findings = photodedup_core::defects::measure(&light, sharpness);
+        if findings.is_empty() {
+            continue;
+        }
+        let Some(f) = files.get(&file_id) else { continue };
+        let captured_at = earliest_capture(&store, std::slice::from_ref(&file_id)).map_err(internal)?;
+        items.push(DefectDto { file: FileDto::from(f), captured_at, findings });
+    }
+    items.sort_by(|a, b| b.findings[0].strength.total_cmp(&a.findings[0].strength));
+    Ok(Json(DefectsDto { measured, items }))
+}
+
 pub async fn get_analysis(
     State(state): State<AppState>,
     AxPath(file_id): AxPath<Uuid>,

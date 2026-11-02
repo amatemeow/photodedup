@@ -24,22 +24,28 @@ use uuid::Uuid;
 /// every file-serving handler needs before it can do anything.
 fn resolve(state: &AppState, file_id: &Uuid) -> Result<(PathBuf, MediaClassSerde), StatusCode> {
     let id = file_id.to_string();
-    let store = state.store.lock().unwrap();
-    let (root, rel) = store
-        .get_file_location(&id)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    // The database is held only for the two lookups. The disk check below can block for a long time
+    // (a file that lives on a cloud drive), and everything else the app asks of the database would
+    // wait behind it.
+    let (root, rel, class) = {
+        let store = state.store.lock().unwrap();
+        let (root, rel) = store
+            .get_file_location(&id)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)?;
+        let file = store
+            .get_file(&id)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)?;
+        (root, rel, file.media_class)
+    };
     // Not just "root joined with rel": the path is checked to contain no
     // `..` and no symlink, so a file replaced by a link to somewhere else
     // after the scan cannot be used to read outside the scanned folder.
     let path = photodedup_core::fsguard::Workspace::open(std::path::Path::new(&root))
         .and_then(|ws| ws.existing_file(&rel))
         .map_err(|_| StatusCode::NOT_FOUND)?;
-    let file = store
-        .get_file(&id)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-    Ok((path, file.media_class))
+    Ok((path, class))
 }
 
 /// `GET /files/{id}/thumb?size=256` -- a small JPEG for the review grid.
@@ -87,14 +93,17 @@ pub async fn quarantined_preview(
 }
 
 async fn serve_quarantined_jpeg(state: AppState, batch: Uuid, seq: i64, size: u32) -> Response {
-    let found = {
+    let place = {
         let store = state.store.lock().unwrap();
-        photodedup_core::apply::quarantined_path(&store, &batch.to_string(), seq)
+        photodedup_core::apply::quarantined_place(&store, &batch.to_string(), seq)
     };
-    let (path, class) = match found {
+    let (path, class) = match place.and_then(|p| p.resolve()) {
         Ok(v) => v,
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
+    // Rendering waits its turn at the gate, so a flood of thumbnails queues here and never crowds out
+    // the app's own requests.
+    let _turn = state.render_gate.acquire().await;
     match tokio::task::spawn_blocking(move || generate(&path, class, size, SchedulingHint::Utility)).await {
         Ok(Ok(bytes)) => jpeg_response(bytes),
         _ => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
@@ -114,6 +123,7 @@ async fn serve_generated_jpeg(state: AppState, file_id: Uuid, size: u32) -> Resp
     // Decode is real CPU work (HEIC via ffmpeg, video frame extraction) --
     // run it off the async runtime's worker thread via spawn_blocking so
     // one slow thumbnail doesn't stall every other in-flight request.
+    let _turn = state.render_gate.acquire().await;
     let bytes = tokio::task::spawn_blocking(move || generate(&path, media_class, size, SchedulingHint::Utility)).await;
 
     match bytes {

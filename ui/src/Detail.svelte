@@ -51,7 +51,7 @@
   const undoKey = /Mac|iPhone|iPad/i.test(navigator.userAgent) ? '⌘Z' : 'Ctrl+Z';
   const undecided = $derived(status === 'undecided' || status === 'partial');
   const keepsNone = $derived(review.keepsNone(group));
-  const keepsAll = $derived(group.tab === 'similar' || group.tab === 'orphans');
+  const keepsAll = $derived(group.tab === 'similar' || group.tab === 'orphans' || group.tab === 'defects');
   const primaryLabel = $derived(!undecided ? 'Next' : isBurst ? 'Keep suggested only' : keepsAll ? 'Keep all' : 'Accept suggestion');
 
   // While the preview is open it handles its own keys (see Lightbox).

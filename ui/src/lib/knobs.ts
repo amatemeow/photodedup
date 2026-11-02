@@ -27,6 +27,7 @@ export const tabSettings: Record<string, KnobId[]> = {
   burst: ['sequence_similarity', 'sequence_gap_seconds'],
   similar: ['match_distance', 'sequence_gap_seconds'],
   orphans: [],
+  defects: [],
 };
 
 export function usedLine(tab: string, used: ScanInfo['used']): string {

@@ -4,6 +4,7 @@
   import { formatBytes } from './lib/review.svelte';
   import Lightbox from './Lightbox.svelte';
   import Icon from './Icon.svelte';
+  import Pending from './Pending.svelte';
 
   let { onClose, onChanged }: { onClose: () => void; onChanged: (reviewUpdated: boolean) => void } = $props();
 
@@ -165,7 +166,7 @@
     {#if error}<div class="notice danger" role="alert"><Icon name="info" size={18} /><p>{error}</p></div>{/if}
 
     {#if !loaded}
-      <div class="skeleton" style="height:160px"></div>
+      <Pending what="what is in quarantine" height={160} />
     {:else if batches.length === 0}
       <div class="empty">
         <Icon name="archive" size={36} />
@@ -191,7 +192,7 @@
 
         <section class="files" aria-label="Files in this batch">
           {#if !detail}
-            <div class="skeleton" style="height:200px"></div>
+            <Pending what="this batch" height={200} />
           {:else}
             <div class="bar rowbar">
               <div class="l">

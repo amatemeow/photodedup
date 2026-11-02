@@ -3,6 +3,8 @@
   import { api, ApiError, type Counts, type KnobId, type Settings } from './lib/api';
   import { describeChange, knobDefs } from './lib/knobs';
   import Icon from './Icon.svelte';
+  import Pending from './Pending.svelte';
+  import { known, refreshSettings } from './lib/settings';
 
   // The matching sliders, beside the review they act on. Moving one saves it,
   // groups the scan again and has the review reload, so the lists change while
@@ -15,7 +17,7 @@
     scanId,
   }: { scanId: string; onChanged: () => Promise<void>; onRescan: () => void; onClose: () => void } = $props();
 
-  let settings = $state<Settings | null>(null);
+  let settings = $state<Settings | null>(known.value);
   let opened = $state<Record<KnobId, number> | null>(null); // the values when this opened
   let baseline = $state<Counts | null>(null); // what the lists held then
   let latest = $state<Counts | null>(null);
@@ -32,7 +34,7 @@
 
   onMount(async () => {
     try {
-      settings = await api.settings();
+      settings = await refreshSettings();
       opened = values(settings);
       // Also how we learn whether this scan can be tuned at all.
       baseline = latest = (await api.previewRegroup(scanId, opened)).current;
@@ -118,7 +120,7 @@
       </span>
     </div>
   {:else if !settings || !baseline}
-    {#if !error}<div class="skeleton" style="height:180px"></div>{/if}
+    {#if !error}<Pending what="the matching settings" height={180} />{/if}
   {:else}
     <p class="hint intro">Drag a slider and the review changes as you go. Your keep and quarantine choices stay with the photos.</p>
     {#each knobDefs as k (k.id)}

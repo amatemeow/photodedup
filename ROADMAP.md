@@ -1128,3 +1128,64 @@ letterbox bars in the detail view, and a start screen that was a bare form.
 - Known limits: library tiles are uniform squares (the three card shapes are the review overview's);
   a re-scan does not carry the "in quarantine" state, it reads the folder, where those files no longer are.
 
+
+## Possible defects, measured (2026-11-02; first source of the AI plan in `.agents/311026_ai_spike.md`)
+
+- **A review category "Possible defects"** lists photos that look like mistakes: `defects.rs` measures four
+  brightness numbers per photo at scan time (`LightStats`, saved in `analysis.light_*`) and works the verdicts out
+  from them plus the sharpness it already had, so a threshold can change without a re-scan. Findings: almost black,
+  very dark, washed out, hardly any detail, out of focus. Each carries a `source` (`measured` now; a model will
+  add its own) and the review prints it ("Measured: washed out"). Decided like orphan videos: one photo per group,
+  kept unless the user says otherwise, never moved on its own. A scan made before this has no numbers and shows
+  nothing here until it is scanned again (`GET .../defects` says `measured: false`).
+- **Thresholds were set from data, not guessed.** On the 1,855 reference photos (an evening-heavy trip) the first
+  guess flagged 36 real night shots as "dark", so "dark" now needs mean luma under 12 with over 90% of pixels
+  dark: none flagged there. No photo in that set is truly defective, so the cutoffs were checked on synthetic
+  cases (black, white, grey, heavily blurred) and by blurring real photos with `examples/blur_probe.rs`.
+- **Blur is the weak one.** The Laplacian-variance sharpness depends on how much detail the scene has (a sharp plain
+  scene reads ~100, a sharp busy one ~5000), so no single cutoff separates "soft" from "plain". The cutoff
+  (15) therefore catches only heavy blur, and never a dark frame (the number means nothing there). Finer focus
+  problems are for the model; the merge rule is in the spike notes (agree: one suggestion; disagree: both, labelled).
+- **Found on the way, fixed:** a JPEG with no EXIF segment, or a PNG, made `extract_image` fail, and the pipeline
+  then dropped the file from analysis entirely (never hashed, never grouped). They are now analysed as files with no
+  metadata. Screenshots and downloads were the ones affected.
+- Not done: videos have no checks.
+
+## Synthetic test library (2026-11-02)
+
+- The "reference set" the early tests used was the owner's real travel folder, and a review pass has since been
+  applied to it, so its files moved and the expected counts (181 zero-EXIF files, named photos) no longer held.
+  Nothing should be tested or calibrated against it again.
+- `scripts/make-fixture.py <dir> [--heic-from <folder>]` builds a stand-in from generated patterns (ffmpeg only; the
+  EXIF is written by the script): unrelated photos, an exact copy, a messenger-style copy, a four-frame sequence,
+  look-alikes half a minute apart, black / washed-out / flat / blurred frames, a dark night scene that must NOT be
+  flagged, EXIF-less JPEG and PNG, a camera-named file with no EXIF, two videos. HEIC cannot be generated: the
+  script copies three from a folder you name (GPS included, so the output stays out of git).
+- `crates/core/tests/fixture.rs` (ignored, `PHOTODEDUP_FIXTURE=<dir>`) asserts what the engine finds in it. It
+  replaces the three reference-set tests that no longer held (pHash parity with the Python prototype, "camera-looking
+  name with no EXIF is Derived", "a messenger JPG has no camera identity"); the first has no stand-in, since it
+  compared against the prototype's numbers on photos that are gone.
+- Still on the old reference folder (`PHOTODEDUP_REFERENCE_SET`, five ignored tests that read named HEIC/video
+  files): they pass today and will break if those files move. Port them to the fixture when one does.
+
+## Panels never wait for pictures (2026-11-02, after Settings, Fine-tune and Quarantine took a long time to open)
+
+- **Two queues were one.** (1) The browser kept one set of connections (six at a time) for everything the page asked
+  of the server, so a grid of slow thumbnails held up a settings request: measured on a copy of the real database,
+  a settings/batches request took 372 / 107 ms while the grid loaded, 1 / 2 ms with the fix. (2) Every picture request
+  checked the file on disk **while holding the database lock**, so for a file on a cloud drive (a placeholder the cloud
+  client has not downloaded) one slow disk check stopped every other request that needed the database.
+- **Pictures now run on their own.** `run_with` serves `/files/...` from a second port on its own two threads (its own
+  runtime and blocking pool), with its own database connection, advertised by `GET /api/media` as `http://localhost:<port>`
+  (a different host name, which is what browsers count connections by). The UI asks for it before it draws anything,
+  checks that it answers, and otherwise falls back to the one address. The token rule is the same; only pictures are
+  served there.
+- **Rendering waits in line.** At most `RENDER_PERMITS` (4) pictures are made at once; the rest queue at a semaphore in
+  the picture server, not on the app's threads. Pictures already in the cache skip the line.
+- **The disk check no longer holds the database** (`resolve` in `routes/files.rs`; `apply::quarantined_place` +
+  `QuarantinedPlace::resolve` for the quarantine folder).
+- **Settings opens at once**: its frame, Appearance and the three scan-speed choices need no server; only the current
+  choice and the storage slider wait, and say so. Fine-tune and Quarantine show what they are loading and, after two
+  seconds, that the app is probably busy (`Pending.svelte`).
+- Not done: the scan itself and the background pre-render still share the machine's cores with the app (they run at lowered
+  priority); only the queues were separated.

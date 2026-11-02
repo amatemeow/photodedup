@@ -117,7 +117,7 @@
       .slice(0, 8);
   });
 
-  const icons: Record<Tab, Name> = { exact: 'layers', true: 'compare', burst: 'burst', similar: 'photo', orphans: 'film' };
+  const icons: Record<Tab, Name> = { exact: 'layers', true: 'compare', burst: 'burst', similar: 'photo', orphans: 'film', defects: 'warning' };
   const overall = $derived({
     all: review.mediaCounts.photo.all + review.mediaCounts.video.all,
     reviewed: review.mediaCounts.photo.reviewed + review.mediaCounts.video.reviewed,

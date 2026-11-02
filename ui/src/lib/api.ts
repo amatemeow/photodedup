@@ -108,6 +108,25 @@ export interface OrphanVideo {
   reason: 'no_match' | 'unknown_origin';
 }
 
+export type DefectKind = 'black' | 'dark' | 'bright' | 'flat' | 'blurry';
+export interface DefectFinding {
+  kind: DefectKind;
+  /** Who found it: `measured` (statistics on the picture); a model will add its own. */
+  source: 'measured';
+  /** 0..1, orders the list. */
+  strength: number;
+}
+export interface DefectItem {
+  file: FileDto;
+  captured_at: string | null;
+  findings: DefectFinding[];
+}
+export interface Defects {
+  /** False for a scan made before the checks existed: it needs one more scan. */
+  measured: boolean;
+  items: DefectItem[];
+}
+
 export interface Analysis {
   origin: string;
   width: number | null;
@@ -262,6 +281,27 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 const THUMB_SIZE = 800;
 
+/** Where pictures come from. The server serves them on a port and host name of its own, so the browser
+ * keeps a separate set of connections for them: a page full of slow thumbnails cannot hold up a settings
+ * request. Empty (the page's own address) until `configureMedia` has found and checked that address. */
+let mediaBase = '';
+
+/** Asks the server where pictures are served and, only if that address answers, uses it. Never throws:
+ * without it pictures simply come from the same address as everything else. */
+export async function configureMedia(): Promise<void> {
+  try {
+    const { base } = await call<{ base: string | null }>('/api/media');
+    if (!base) return;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 1500);
+    // `no-cors`: an opaque answer is enough to know something is listening there.
+    await fetch(`${base}/health`, { mode: 'no-cors', signal: ctl.signal }).finally(() => clearTimeout(timer));
+    mediaBase = base;
+  } catch {
+    mediaBase = '';
+  }
+}
+
 export const api = {
   hasToken: token !== '',
   resume: (root: string) => call<Resume>(`/api/resume?root=${encodeURIComponent(root)}`),
@@ -276,6 +316,7 @@ export const api = {
   burstRuns: (scanId: string) => call<BurstRun[]>(`/api/scans/${scanId}/burst-runs`),
   reviewPairs: (scanId: string) => call<ReviewPair[]>(`/api/scans/${scanId}/review-pairs`),
   orphanVideos: (scanId: string) => call<OrphanVideo[]>(`/api/scans/${scanId}/orphan-videos`),
+  defects: (scanId: string) => call<Defects>(`/api/scans/${scanId}/defects`),
   analysis: (fileId: string) => call<Analysis>(`/api/files/${fileId}/analysis`),
   decisions: (scanId: string) => call<Record<string, boolean>>(`/api/scans/${scanId}/decisions`),
   /** `manual`: chosen on single files in the library overview, which counts even for a file in no group. */
@@ -315,7 +356,7 @@ export const api = {
     call<UndoResult>(`/api/batches/${id}/restore`, { method: 'POST', body: JSON.stringify({ seqs }) }),
   /** A picture of a file that is in quarantine, found by its place in the batch. */
   quarantineUrl: (batchId: string, seq: number, kind: 'thumb' | 'preview', size?: number) =>
-    `/files/q/${batchId}/${seq}/${kind}?token=${encodeURIComponent(token)}${size ? `&size=${size}` : ''}`,
+    `${mediaBase}/files/q/${batchId}/${seq}/${kind}?token=${encodeURIComponent(token)}${size ? `&size=${size}` : ''}`,
   undoBatch: (batchId: string) => call<UndoResult>(`/api/batches/${batchId}/undo`, { method: 'POST' }),
 
   /** For `<img>`/`<video>` `src`, which can't send an Authorization header.
@@ -324,7 +365,7 @@ export const api = {
    * One size everywhere, so the grid and the detail view's placeholder share a cache
    * entry. A preview takes an optional `size` (long edge, px) for the full-screen view. */
   fileUrl: (fileId: string, kind: 'thumb' | 'preview' | 'original', size?: number) =>
-    `/files/${fileId}/${kind}?token=${encodeURIComponent(token)}${kind === 'thumb' ? `&size=${THUMB_SIZE}` : size ? `&size=${size}` : ''}`,
+    `${mediaBase}/files/${fileId}/${kind}?token=${encodeURIComponent(token)}${kind === 'thumb' ? `&size=${THUMB_SIZE}` : size ? `&size=${size}` : ''}`,
 
   /** Streams a job's status. EventSource can't send headers, hence the
    * query token. Returns a function that closes the stream. */

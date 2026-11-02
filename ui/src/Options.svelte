@@ -3,6 +3,8 @@
   import { api, ApiError, type IntensityId, type Settings, type SettingsPatch } from './lib/api';
   import { cacheStopIndex, cacheStops, sizeLabel } from './lib/knobs';
   import Icon from './Icon.svelte';
+  import Pending from './Pending.svelte';
+  import { known, refreshSettings } from './lib/settings';
 
   // Where it was opened from decides what can be changed here. A setting that
   // cannot be changed from there stays visible, disabled, and says why.
@@ -22,7 +24,8 @@
         : '',
   );
 
-  let settings = $state<Settings | null>(null);
+  // Opens with what was last known, so it never waits for the server; the server's answer replaces it.
+  let settings = $state<Settings | null>(known.value);
   let error = $state('');
   let saved = $state(false);
 
@@ -53,9 +56,9 @@
 
   onMount(async () => {
     try {
-      settings = await api.settings();
+      settings = await refreshSettings();
     } catch (e) {
-      error = say(e);
+      if (!settings) error = say(e);
     }
   });
 
@@ -119,45 +122,45 @@
   <div class="column">
     {#if error}<div class="notice danger" role="alert"><Icon name="info" size={18} /><p>{error}</p></div>{/if}
 
+    <section>
+      <h2 class="lead">Appearance</h2>
+      <p class="hint intro">System follows your computer's light or dark setting.</p>
+      <div class="seg" role="group" aria-label="Appearance">
+        {#each themes as [key, label] (key)}
+          <button aria-pressed={theme === key} onclick={() => pickTheme(key)}>{label}</button>
+        {/each}
+      </div>
+    </section>
+
+    <section class:off={!!speedOff} title={speedOff}>
+      <h2 class="lead">Scan speed</h2>
+      <p class="hint intro">
+        How hard a scan may push this computer. It applies to every scan from now on and is remembered with your data.{#if settings} This machine has
+        {settings.logical_cores} cores.{/if}
+      </p>
+      {#if speedOff}<p class="why" id="why-speed"><Icon name="info" size={14} /><span>{speedOff}</span></p>{/if}
+      <fieldset class="tiers" disabled={!!speedOff || !settings} aria-label="Scan speed" aria-describedby={speedOff ? 'why-speed' : undefined}>
+        {#each tiers as t (t.id)}
+          <label class="tier" class:on={settings?.scan_intensity === t.id}>
+            <input type="radio" name="intensity" value={t.id} checked={settings?.scan_intensity === t.id} onchange={() => choose(t.id)} />
+            <span class="body">
+              <span class="head">
+                <strong>{t.title}</strong>
+                {#if t.id === 'default'}<span class="badge accent">Recommended</span>{/if}
+                {#if settings}<span class="hint">{workers(t.id)} worker{workers(t.id) === 1 ? '' : 's'}</span>{/if}
+              </span>
+              <span class="secondary">{t.blurb}</span>
+            </span>
+          </label>
+        {/each}
+      </fieldset>
+    </section>
+
     {#if !settings}
       {#if !error}
-        <div class="skeleton" style="height:220px"></div>
+        <Pending what="your storage settings" height={160} />
       {/if}
     {:else}
-      <section>
-        <h2 class="lead">Appearance</h2>
-        <p class="hint intro">System follows your computer's light or dark setting.</p>
-        <div class="seg" role="group" aria-label="Appearance">
-          {#each themes as [key, label] (key)}
-            <button aria-pressed={theme === key} onclick={() => pickTheme(key)}>{label}</button>
-          {/each}
-        </div>
-      </section>
-
-      <section class:off={!!speedOff} title={speedOff}>
-        <h2 class="lead">Scan speed</h2>
-        <p class="hint intro">
-          How hard a scan may push this computer. It applies to every scan from now on and is remembered with your data. This machine has
-          {settings.logical_cores} cores.
-        </p>
-        {#if speedOff}<p class="why" id="why-speed"><Icon name="info" size={14} /><span>{speedOff}</span></p>{/if}
-        <fieldset class="tiers" disabled={!!speedOff} aria-label="Scan speed" aria-describedby={speedOff ? 'why-speed' : undefined}>
-          {#each tiers as t (t.id)}
-            <label class="tier" class:on={settings.scan_intensity === t.id}>
-              <input type="radio" name="intensity" value={t.id} checked={settings.scan_intensity === t.id} onchange={() => choose(t.id)} />
-              <span class="body">
-                <span class="head">
-                  <strong>{t.title}</strong>
-                  {#if t.id === 'default'}<span class="badge accent">Recommended</span>{/if}
-                  <span class="hint">{workers(t.id)} worker{workers(t.id) === 1 ? '' : 's'}</span>
-                </span>
-                <span class="secondary">{t.blurb}</span>
-              </span>
-            </label>
-          {/each}
-        </fieldset>
-      </section>
-
       <section>
         <h2 class="lead">Preview storage</h2>
         <p class="hint intro">
