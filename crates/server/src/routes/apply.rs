@@ -9,7 +9,7 @@ use crate::state::AppState;
 use axum::extract::{Path as AxPath, State};
 use axum::http::StatusCode;
 use axum::Json;
-use photodedup_core::apply::{self, ApplyError, BatchSummary, ExecuteResult, Plan, UndoResult};
+use photodedup_core::apply::{self, ApplyError, BatchDetail, BatchSummary, ExecuteResult, Plan, UndoResult};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -55,8 +55,12 @@ pub async fn run(
     let store = state.store.clone();
     // Moving files is blocking work; keep it off the async workers.
     tokio::task::spawn_blocking(move || {
-        let store = store.lock().unwrap();
-        apply::execute(&store, &scan_id)
+        let mut store = store.lock().unwrap();
+        let mut result = apply::execute(&store, &scan_id)?;
+        if result.moved > 0 {
+            result.review_updated = apply::refresh_groups(&mut store, &scan_id)?;
+        }
+        Ok(result)
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -76,8 +80,46 @@ pub async fn undo(State(state): State<AppState>, AxPath(batch_id): AxPath<Uuid>)
     let store = state.store.clone();
     let id = batch_id.to_string();
     tokio::task::spawn_blocking(move || {
-        let store = store.lock().unwrap();
-        apply::undo(&store, &id)
+        let mut store = store.lock().unwrap();
+        let mut result = apply::undo(&store, &id)?;
+        if result.restored > 0 {
+            result.review_updated = apply::refresh_groups_for_batch(&mut store, &id)?;
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map(Json)
+    .map_err(fail)
+}
+
+/// `GET /api/batches/{id}` -- one batch with every file it took.
+pub async fn batch_detail(State(state): State<AppState>, AxPath(batch_id): AxPath<Uuid>) -> Result<Json<BatchDetail>, (StatusCode, String)> {
+    let store = state.store.lock().unwrap();
+    apply::batch_detail(&store, &batch_id.to_string()).map(Json).map_err(fail)
+}
+
+#[derive(Deserialize)]
+pub struct RestoreBody {
+    /// The `seq` of each file to put back.
+    pub seqs: Vec<i64>,
+}
+
+/// `POST /api/batches/{id}/restore` with `{"seqs": [...]}` -- puts some of a batch's files back.
+pub async fn restore(
+    State(state): State<AppState>,
+    AxPath(batch_id): AxPath<Uuid>,
+    Json(body): Json<RestoreBody>,
+) -> Result<Json<UndoResult>, (StatusCode, String)> {
+    let store = state.store.clone();
+    let id = batch_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut store = store.lock().unwrap();
+        let mut result = apply::restore_items(&store, &id, Some(&body.seqs))?;
+        if result.restored > 0 {
+            result.review_updated = apply::refresh_groups_for_batch(&mut store, &id)?;
+        }
+        Ok(result)
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?

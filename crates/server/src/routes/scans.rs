@@ -318,3 +318,43 @@ fn internal<E: std::fmt::Display>(e: E) -> StatusCode {
     eprintln!("server error: {e}");
     StatusCode::INTERNAL_SERVER_ERROR
 }
+
+#[derive(Serialize)]
+pub struct LibraryFileDto {
+    pub id: String,
+    pub relative_path: String,
+    pub file_name: String,
+    pub media_class: MediaClassSerde,
+    pub size_bytes: u64,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// From the file's own metadata, `YYYY-MM-DD HH:MM:SS`, when it has any.
+    pub captured_at: Option<String>,
+    pub mtime_unix: i64,
+}
+
+/// `GET /api/scans/{id}/library` -- every photo and video of the scan that is in the library now
+/// (grouped or not), for the library overview. Companions and files in quarantine are left out.
+pub async fn list_library(State(state): State<AppState>, AxPath(scan_id): AxPath<String>) -> Result<Json<Vec<LibraryFileDto>>, StatusCode> {
+    let store = state.store.lock().unwrap();
+    super::require_scan(&store, &scan_id)?;
+    let rows = store.load_library(&scan_id).map_err(|e| {
+        eprintln!("server error: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| LibraryFileDto {
+                id: r.id,
+                relative_path: r.relative_path,
+                file_name: r.file_name,
+                media_class: r.media_class,
+                size_bytes: r.size_bytes,
+                width: r.width,
+                height: r.height,
+                captured_at: r.captured_at,
+                mtime_unix: r.mtime_unix,
+            })
+            .collect(),
+    ))
+}

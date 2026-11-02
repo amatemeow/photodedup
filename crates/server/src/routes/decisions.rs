@@ -62,12 +62,15 @@ pub async fn clear_decision(
 pub async fn put_decisions_bulk(
     State(state): State<AppState>,
     AxPath(scan_id): AxPath<String>,
+    Query(params): Query<HashMap<String, String>>,
     Json(body): Json<Vec<DecisionBody>>,
 ) -> Result<StatusCode, StatusCode> {
     let rows: Vec<(String, bool)> = body.into_iter().map(|d| (d.relative_path, d.keep)).collect();
+    // `?manual=1`: chosen on single files in the library overview (see `decisions.manual`).
+    let manual = params.get("manual").is_some_and(|v| v == "1");
     let store = state.store.lock().unwrap();
     require_scan(&store, &scan_id)?;
-    store.record_decisions(&scan_id, &rows).map(|()| StatusCode::NO_CONTENT).map_err(internal)
+    store.record_decisions_as(&scan_id, &rows, manual).map(|()| StatusCode::NO_CONTENT).map_err(internal)
 }
 
 /// `POST /api/scans/{id}/decisions/clear` with a JSON array of relative

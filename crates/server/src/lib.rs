@@ -75,7 +75,13 @@ pub async fn build_with_ui(
 /// placeholder page.
 pub async fn build_with(db_path: &std::path::Path, config: Config) -> anyhow::Result<(TcpListener, Router, ServerInfo)> {
     let Config { ui_dir, folder_picker, cache_dir } = config;
-    let store = photodedup_core::store::Store::open(db_path)?;
+    let mut store = photodedup_core::store::Store::open(db_path)?;
+    // A database from before a scan knew what is in quarantine learns it once.
+    match photodedup_core::apply::backfill_quarantine_state(&mut store) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("photodedup: brought {n} scan(s) up to date with what is in quarantine"),
+        Err(e) => eprintln!("photodedup: could not read what is in quarantine: {e}"),
+    }
     // A crash mid-apply leaves a journalled batch half-done; reconcile it
     // with what is actually on disk before serving anything.
     match photodedup_core::apply::recover(&store) {
@@ -108,6 +114,7 @@ pub async fn build_with(db_path: &std::path::Path, config: Config) -> anyhow::Re
         .route("/api/scans", get(routes::scans::list_scans))
         .route("/api/scans/{id}/info", get(routes::scans::scan_info))
         .route("/api/scans/{id}/clusters", get(routes::scans::list_clusters))
+        .route("/api/scans/{id}/library", get(routes::scans::list_library))
         .route("/api/scans/{id}/review-pairs", get(routes::scans::list_review_pairs))
         .route("/api/scans/{id}/burst-runs", get(routes::scans::list_burst_runs))
         .route("/api/scans/{id}/regroup/preview", get(routes::regroup::preview))
@@ -123,7 +130,9 @@ pub async fn build_with(db_path: &std::path::Path, config: Config) -> anyhow::Re
         .route("/api/scans/{id}/apply/plan", get(routes::apply::preview))
         .route("/api/scans/{id}/apply", post(routes::apply::run))
         .route("/api/batches", get(routes::apply::batches))
+        .route("/api/batches/{id}", get(routes::apply::batch_detail))
         .route("/api/batches/{id}/undo", post(routes::apply::undo))
+        .route("/api/batches/{id}/restore", post(routes::apply::restore))
         .route("/api/settings", get(routes::settings::get).put(routes::settings::put))
         .route("/api/files/{id}/analysis", get(routes::scans::get_analysis))
         .route(
@@ -143,6 +152,8 @@ pub async fn build_with(db_path: &std::path::Path, config: Config) -> anyhow::Re
         .route("/files/{id}/thumb", get(routes::files::thumbnail))
         .route("/files/{id}/preview", get(routes::files::preview))
         .route("/files/{id}/original", get(routes::files::original))
+        .route("/files/q/{batch}/{seq}/thumb", get(routes::files::quarantined_thumbnail))
+        .route("/files/q/{batch}/{seq}/preview", get(routes::files::quarantined_preview))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth::require_token))
         .with_state(state);
 

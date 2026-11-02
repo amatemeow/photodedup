@@ -221,6 +221,13 @@ impl Workspace {
         move_no_overwrite(&from, &to)
     }
 
+    /// The real path of a quarantined file, for showing it (a thumbnail) without restoring it.
+    pub fn quarantined_file(&self, batch_rel: &str, rel: &str) -> Result<PathBuf, GuardError> {
+        let batch = self.validate_batch_dir(batch_rel)?;
+        let rel = self.validate_relative(rel)?;
+        self.check_no_symlinks(&batch.join(rel), true)
+    }
+
     /// Whether a quarantined copy exists (without following links).
     pub fn quarantined_exists(&self, batch_rel: &str, rel: &str) -> bool {
         match (self.validate_batch_dir(batch_rel), self.validate_relative(rel)) {

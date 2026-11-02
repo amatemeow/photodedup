@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS files (
     size_bytes INTEGER NOT NULL,
     mtime_unix INTEGER NOT NULL,
     is_placeholder INTEGER NOT NULL,
+    -- 1 while the file sits in a quarantine batch: the scan hides it (see `set_quarantined`)
+    quarantined INTEGER NOT NULL DEFAULT 0,
     UNIQUE(scan_id, relative_path)
 );
 
@@ -148,6 +150,9 @@ CREATE TABLE IF NOT EXISTS apply_items (
     -- planned | moved | skipped | restored
     state TEXT NOT NULL,
     note TEXT,
+    -- when the photo was taken (`YYYY-MM-DD HH:MM:SS`, from the scan's analysis), kept here so
+    -- the quarantine can be sorted by date after the scan is gone
+    taken_at TEXT,
     PRIMARY KEY (batch_id, seq)
 );
 
@@ -186,6 +191,9 @@ CREATE TABLE IF NOT EXISTS decisions (
     relative_path TEXT NOT NULL,
     keep INTEGER NOT NULL,
     decided_at TEXT NOT NULL,
+    -- 1 for a choice made on a single file in the library overview, which counts even for a file
+    -- that is in no group (a choice made in the review only counts while its file is in a group)
+    manual INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (scan_id, relative_path)
 );
 "#;
@@ -203,6 +211,23 @@ pub struct StoredFile {
     /// the review lays its cards out by shape.
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// Currently set aside in a quarantine batch; such a file is out of the groups and the overview.
+    pub quarantined: bool,
+}
+
+/// One file as the library overview lists it.
+#[derive(Debug, Clone)]
+pub struct LibraryRow {
+    pub id: String,
+    pub relative_path: String,
+    pub file_name: String,
+    pub media_class: MediaClassSerde,
+    pub size_bytes: u64,
+    pub mtime_unix: i64,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// `YYYY-MM-DD HH:MM:SS` from the file's own metadata, when it has any.
+    pub captured_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -273,6 +298,7 @@ pub struct StoredBatchItem {
     pub is_sibling: bool,
     pub state: String,
     pub note: Option<String>,
+    pub taken_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -318,6 +344,9 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         drop_legacy_schema(&conn)?;
         conn.execute_batch(SCHEMA)?;
+        add_column_if_missing(&conn, "files", "quarantined", "INTEGER NOT NULL DEFAULT 0")?;
+        add_column_if_missing(&conn, "decisions", "manual", "INTEGER NOT NULL DEFAULT 0")?;
+        add_column_if_missing(&conn, "apply_items", "taken_at", "TEXT")?;
         Ok(Store { conn })
     }
 
@@ -341,16 +370,16 @@ impl Store {
         // the same folder doesn't make the user redo their work. Read now,
         // before the old rows are deleted; applied only to files that have
         // not changed (see below).
-        let carried: Vec<(String, bool, String, u64, i64)> = {
+        let carried: Vec<(String, bool, String, u64, i64, bool)> = {
             let mut stmt = tx.prepare(
-                "SELECT d.relative_path, d.keep, d.decided_at, f.size_bytes, f.mtime_unix
+                "SELECT d.relative_path, d.keep, d.decided_at, f.size_bytes, f.mtime_unix, d.manual
                  FROM decisions d
                  JOIN scans s ON s.id = d.scan_id
                  JOIN files f ON f.scan_id = d.scan_id AND f.relative_path = d.relative_path
                  WHERE s.root_path = ?1",
             )?;
             let rows = stmt.query_map(params![new_root], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0, r.get::<_, String>(2)?, r.get::<_, i64>(3)? as u64, r.get::<_, i64>(4)?))
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0, r.get::<_, String>(2)?, r.get::<_, i64>(3)? as u64, r.get::<_, i64>(4)?, r.get::<_, i64>(5)? != 0))
             })?;
             rows.collect::<rusqlite::Result<_>>()?
         };
@@ -446,11 +475,11 @@ impl Store {
             .iter()
             .map(|f| (f.path.strip_prefix(root).unwrap_or(&f.path).to_string_lossy().to_string(), (f.size_bytes, f.mtime_unix)))
             .collect();
-        for (rel, keep, decided_at, size, mtime) in carried {
+        for (rel, keep, decided_at, size, mtime, manual) in carried {
             if still_same.get(&rel) == Some(&(size, mtime)) {
                 tx.execute(
-                    "INSERT INTO decisions (scan_id, relative_path, keep, decided_at) VALUES (?1, ?2, ?3, ?4)",
-                    params![scan_id, rel, keep as i64, decided_at],
+                    "INSERT INTO decisions (scan_id, relative_path, keep, decided_at, manual) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![scan_id, rel, keep as i64, decided_at, manual as i64],
                 )?;
             }
         }
@@ -564,7 +593,7 @@ impl Store {
     pub fn get_file(&self, file_id: &str) -> rusqlite::Result<Option<StoredFile>> {
         self.conn
             .query_row(
-                "SELECT f.id, f.relative_path, f.file_name, f.media_class, f.size_bytes, f.mtime_unix, f.is_placeholder, a.width, a.height
+                "SELECT f.id, f.relative_path, f.file_name, f.media_class, f.size_bytes, f.mtime_unix, f.is_placeholder, a.width, a.height, f.quarantined
                  FROM files f LEFT JOIN analysis a ON a.file_id = f.id WHERE f.id = ?1",
                 params![file_id],
                 |row| {
@@ -578,6 +607,7 @@ impl Store {
                         is_placeholder: row.get::<_, i64>(6)? != 0,
                         width: row.get::<_, Option<i64>>(7)?.map(|v| v as u32),
                         height: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
+                        quarantined: row.get::<_, i64>(9)? != 0,
                     })
                 },
             )
@@ -749,6 +779,90 @@ impl Store {
         tx.commit()
     }
 
+    /// Records when a batch file's photo was taken, for sorting the quarantine by date.
+    pub fn set_item_taken_at(&self, batch_id: &str, seq: i64, taken_at: &str) -> rusqlite::Result<()> {
+        self.conn.execute("UPDATE apply_items SET taken_at = ?3 WHERE batch_id = ?1 AND seq = ?2", params![batch_id, seq, taken_at])?;
+        Ok(())
+    }
+
+    /// When a photo of a scan was taken, from its analysis.
+    pub fn capture_time_in_scan(&self, scan_id: &str, relative_path: &str) -> rusqlite::Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT a.capture_time FROM analysis a JOIN files f ON f.id = a.file_id WHERE f.scan_id = ?1 AND f.relative_path = ?2",
+                params![scan_id, relative_path],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// A copy's date is its original's: the capture time of the file it was matched to as a
+    /// byte-identical copy or a re-encoded video, when the copy itself was never analysed.
+    pub fn capture_time_via_match(&self, root: &str, relative_path: &str) -> rusqlite::Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT a.capture_time
+                 FROM files f
+                 JOIN scans s ON s.id = f.scan_id
+                 JOIN fixed_edges e ON e.scan_id = f.scan_id AND (e.file_a_id = f.id OR e.file_b_id = f.id)
+                 JOIN analysis a ON a.file_id = CASE WHEN e.file_a_id = f.id THEN e.file_b_id ELSE e.file_a_id END
+                 WHERE s.root_path = ?1 AND f.relative_path = ?2 AND a.capture_time IS NOT NULL
+                 LIMIT 1",
+                params![root, relative_path],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// A re-saved copy (a messenger export, a screenshot of a photo) has lost its metadata, but it
+    /// still looks like its original: the capture time of the most similar photo of the folder that
+    /// has one, if it is close enough to be the same picture.
+    pub fn capture_time_via_look(&self, root: &str, relative_path: &str, max_distance: u32) -> rusqlite::Result<Option<String>> {
+        let mine: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT a.phash FROM analysis a JOIN files f ON f.id = a.file_id JOIN scans s ON s.id = f.scan_id
+                 WHERE s.root_path = ?1 AND f.relative_path = ?2 AND a.phash IS NOT NULL LIMIT 1",
+                params![root, relative_path],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(mine) = mine.as_deref().and_then(hash_from_blob) else { return Ok(None) };
+        let mut stmt = self.conn.prepare(
+            "SELECT a.phash, a.capture_time FROM analysis a JOIN files f ON f.id = a.file_id JOIN scans s ON s.id = f.scan_id
+             WHERE s.root_path = ?1 AND f.relative_path != ?2 AND a.capture_time IS NOT NULL AND a.phash IS NOT NULL",
+        )?;
+        let rows = stmt.query_map(params![root, relative_path], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?)))?;
+        let mut best: Option<(u32, String)> = None;
+        for row in rows {
+            let (blob, time) = row?;
+            let Some(h) = hash_from_blob(&blob) else { continue };
+            let d = mine.distance(&h);
+            if d <= max_distance && best.as_ref().is_none_or(|(b, _)| d < *b) {
+                best = Some((d, time));
+            }
+        }
+        Ok(best.map(|(_, t)| t))
+    }
+
+    /// The same, looked up through any scan of the folder (for a batch made before dates were kept).
+    pub fn capture_time_for_root(&self, root: &str, relative_path: &str) -> rusqlite::Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT a.capture_time FROM analysis a JOIN files f ON f.id = a.file_id JOIN scans s ON s.id = f.scan_id
+                 WHERE s.root_path = ?1 AND f.relative_path = ?2 AND a.capture_time IS NOT NULL",
+                params![root, relative_path],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     pub fn set_item_state(&self, batch_id: &str, seq: i64, state: &str, note: Option<&str>) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE apply_items SET state = ?3, note = ?4 WHERE batch_id = ?1 AND seq = ?2",
@@ -782,7 +896,7 @@ impl Store {
 
     pub fn load_batch_items(&self, batch_id: &str) -> rusqlite::Result<Vec<StoredBatchItem>> {
         let mut stmt = self.conn.prepare(
-            "SELECT seq, relative_path, size_bytes, mtime_unix, is_sibling, state, note FROM apply_items WHERE batch_id = ?1 ORDER BY seq",
+            "SELECT seq, relative_path, size_bytes, mtime_unix, is_sibling, state, note, taken_at FROM apply_items WHERE batch_id = ?1 ORDER BY seq",
         )?;
         let rows = stmt.query_map(params![batch_id], |r| {
             Ok(StoredBatchItem {
@@ -793,6 +907,7 @@ impl Store {
                 is_sibling: r.get::<_, i64>(4)? != 0,
                 state: r.get(5)?,
                 note: r.get(6)?,
+                taken_at: r.get(7)?,
             })
         })?;
         rows.collect()
@@ -801,7 +916,10 @@ impl Store {
     pub fn load_orphan_videos(&self, scan_id: &str) -> rusqlite::Result<Vec<StoredOrphanVideo>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT file_id, reason FROM orphan_videos WHERE scan_id = ?1 ORDER BY rowid")?;
+            .prepare(
+                "SELECT o.file_id, o.reason FROM orphan_videos o JOIN files f ON f.id = o.file_id
+                 WHERE o.scan_id = ?1 AND f.quarantined = 0 ORDER BY o.rowid",
+            )?;
         let rows = stmt.query_map(params![scan_id], |row| {
             Ok(StoredOrphanVideo { file_id: row.get(0)?, reason: row.get(1)? })
         })?;
@@ -846,7 +964,9 @@ impl Store {
             return Ok(None);
         }
 
-        let stored = self.load_files(scan_id)?;
+        // A file set aside in quarantine is not part of the library for now: it is left out of
+        // the grouping, so the groups it was in shrink or go.
+        let stored: Vec<StoredFile> = self.load_files(scan_id)?.into_iter().filter(|f| !f.quarantined).collect();
         let index: HashMap<&str, FileId> = stored.iter().enumerate().map(|(i, f)| (f.id.as_str(), i as FileId)).collect();
         let row_ids: Vec<String> = stored.iter().map(|f| f.id.clone()).collect();
         let files: Vec<FileRecord> = stored
@@ -975,7 +1095,7 @@ impl Store {
 
     pub fn load_files(&self, scan_id: &str) -> rusqlite::Result<Vec<StoredFile>> {
         let mut stmt = self.conn.prepare(
-            "SELECT f.id, f.relative_path, f.file_name, f.media_class, f.size_bytes, f.mtime_unix, f.is_placeholder, a.width, a.height
+            "SELECT f.id, f.relative_path, f.file_name, f.media_class, f.size_bytes, f.mtime_unix, f.is_placeholder, a.width, a.height, f.quarantined
              FROM files f LEFT JOIN analysis a ON a.file_id = f.id WHERE f.scan_id = ?1 ORDER BY f.rowid",
         )?;
         let rows = stmt.query_map(params![scan_id], |row| {
@@ -989,6 +1109,33 @@ impl Store {
                 is_placeholder: row.get::<_, i64>(6)? != 0,
                 width: row.get::<_, Option<i64>>(7)?.map(|v| v as u32),
                 height: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
+                quarantined: row.get::<_, i64>(9)? != 0,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Every photo and video of the scan that is in the library now: not in quarantine, and not a
+    /// companion (a RAW's sidecar, a Live Photo's video) that travels with another file.
+    pub fn load_library(&self, scan_id: &str) -> rusqlite::Result<Vec<LibraryRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.id, f.relative_path, f.file_name, f.media_class, f.size_bytes, f.mtime_unix, a.width, a.height, a.capture_time
+             FROM files f LEFT JOIN analysis a ON a.file_id = f.id
+             WHERE f.scan_id = ?1 AND f.quarantined = 0 AND f.media_class != 'sidecar'
+               AND f.id NOT IN (SELECT sibling_file_id FROM file_siblings WHERE scan_id = ?1)
+             ORDER BY f.rowid",
+        )?;
+        let rows = stmt.query_map(params![scan_id], |r| {
+            Ok(LibraryRow {
+                id: r.get(0)?,
+                relative_path: r.get(1)?,
+                file_name: r.get(2)?,
+                media_class: media_class_from_str(&r.get::<_, String>(3)?),
+                size_bytes: r.get::<_, i64>(4)? as u64,
+                mtime_unix: r.get(5)?,
+                width: r.get::<_, Option<i64>>(6)?.map(|v| v as u32),
+                height: r.get::<_, Option<i64>>(7)?.map(|v| v as u32),
+                captured_at: r.get(8)?,
             })
         })?;
         rows.collect()
@@ -1028,11 +1175,16 @@ impl Store {
     /// for one file, keyed by its stable relative path rather than a
     /// scan-local file id -- see the `decisions` table's doc comment.
     pub fn record_decision(&self, scan_id: &str, relative_path: &str, keep: bool) -> rusqlite::Result<()> {
+        self.record_decision_as(scan_id, relative_path, keep, false)
+    }
+
+    /// `manual`: the choice was made on this one file in the library overview.
+    pub fn record_decision_as(&self, scan_id: &str, relative_path: &str, keep: bool, manual: bool) -> rusqlite::Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         self.conn.execute(
-            "INSERT INTO decisions (scan_id, relative_path, keep, decided_at) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(scan_id, relative_path) DO UPDATE SET keep = excluded.keep, decided_at = excluded.decided_at",
-            params![scan_id, relative_path, keep as i64, now],
+            "INSERT INTO decisions (scan_id, relative_path, keep, decided_at, manual) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(scan_id, relative_path) DO UPDATE SET keep = excluded.keep, decided_at = excluded.decided_at, manual = excluded.manual",
+            params![scan_id, relative_path, keep as i64, now, manual as i64],
         )?;
         Ok(())
     }
@@ -1041,11 +1193,22 @@ impl Store {
     /// bulk "accept suggestions" can't leave a cluster half-decided if it
     /// fails midway.
     pub fn record_decisions(&self, scan_id: &str, decisions: &[(String, bool)]) -> rusqlite::Result<()> {
+        self.record_decisions_as(scan_id, decisions, false)
+    }
+
+    pub fn record_decisions_as(&self, scan_id: &str, decisions: &[(String, bool)], manual: bool) -> rusqlite::Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         for (path, keep) in decisions {
-            self.record_decision(scan_id, path, *keep)?;
+            self.record_decision_as(scan_id, path, *keep, manual)?;
         }
         tx.commit()
+    }
+
+    /// The files whose choice was made one by one in the library overview.
+    pub fn load_manual_decisions(&self, scan_id: &str) -> rusqlite::Result<std::collections::HashSet<String>> {
+        let mut stmt = self.conn.prepare("SELECT relative_path FROM decisions WHERE scan_id = ?1 AND manual = 1")?;
+        let rows = stmt.query_map(params![scan_id], |r| r.get::<_, String>(0))?;
+        rows.collect()
     }
 
     /// Forgets a decision, returning the file to "undecided" -- what undo
@@ -1056,6 +1219,27 @@ impl Store {
             params![scan_id, relative_path],
         )?;
         Ok(())
+    }
+
+    /// Marks files of a scan as in quarantine (or back), by relative path. In quarantine they
+    /// are left out of grouping; the choices recorded for them are forgotten, since they were
+    /// about a copy that is no longer in the library.
+    pub fn set_quarantined(&self, scan_id: &str, relative_paths: &[String], on: bool) -> rusqlite::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for path in relative_paths {
+            tx.execute("UPDATE files SET quarantined = ?3 WHERE scan_id = ?1 AND relative_path = ?2", params![scan_id, path, on as i64])?;
+            if on {
+                tx.execute("DELETE FROM decisions WHERE scan_id = ?1 AND relative_path = ?2", params![scan_id, path])?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// The scans of a folder, for a batch that is about the folder rather than one scan.
+    pub fn scan_ids_for_root(&self, root: &str) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT id FROM scans WHERE root_path = ?1")?;
+        let rows = stmt.query_map(params![root], |r| r.get(0))?;
+        rows.collect()
     }
 
     /// Forgets many decisions at once, all or nothing.
@@ -1077,6 +1261,19 @@ impl Store {
             .optional()
             .map(|v| v.map(|k| k != 0))
     }
+}
+
+/// Adds a column a database made by an earlier version lacks (`CREATE TABLE IF NOT EXISTS`
+/// leaves an existing table as it was).
+fn add_column_if_missing(conn: &Connection, table: &str, column: &str, definition: &str) -> rusqlite::Result<()> {
+    let has: bool = conn
+        .query_row(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"), params![column], |_| Ok(true))
+        .optional()?
+        .unwrap_or(false);
+    if !has {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"), [])?;
+    }
+    Ok(())
 }
 
 /// Databases made before scan ids became UUIDs have an integer `scans.id`
@@ -1418,6 +1615,26 @@ mod tests {
         assert!(store.load_burst_runs(&scan_id).unwrap().is_empty(), "the old sequence is gone");
         assert_eq!(store.get_scan_settings(&scan_id).unwrap().unwrap().0, tight, "and the scan says what it now reflects");
         assert_eq!(store.get_decision(&scan_id, "s1.jpg").unwrap(), Some(false), "choices are about files, so they stay");
+    }
+
+    #[test]
+    fn a_file_in_quarantine_drops_out_of_its_sequence_and_comes_back_with_it() {
+        use crate::thresholds::Thresholds;
+        let (root, result) = three_shots_result();
+        let mut store = Store::open_in_memory().unwrap();
+        let scan_id = store.save_scan(&root, &result).unwrap();
+        store.record_scan_settings(&scan_id, &Thresholds::default(), true).unwrap();
+        crate::apply::refresh_groups(&mut store, &scan_id).unwrap();
+        assert_eq!(store.load_burst_runs(&scan_id).unwrap()[0].member_file_ids.len(), 3);
+
+        store.set_quarantined(&scan_id, &["s2.jpg".to_string()], true).unwrap();
+        assert!(crate::apply::refresh_groups(&mut store, &scan_id).unwrap());
+        assert_eq!(store.load_burst_runs(&scan_id).unwrap()[0].member_file_ids.len(), 2, "the sequence shrinks");
+        assert_eq!(store.load_grouping_data(&scan_id).unwrap().unwrap().files.len(), 2);
+
+        store.set_quarantined(&scan_id, &["s2.jpg".to_string()], false).unwrap();
+        crate::apply::refresh_groups(&mut store, &scan_id).unwrap();
+        assert_eq!(store.load_burst_runs(&scan_id).unwrap()[0].member_file_ids.len(), 3, "and is whole again");
     }
 
     #[test]

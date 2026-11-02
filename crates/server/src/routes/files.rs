@@ -69,6 +69,38 @@ pub async fn preview(
     serve_generated_jpeg(state, file_id, size).await
 }
 
+/// `GET /files/q/{batch}/{seq}/thumb` -- a thumbnail of a file that is in quarantine, found by its
+/// place in the batch (never by a path in the request) and checked like every other path. Made on
+/// request and not kept: the quarantine screen shows a few at a time.
+pub async fn quarantined_thumbnail(State(state): State<AppState>, AxPath((batch, seq)): AxPath<(Uuid, i64)>) -> Response {
+    serve_quarantined_jpeg(state, batch, seq, 640).await
+}
+
+/// `GET /files/q/{batch}/{seq}/preview?size=` -- the same, larger, for looking at it.
+pub async fn quarantined_preview(
+    State(state): State<AppState>,
+    AxPath((batch, seq)): AxPath<(Uuid, i64)>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let size: u32 = params.get("size").and_then(|s| s.parse().ok()).unwrap_or(1600).clamp(256, 16384);
+    serve_quarantined_jpeg(state, batch, seq, size).await
+}
+
+async fn serve_quarantined_jpeg(state: AppState, batch: Uuid, seq: i64, size: u32) -> Response {
+    let found = {
+        let store = state.store.lock().unwrap();
+        photodedup_core::apply::quarantined_path(&store, &batch.to_string(), seq)
+    };
+    let (path, class) = match found {
+        Ok(v) => v,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    match tokio::task::spawn_blocking(move || generate(&path, class, size, SchedulingHint::Utility)).await {
+        Ok(Ok(bytes)) => jpeg_response(bytes),
+        _ => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
+    }
+}
+
 async fn serve_generated_jpeg(state: AppState, file_id: Uuid, size: u32) -> Response {
     let (path, media_class) = match resolve(&state, &file_id) {
         Ok(v) => v,

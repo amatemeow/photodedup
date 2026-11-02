@@ -94,9 +94,12 @@ pub fn plan(store: &Store, scan_id: &str) -> Result<Plan, ApplyError> {
         .chain(pairs.iter().flat_map(|p| [p.file_a_id.as_str(), p.file_b_id.as_str()]))
         .chain(orphans.iter().map(|o| o.file_id.as_str()))
         .collect();
+    // ...unless the person chose it on that one file in the library overview, which is a
+    // decision about the file itself and so counts wherever it is.
+    let manual = store.load_manual_decisions(scan_id)?;
     let quarantine: HashSet<&str> = files
         .iter()
-        .filter(|f| decisions.get(&f.relative_path) == Some(&false) && grouped.contains(f.id.as_str()))
+        .filter(|f| decisions.get(&f.relative_path) == Some(&false) && (grouped.contains(f.id.as_str()) || manual.contains(&f.relative_path)))
         .map(|f| f.id.as_str())
         .collect();
 
@@ -162,6 +165,9 @@ pub struct ExecuteResult {
     pub moved_bytes: u64,
     pub skipped: Vec<Skipped>,
     pub blocked: Vec<Blocked>,
+    /// The scan's groups were made again without the moved files, so the review is current.
+    /// False for a scan saved before that was possible: it needs scanning again.
+    pub review_updated: bool,
 }
 
 /// Re-checks one file against what the scan saw. A file that changed (or
@@ -207,7 +213,7 @@ pub fn execute(store: &Store, scan_id: &str) -> Result<ExecuteResult, ApplyError
         }
     }
     if ready.is_empty() {
-        return Ok(ExecuteResult { batch_id: None, moved: 0, moved_bytes: 0, skipped, blocked: plan.blocked });
+        return Ok(ExecuteResult { batch_id: None, moved: 0, moved_bytes: 0, skipped, blocked: plan.blocked, review_updated: false });
     }
 
     let batch_dir = ws.new_batch_dir(&chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string())?;
@@ -215,8 +221,18 @@ pub fn execute(store: &Store, scan_id: &str) -> Result<ExecuteResult, ApplyError
     let journal: Vec<(String, u64, i64, bool)> =
         ready.iter().map(|i| (i.relative_path.clone(), i.size_bytes, i.mtime_unix, i.is_sibling)).collect();
     store.create_batch(&batch_id, &plan.root_path, &batch_dir, &journal)?;
+    for (seq, item) in ready.iter().enumerate() {
+        let taken = match store.capture_time_in_scan(scan_id, &item.relative_path)? {
+            Some(t) => Some(t),
+            None => store.capture_time_via_match(&plan.root_path, &item.relative_path)?,
+        };
+        if let Some(taken) = taken {
+            store.set_item_taken_at(&batch_id, seq as i64, &taken)?;
+        }
+    }
 
     let (mut moved, mut moved_bytes) = (0usize, 0u64);
+    let mut moved_paths: Vec<String> = Vec::new();
     for (seq, item) in ready.iter().enumerate() {
         // Checked again immediately before the move, not just in the pass above.
         let outcome = still_as_scanned(&ws, item).and_then(|()| ws.quarantine(&batch_dir, &item.relative_path).map_err(|e| e.to_string()));
@@ -225,6 +241,7 @@ pub fn execute(store: &Store, scan_id: &str) -> Result<ExecuteResult, ApplyError
                 store.set_item_state(&batch_id, seq as i64, "moved", None)?;
                 moved += 1;
                 moved_bytes += item.size_bytes;
+                moved_paths.push(item.relative_path.clone());
             }
             Err(reason) => {
                 store.set_item_state(&batch_id, seq as i64, "skipped", Some(&reason))?;
@@ -235,7 +252,10 @@ pub fn execute(store: &Store, scan_id: &str) -> Result<ExecuteResult, ApplyError
 
     write_manifests(store, &ws, &batch_id)?;
     store.set_batch_state(&batch_id, if moved == 0 { "undone" } else { "done" })?;
-    Ok(ExecuteResult { batch_id: Some(batch_id), moved, moved_bytes, skipped, blocked: plan.blocked })
+    // The scan now knows these files are set aside; `refresh_groups` (needs a writable store) then
+    // makes its groups again without them.
+    store.set_quarantined(scan_id, &moved_paths, true)?;
+    Ok(ExecuteResult { batch_id: Some(batch_id), moved, moved_bytes, skipped, blocked: plan.blocked, review_updated: false })
 }
 
 fn csv_field(s: &str) -> String {
@@ -273,6 +293,8 @@ fn write_manifests(store: &Store, ws: &Workspace, batch_id: &str) -> Result<(), 
 #[derive(Debug, Clone, Serialize)]
 pub struct UndoResult {
     pub restored: usize,
+    /// As for `ExecuteResult`: the review shows the restored files again.
+    pub review_updated: bool,
     /// Files left in quarantine, and why. Re-running the undo retries them.
     pub skipped: Vec<Skipped>,
 }
@@ -281,20 +303,27 @@ pub struct UndoResult {
 /// sits at a file's original path, that file stays in quarantine and is
 /// reported. Works after a re-scan, because batches don't depend on scans.
 pub fn undo(store: &Store, batch_id: &str) -> Result<UndoResult, ApplyError> {
+    let batch = store.get_batch(batch_id)?.ok_or(ApplyError::NoSuchBatch)?;
+    if batch.state == "undone" {
+        return Err(ApplyError::AlreadyUndone);
+    }
+    restore_items(store, batch_id, None)
+}
+
+/// Puts back some of a batch's files (`only`: their `seq`), or all of them. The rules are
+/// `undo`'s: nothing is overwritten, what cannot be put back stays and is reported.
+pub fn restore_items(store: &Store, batch_id: &str, only: Option<&[i64]>) -> Result<UndoResult, ApplyError> {
     let mut batch = store.get_batch(batch_id)?.ok_or(ApplyError::NoSuchBatch)?;
     if batch.state == "running" {
         recover_batch(store, &batch)?;
         batch = store.get_batch(batch_id)?.ok_or(ApplyError::NoSuchBatch)?;
     }
-    if batch.state == "undone" {
-        return Err(ApplyError::AlreadyUndone);
-    }
     let ws = Workspace::open(Path::new(&batch.root_path))?;
 
-    let mut restored = 0;
+    let mut restored_paths: Vec<String> = Vec::new();
     let mut skipped = Vec::new();
     let items = store.load_batch_items(batch_id)?;
-    for item in items.iter().rev().filter(|i| i.state == "moved") {
+    for item in items.iter().rev().filter(|i| i.state == "moved" && only.is_none_or(|o| o.contains(&i.seq))) {
         let result = if !ws.quarantined_exists(&batch.quarantine_dir, &item.relative_path) {
             Err("not found in quarantine".to_string())
         } else if ws.occupied(&item.relative_path) {
@@ -305,7 +334,7 @@ pub fn undo(store: &Store, batch_id: &str) -> Result<UndoResult, ApplyError> {
         match result {
             Ok(()) => {
                 store.set_item_state(batch_id, item.seq, "restored", None)?;
-                restored += 1;
+                restored_paths.push(item.relative_path.clone());
             }
             Err(reason) => {
                 store.set_item_state(batch_id, item.seq, "moved", Some(&reason))?;
@@ -316,7 +345,94 @@ pub fn undo(store: &Store, batch_id: &str) -> Result<UndoResult, ApplyError> {
     ws.prune_empty_dirs(&batch.quarantine_dir);
     let still_in_quarantine = store.load_batch_items(batch_id)?.iter().any(|i| i.state == "moved");
     store.set_batch_state(batch_id, if still_in_quarantine { "partially_undone" } else { "undone" })?;
-    Ok(UndoResult { restored, skipped })
+    for scan in store.scan_ids_for_root(&batch.root_path)? {
+        store.set_quarantined(&scan, &restored_paths, false)?;
+    }
+    Ok(UndoResult { restored: restored_paths.len(), review_updated: false, skipped })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchItemView {
+    pub seq: i64,
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub is_sibling: bool,
+    /// `moved` (in quarantine now), `restored`, or `skipped`.
+    pub state: String,
+    pub note: Option<String>,
+    pub media_class: crate::model::MediaClassSerde,
+    /// When the photo was taken (`YYYY-MM-DD HH:MM:SS`), if its metadata said.
+    pub taken_at: Option<String>,
+    /// The file's own modification time, the fallback for a date.
+    pub mtime_unix: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchDetail {
+    #[serde(flatten)]
+    pub summary: BatchSummary,
+    pub items: Vec<BatchItemView>,
+}
+
+fn media_class_of(rel: &str) -> crate::model::MediaClassSerde {
+    use crate::model::{classify_extension, MediaClass};
+    let ext = Path::new(rel).extension().and_then(|e| e.to_str()).unwrap_or("");
+    classify_extension(ext).unwrap_or(MediaClass::Sidecar).into()
+}
+
+/// One batch with every file it took, for the quarantine screen.
+pub fn batch_detail(store: &Store, batch_id: &str) -> Result<BatchDetail, ApplyError> {
+    let summary = list_batches(store)?.into_iter().find(|b| b.id == batch_id).ok_or(ApplyError::NoSuchBatch)?;
+    let items = store
+        .load_batch_items(batch_id)?
+        .into_iter()
+        .filter(|i| i.state != "planned")
+        .map(|i| {
+            let taken_at = match i.taken_at.clone() {
+                Some(t) => Some(t),
+                None => {
+                    // Its own date, else its original's (matched copy, then the most similar dated
+                    // photo); found once and kept, so opening the batch again is quick.
+                    let root = &summary.root_path;
+                    let found = store
+                        .capture_time_for_root(root, &i.relative_path)
+                        .ok()
+                        .flatten()
+                        .or_else(|| store.capture_time_via_match(root, &i.relative_path).ok().flatten())
+                        .or_else(|| {
+                            let near = crate::thresholds::Thresholds::default().match_distance;
+                            store.capture_time_via_look(root, &i.relative_path, near).ok().flatten()
+                        });
+                    if let Some(t) = &found {
+                        let _ = store.set_item_taken_at(batch_id, i.seq, t);
+                    }
+                    found
+                }
+            };
+            (i, taken_at)
+        })
+        .map(|(i, taken_at)| BatchItemView {
+            seq: i.seq,
+            taken_at,
+            mtime_unix: i.mtime_unix,
+            media_class: media_class_of(&i.relative_path),
+            relative_path: i.relative_path,
+            size_bytes: i.size_bytes,
+            is_sibling: i.is_sibling,
+            state: i.state,
+            note: i.note,
+        })
+        .collect();
+    Ok(BatchDetail { summary, items })
+}
+
+/// Where a file now in quarantine really is, checked like every other path, so it can be shown
+/// without putting it back.
+pub fn quarantined_path(store: &Store, batch_id: &str, seq: i64) -> Result<(std::path::PathBuf, crate::model::MediaClassSerde), ApplyError> {
+    let batch = store.get_batch(batch_id)?.ok_or(ApplyError::NoSuchBatch)?;
+    let item = store.load_batch_items(batch_id)?.into_iter().find(|i| i.seq == seq && i.state == "moved").ok_or(ApplyError::NoSuchBatch)?;
+    let ws = Workspace::open(Path::new(&batch.root_path))?;
+    Ok((ws.quarantined_file(&batch.quarantine_dir, &item.relative_path)?, media_class_of(&item.relative_path)))
 }
 
 /// Reconciles one interrupted batch with the disk: an item whose file is in
@@ -328,7 +444,12 @@ fn recover_batch(store: &Store, batch: &StoredBatch) -> Result<(), ApplyError> {
         let in_quarantine = ws.quarantined_exists(&batch.quarantine_dir, &item.relative_path);
         let in_place = ws.occupied(&item.relative_path);
         match (in_quarantine, in_place) {
-            (true, false) => store.set_item_state(&batch.id, item.seq, "moved", Some("recovered after an interruption"))?,
+            (true, false) => {
+                store.set_item_state(&batch.id, item.seq, "moved", Some("recovered after an interruption"))?;
+                for scan in store.scan_ids_for_root(&batch.root_path)? {
+                    store.set_quarantined(&scan, &[item.relative_path.clone()], true)?;
+                }
+            }
             (false, true) => store.set_item_state(&batch.id, item.seq, "skipped", Some("not moved (interrupted)"))?,
             _ => store.set_item_state(&batch.id, item.seq, "skipped", Some("interrupted; needs a manual look"))?,
         }
@@ -347,6 +468,51 @@ pub fn recover(store: &Store) -> Result<usize, ApplyError> {
         n += 1;
     }
     Ok(n)
+}
+
+/// Makes a scan's groups again from its saved analysis and the thresholds it was made with, so
+/// files that moved to quarantine (or came back) change the review without scanning the folder.
+/// Returns false for a scan saved before regrouping was possible, which has to be scanned again.
+pub fn refresh_groups(store: &mut Store, scan_id: &str) -> Result<bool, ApplyError> {
+    let Some((used, _)) = store.get_scan_settings(scan_id)? else { return Ok(false) };
+    let Some(data) = store.load_grouping_data(scan_id)? else { return Ok(false) };
+    let grouping = crate::grouping::group(&data.input(), &used);
+    store.replace_grouping(scan_id, &data, &grouping, &used)?;
+    Ok(true)
+}
+
+/// Once, for a database from before scans knew about quarantine: marks the files of every batch
+/// still holding files, and makes those scans' groups again without them. Returns how many scans
+/// were brought up to date.
+pub fn backfill_quarantine_state(store: &mut Store) -> Result<usize, ApplyError> {
+    const DONE: &str = "quarantine_state_backfilled";
+    if store.get_setting(DONE)?.is_some() {
+        return Ok(0);
+    }
+    let mut touched = 0;
+    for batch in store.load_batches()? {
+        let held: Vec<String> = store.load_batch_items(&batch.id)?.into_iter().filter(|i| i.state == "moved").map(|i| i.relative_path).collect();
+        if held.is_empty() {
+            continue;
+        }
+        for scan in store.scan_ids_for_root(&batch.root_path)? {
+            store.set_quarantined(&scan, &held, true)?;
+            refresh_groups(store, &scan)?;
+            touched += 1;
+        }
+    }
+    store.set_setting(DONE, "1")?;
+    Ok(touched)
+}
+
+/// `refresh_groups` for every scan of the folder a batch belongs to.
+pub fn refresh_groups_for_batch(store: &mut Store, batch_id: &str) -> Result<bool, ApplyError> {
+    let batch = store.get_batch(batch_id)?.ok_or(ApplyError::NoSuchBatch)?;
+    let mut all = true;
+    for scan in store.scan_ids_for_root(&batch.root_path)? {
+        all &= refresh_groups(store, &scan)?;
+    }
+    Ok(all)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -575,6 +741,89 @@ mod tests {
     }
 
     #[test]
+    fn the_scan_knows_which_files_are_in_quarantine_until_they_are_put_back() {
+        let fx = fixture(&[("k.jpg", BIG), ("d.jpg", SMALL), ("o.jpg", SMALL)], &[&["k.jpg", "d.jpg"]], &[]);
+        fx.decide("d.jpg", false);
+        let flagged = || -> Vec<String> {
+            let mut v: Vec<String> = fx.store.load_files(&fx.scan).unwrap().into_iter().filter(|f| f.quarantined).map(|f| f.relative_path).collect();
+            v.sort();
+            v
+        };
+        assert!(flagged().is_empty());
+
+        let r = execute(&fx.store, &fx.scan).unwrap();
+        assert_eq!(flagged(), ["d.jpg"]);
+        assert!(fx.store.load_decisions(&fx.scan).unwrap().is_empty(), "the choice was about a copy that has left the library");
+
+        undo(&fx.store, r.batch_id.as_ref().unwrap()).unwrap();
+        assert!(flagged().is_empty(), "restored files are in the library again");
+    }
+
+    #[test]
+    fn a_file_chosen_one_by_one_in_the_library_overview_moves_even_though_it_is_in_no_group() {
+        let fx = fixture(&[("k.jpg", BIG), ("dup.jpg", SMALL), ("alone.jpg", SMALL)], &[&["k.jpg", "dup.jpg"]], &[]);
+        fx.store.record_decisions_as(&fx.scan, &[("alone.jpg".into(), false)], true).unwrap();
+        let r = execute(&fx.store, &fx.scan).unwrap();
+        assert_eq!(r.moved, 1);
+        assert!(!fx.exists("alone.jpg") && fx.exists("dup.jpg") && fx.exists("k.jpg"));
+    }
+
+    #[test]
+    fn a_quarantined_file_keeps_the_date_it_was_taken_for_sorting() {
+        let fx = fixture(&[("k.jpg", BIG), ("d.jpg", SMALL)], &[&["k.jpg", "d.jpg"]], &[]);
+        fx.decide("d.jpg", false);
+        let batch = execute(&fx.store, &fx.scan).unwrap().batch_id.unwrap();
+        let item = batch_detail(&fx.store, &batch).unwrap().items.remove(0);
+        assert_eq!(item.taken_at, None, "the fixture has no metadata");
+        assert!(item.mtime_unix > 0, "the modification time is the fallback");
+
+        fx.store.set_item_taken_at(&batch, item.seq, "2026-10-15 08:47:00").unwrap();
+        assert_eq!(batch_detail(&fx.store, &batch).unwrap().items[0].taken_at.as_deref(), Some("2026-10-15 08:47:00"));
+    }
+
+    #[test]
+    fn a_database_from_before_scans_knew_about_quarantine_learns_it_once() {
+        let mut fx = fixture(&[("k.jpg", BIG), ("d.jpg", SMALL)], &[&["k.jpg", "d.jpg"]], &[]);
+        fx.decide("d.jpg", false);
+        execute(&fx.store, &fx.scan).unwrap();
+        // what an older version left behind: files moved, scan unaware
+        fx.store.set_quarantined(&fx.scan, &["d.jpg".to_string()], false).unwrap();
+        let flagged = |fx: &Fx| fx.store.load_files(&fx.scan).unwrap().into_iter().filter(|f| f.quarantined).count();
+        assert_eq!(flagged(&fx), 0);
+
+        assert_eq!(backfill_quarantine_state(&mut fx.store).unwrap(), 1);
+        assert_eq!(flagged(&fx), 1);
+        assert_eq!(backfill_quarantine_state(&mut fx.store).unwrap(), 0, "and only once");
+    }
+
+    #[test]
+    fn some_of_a_batch_can_be_put_back_and_the_rest_stays_in_quarantine() {
+        let fx = fixture(&[("k.jpg", BIG), ("d1.jpg", SMALL), ("d2.jpg", SMALL)], &[&["k.jpg", "d1.jpg", "d2.jpg"]], &[]);
+        fx.decide("d1.jpg", false);
+        fx.decide("d2.jpg", false);
+        let batch = execute(&fx.store, &fx.scan).unwrap().batch_id.unwrap();
+
+        let detail = batch_detail(&fx.store, &batch).unwrap();
+        assert_eq!(detail.items.len(), 2);
+        let first = detail.items.iter().find(|i| i.relative_path == "d1.jpg").unwrap();
+        let (path, _) = quarantined_path(&fx.store, &batch, first.seq).unwrap();
+        assert!(path.is_file(), "a file in quarantine can be shown from where it is");
+
+        let r = restore_items(&fx.store, &batch, Some(&[first.seq])).unwrap();
+        assert_eq!(r.restored, 1);
+        assert!(fx.exists("d1.jpg") && !fx.exists("d2.jpg"));
+        assert_eq!(fx.store.get_batch(&batch).unwrap().unwrap().state, "partially_undone");
+        let flagged: Vec<String> = fx.store.load_files(&fx.scan).unwrap().into_iter().filter(|f| f.quarantined).map(|f| f.relative_path).collect();
+        assert_eq!(flagged, ["d2.jpg"], "only the file put back rejoins the library");
+        assert!(quarantined_path(&fx.store, &batch, first.seq).is_err(), "and it is no longer shown as quarantined");
+
+        // putting the same one back again does nothing, and the other can still be restored
+        assert_eq!(restore_items(&fx.store, &batch, Some(&[first.seq])).unwrap().restored, 0);
+        assert_eq!(undo(&fx.store, &batch).unwrap().restored, 1);
+        assert!(fx.exists("d2.jpg"));
+    }
+
+    #[test]
     fn a_quarantine_choice_for_a_file_no_longer_in_any_group_moves_nothing() {
         // `stray.jpg` was marked back when it was grouped; after the matching
         // settings changed it belongs to no group, so the choice is void.
@@ -619,8 +868,8 @@ mod tests {
         let fx = fixture(&[("k.jpg", BIG), ("d.jpg", SMALL)], &[&["k.jpg", "d.jpg"]], &[]);
         fx.decide("d.jpg", false);
         assert_eq!(execute(&fx.store, &fx.scan).unwrap().moved, 1);
-        let again = execute(&fx.store, &fx.scan).unwrap();
-        assert_eq!(again.moved, 0);
+        // the choice was forgotten when the file left the library, so there is nothing left to do
+        assert!(matches!(execute(&fx.store, &fx.scan), Err(ApplyError::NothingToApply)));
         assert_eq!(fx.store.load_batches().unwrap().len(), 1, "no empty second batch");
     }
 
