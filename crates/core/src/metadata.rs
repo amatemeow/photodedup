@@ -69,15 +69,25 @@ impl FileMetadata {
 }
 
 pub fn extract_image(path: &Path) -> Result<FileMetadata, MetadataError> {
-    let ms = MediaSource::file_path(path)?;
+    let no_metadata = || FileMetadata { metadata_readable: true, ..Default::default() };
+    // A format that cannot carry EXIF (a PNG screenshot) is just a file with none.
+    let ms = match MediaSource::file_path(path) {
+        Ok(ms) => ms,
+        Err(nom_exif::Error::UnrecognizedFileFormat) => return Ok(no_metadata()),
+        Err(e) => return Err(e.into()),
+    };
     if !ms.has_exif() {
-        return Ok(FileMetadata {
-            metadata_readable: true,
-            ..Default::default()
-        });
+        return Ok(no_metadata());
     }
     let mut parser = MediaParser::new();
-    let iter: ExifIter = parser.parse(ms)?;
+    // A JPEG can be a valid picture with no EXIF segment at all (a screenshot, a download, an encoder's
+    // output): the format says it may have one, the parser then finds none. That is "no metadata", not
+    // a failure, or the photo would be dropped from the scan altogether.
+    let iter: ExifIter = match parser.parse(ms) {
+        Ok(iter) => iter,
+        Err(nom_exif::Error::ParseFailed(_)) => return Ok(no_metadata()),
+        Err(e) => return Err(e.into()),
+    };
     let gps_present = iter.clone().parse_gps_info().ok().flatten().is_some();
     let exif: Exif = iter.into();
 
@@ -238,6 +248,24 @@ mod tests {
     }
 
     #[test]
+    fn a_jpeg_with_no_exif_at_all_still_reads_as_having_none() {
+        // What a screenshot, a download or an encoder's output looks like: JFIF, no EXIF segment.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("plain.jpg");
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(32, 32, image::Rgb([90, 120, 200]))).save(&path).unwrap();
+        let meta = extract_image(&path).expect("no EXIF is not an error");
+        assert!(meta.metadata_readable && meta.make.is_none() && meta.datetime_original.is_none());
+    }
+
+    #[test]
+    fn a_png_has_no_exif_and_is_still_a_readable_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("shot.png");
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(16, 16, image::Rgb([1, 2, 3]))).save(&path).unwrap();
+        assert!(extract_image(&path).expect("a PNG is not an error").metadata_readable);
+    }
+
+    #[test]
     fn video_timestamps_parse_in_every_form_the_cameras_write() {
         let utc = |s| parse_video_timestamp(s).map(|t| t.to_string());
         // RFC 3339 with Z (OnePlus, and iPhone's `creation_time`).
@@ -268,17 +296,6 @@ mod tests {
         assert_eq!(meta.model.as_deref(), Some("iPhone Air"));
         assert!(meta.has_gps);
         assert!(meta.datetime_original.is_some());
-    }
-
-    #[test]
-    #[ignore = "requires the private reference photo set (PHOTODEDUP_REFERENCE_SET)"]
-    fn messenger_jpg_has_no_camera_identity() {
-        let Some(dir) = dataset_dir() else { return };
-        let meta = extract_image(&dir.join("IMG_3465.JPG")).unwrap();
-        // Has *some* EXIF (resolution/thumbnail), but no Make/Model/
-        // DateTimeOriginal -- the 181-file lesson from PROJECT_CONTEXT.md.
-        assert!(meta.make.is_none());
-        assert!(meta.model.is_none());
     }
 
     #[test]

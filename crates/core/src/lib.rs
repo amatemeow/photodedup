@@ -11,6 +11,7 @@ pub mod apply;
 pub mod classify;
 pub mod cluster;
 pub mod decode;
+pub mod defects;
 pub mod exacthash;
 pub mod fsguard;
 pub mod grouping;

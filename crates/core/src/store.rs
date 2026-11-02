@@ -6,6 +6,7 @@
 //! one specifically so that hook is cheap to add without a schema change).
 
 use crate::classify::Tier;
+use crate::defects::LightStats;
 use crate::grouping::{Grouping, GroupingInput};
 use crate::model::{FileId, FileRecord, MediaClassSerde};
 use crate::pipeline::{Analyzed, PipelineResult};
@@ -49,6 +50,11 @@ CREATE TABLE IF NOT EXISTS analysis (
     evidence_json TEXT NOT NULL,
     phash BLOB,
     sharpness REAL,
+    -- brightness numbers for the defect checks (see `defects`), NULL for videos and older scans
+    light_mean REAL,
+    light_dark REAL,
+    light_bright REAL,
+    light_spread REAL,
     width INTEGER,
     height INTEGER,
     camera_model TEXT,
@@ -347,6 +353,9 @@ impl Store {
         add_column_if_missing(&conn, "files", "quarantined", "INTEGER NOT NULL DEFAULT 0")?;
         add_column_if_missing(&conn, "decisions", "manual", "INTEGER NOT NULL DEFAULT 0")?;
         add_column_if_missing(&conn, "apply_items", "taken_at", "TEXT")?;
+        for c in ["light_mean", "light_dark", "light_bright", "light_spread"] {
+            add_column_if_missing(&conn, "analysis", c, "REAL")?;
+        }
         Ok(Store { conn })
     }
 
@@ -926,6 +935,37 @@ impl Store {
         rows.collect()
     }
 
+    /// Photos of the scan that were measured at scan time (a scan from before the defect checks has
+    /// none), with their sharpness, in path order. Files set aside in quarantine are left out.
+    pub fn load_light_stats(&self, scan_id: &str) -> rusqlite::Result<Vec<(String, LightStats, Option<f64>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT a.file_id, a.light_mean, a.light_dark, a.light_bright, a.light_spread, a.sharpness
+             FROM analysis a JOIN files f ON f.id = a.file_id
+             WHERE f.scan_id = ?1 AND f.quarantined = 0 AND a.light_mean IS NOT NULL ORDER BY f.relative_path",
+        )?;
+        let rows = stmt.query_map(params![scan_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                LightStats { mean: r.get(1)?, dark: r.get(2)?, bright: r.get(3)?, spread: r.get(4)? },
+                r.get::<_, Option<f64>>(5)?,
+            ))
+        })?;
+        rows.collect()
+    }
+
+    /// True when any photo of the scan carries brightness numbers: the defect checks can run on it.
+    pub fn has_light_stats(&self, scan_id: &str) -> rusqlite::Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM analysis a JOIN files f ON f.id = a.file_id WHERE f.scan_id = ?1 AND a.light_mean IS NOT NULL LIMIT 1",
+                params![scan_id],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
     pub fn load_analysis(&self, file_id: &str) -> rusqlite::Result<Option<StoredAnalysis>> {
         self.conn
             .query_row(
@@ -1017,6 +1057,7 @@ impl Store {
                     },
                     phash: phash.as_deref().and_then(hash_from_blob),
                     sharpness,
+                    light: None,
                     width,
                     height,
                     size_bytes: files[id as usize].size_bytes,
@@ -1339,8 +1380,9 @@ fn insert_analysis(tx: &rusqlite::Transaction, row_id: &str, a: &Analyzed) -> ru
         buf
     });
     tx.execute(
-        "INSERT INTO analysis (file_id, origin, confidence, evidence_json, phash, sharpness, width, height, camera_model, capture_time, duration_seconds)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO analysis (file_id, origin, confidence, evidence_json, phash, sharpness, width, height, camera_model, capture_time, duration_seconds,
+                               light_mean, light_dark, light_bright, light_spread)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             row_id,
             origin_str(a.provenance.origin),
@@ -1353,6 +1395,10 @@ fn insert_analysis(tx: &rusqlite::Transaction, row_id: &str, a: &Analyzed) -> ru
             a.camera_model,
             a.capture_time.map(|t| t.to_string()),
             a.duration_seconds,
+            a.light.map(|l| l.mean),
+            a.light.map(|l| l.dark),
+            a.light.map(|l| l.bright),
+            a.light.map(|l| l.spread),
         ],
     )?;
     Ok(())
@@ -1463,6 +1509,7 @@ mod tests {
                 },
                 phash: Some(crate::hash::Hash256(123, 456)),
                 sharpness: Some(42.0),
+                light: None,
                 width: Some(4032),
                 height: Some(3024),
                 size_bytes: 1000,
@@ -1556,6 +1603,7 @@ mod tests {
                     provenance: Provenance { origin: Origin::CameraOriginal, confidence: 1.0, evidence: vec![] },
                     phash: Some(crate::hash::Hash256(u128::MAX - 7, 3)),
                     sharpness: Some(1.0),
+                    light: None,
                     width: Some(10),
                     height: Some(10),
                     size_bytes: 1000,
@@ -1754,6 +1802,36 @@ mod tests {
 
         store.save_scan(&root, &result).unwrap();
         assert!(store.load_orphan_videos(&scan).unwrap().is_empty(), "the replaced scan's rows are gone");
+    }
+
+    #[test]
+    fn brightness_numbers_round_trip_and_a_quarantined_photo_is_left_out() {
+        let (root, mut result) = sample_result();
+        let a = result.files[0].id;
+        let light = LightStats { mean: 3.0, dark: 1.0, bright: 0.0, spread: 1.5 };
+        result.analyzed.get_mut(&a).unwrap().light = Some(light);
+        let mut store = Store::open_in_memory().unwrap();
+        let scan = store.save_scan(&root, &result).unwrap();
+
+        assert!(store.has_light_stats(&scan).unwrap());
+        let got = store.load_light_stats(&scan).unwrap();
+        assert_eq!(got.len(), 1, "only the photo that was measured");
+        assert_eq!(got[0].1, light);
+
+        let path = store.load_files(&scan).unwrap().into_iter().find(|f| f.file_name == result.files[0].file_name).unwrap().relative_path;
+        store.set_quarantined(&scan, &[path], true).unwrap();
+        assert!(store.load_light_stats(&scan).unwrap().is_empty(), "a quarantined photo leaves the list");
+    }
+
+    #[test]
+    fn a_scan_without_brightness_numbers_says_so() {
+        let (root, mut result) = sample_result();
+        for a in result.analyzed.values_mut() {
+            a.light = None;
+        }
+        let mut store = Store::open_in_memory().unwrap();
+        let scan = store.save_scan(&root, &result).unwrap();
+        assert!(!store.has_light_stats(&scan).unwrap());
     }
 
     #[test]

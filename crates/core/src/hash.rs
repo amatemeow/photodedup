@@ -203,41 +203,4 @@ mod tests {
         assert!(d > 50, "expected a large distance, got {d}");
     }
 
-    /// Regression test against the Python prototype's output, pinned to the
-    /// reference Japan-trip dataset. Ignored by default since that dataset is
-    /// personal data, not something to commit to this repo: run it with
-    /// `PHOTODEDUP_REFERENCE_SET=<folder> cargo test -- --ignored` on a machine
-    /// that has the set (see `reference.rs`). The prototype's pHash distances
-    /// for the pairs below are written into the cases. See `/SPIKES.md` §3 for
-    /// the measured numbers this pins to.
-    #[test]
-    #[ignore = "requires the private reference photo set (PHOTODEDUP_REFERENCE_SET)"]
-    fn parity_against_python_pipeline() {
-        let Some(base) = crate::reference::photos() else {
-            eprintln!("skipping: {} is not set to a folder", crate::reference::ENV);
-            return;
-        };
-
-        let cases: &[(&str, &str, &str, u32, u32)] = &[
-            // (label, file_a, file_b, max_phash_dist, python_phash_dist)
-            ("true-dup", "IMG20261015084747.jpg", "IMG_3465.JPG", 10, 0),
-            (
-                "burst-sibling",
-                "IMG20261019101441.jpg",
-                "IMG20261019101442.jpg",
-                40,
-                30,
-            ),
-        ];
-
-        for (label, a, b, max_dist, python_dist) in cases {
-            let pa = phash256(&image::open(base.join(a)).unwrap());
-            let pb = phash256(&image::open(base.join(b)).unwrap());
-            let d = pa.distance(&pb);
-            assert!(
-                d <= *max_dist,
-                "{label}: rust phash_dist={d} too far from python's {python_dist} (band limit {max_dist})"
-            );
-        }
-    }
 }

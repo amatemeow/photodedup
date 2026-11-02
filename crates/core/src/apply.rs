@@ -83,6 +83,13 @@ pub fn plan(store: &Store, scan_id: &str) -> Result<Plan, ApplyError> {
     let runs = store.load_burst_runs(scan_id)?;
     let pairs = store.load_review_pairs(scan_id)?;
     let orphans = store.load_orphan_videos(scan_id)?;
+    // Photos listed under possible defects are decided one by one, like orphan videos.
+    let defective: Vec<String> = store
+        .load_light_stats(scan_id)?
+        .into_iter()
+        .filter(|(_, light, sharp)| !crate::defects::measure(light, *sharp).is_empty())
+        .map(|(id, _, _)| id)
+        .collect();
 
     // A choice only counts for a file that is still in some group. After the
     // matching settings change, a photo can stop being a duplicate of
@@ -93,6 +100,7 @@ pub fn plan(store: &Store, scan_id: &str) -> Result<Plan, ApplyError> {
         .chain(runs.iter().flat_map(|r| r.member_file_ids.iter().map(String::as_str)))
         .chain(pairs.iter().flat_map(|p| [p.file_a_id.as_str(), p.file_b_id.as_str()]))
         .chain(orphans.iter().map(|o| o.file_id.as_str()))
+        .chain(defective.iter().map(String::as_str))
         .collect();
     // ...unless the person chose it on that one file in the library overview, which is a
     // decision about the file itself and so counts wherever it is.
@@ -429,10 +437,29 @@ pub fn batch_detail(store: &Store, batch_id: &str) -> Result<BatchDetail, ApplyE
 /// Where a file now in quarantine really is, checked like every other path, so it can be shown
 /// without putting it back.
 pub fn quarantined_path(store: &Store, batch_id: &str, seq: i64) -> Result<(std::path::PathBuf, crate::model::MediaClassSerde), ApplyError> {
+    quarantined_place(store, batch_id, seq)?.resolve()
+}
+
+/// Where a quarantined file is recorded to be, from the database alone. Finding it on disk is
+/// `resolve`, a separate step so a caller can let go of the database first: a disk check can block
+/// (a file on a cloud drive) and must not hold up everything else that needs the database.
+pub struct QuarantinedPlace {
+    root_path: String,
+    quarantine_dir: String,
+    relative_path: String,
+}
+
+impl QuarantinedPlace {
+    pub fn resolve(&self) -> Result<(std::path::PathBuf, crate::model::MediaClassSerde), ApplyError> {
+        let ws = Workspace::open(Path::new(&self.root_path))?;
+        Ok((ws.quarantined_file(&self.quarantine_dir, &self.relative_path)?, media_class_of(&self.relative_path)))
+    }
+}
+
+pub fn quarantined_place(store: &Store, batch_id: &str, seq: i64) -> Result<QuarantinedPlace, ApplyError> {
     let batch = store.get_batch(batch_id)?.ok_or(ApplyError::NoSuchBatch)?;
     let item = store.load_batch_items(batch_id)?.into_iter().find(|i| i.seq == seq && i.state == "moved").ok_or(ApplyError::NoSuchBatch)?;
-    let ws = Workspace::open(Path::new(&batch.root_path))?;
-    Ok((ws.quarantined_file(&batch.quarantine_dir, &item.relative_path)?, media_class_of(&item.relative_path)))
+    Ok(QuarantinedPlace { root_path: batch.root_path, quarantine_dir: batch.quarantine_dir, relative_path: item.relative_path })
 }
 
 /// Reconciles one interrupted batch with the disk: an item whose file is in

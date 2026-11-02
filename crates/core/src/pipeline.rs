@@ -8,6 +8,7 @@ use crate::thresholds::Thresholds;
 use crate::grouping::{group, GroupingInput};
 use crate::decode::decode_image_cancellable;
 use crate::exacthash::find_exact_duplicates;
+use crate::defects::{light_stats, LightStats};
 use crate::hash::{phash256, sharpness, Hash256};
 use crate::metadata::{extract_image, extract_video_cancellable};
 use crate::model::{FileId, FileRecord, MediaClassSerde, SiblingSet};
@@ -58,6 +59,8 @@ pub struct Analyzed {
     pub provenance: Provenance,
     pub phash: Option<Hash256>,
     pub sharpness: Option<f64>,
+    /// Brightness numbers for the defect checks (photos only).
+    pub light: Option<LightStats>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub size_bytes: u64,
@@ -544,19 +547,21 @@ fn analyze_one(rec: &FileRecord, opts: &PipelineOptions, cancelled: &(dyn Fn() -
             let meta = extract_image(&rec.path).ok()?;
             let provenance = evaluate(&meta, &rec.file_name);
             let img = decode_image_cancellable(&rec.path, &opts.ffmpeg_bin, hint, Some(cancelled));
-            let (phash, sharp, w, h) = match &img {
+            let (phash, sharp, light, w, h) = match &img {
                 Some(img) => (
                     Some(phash256(img)),
                     Some(sharpness(img)),
+                    Some(light_stats(img)),
                     Some(img.width()),
                     Some(img.height()),
                 ),
-                None => (None, None, meta.width, meta.height),
+                None => (None, None, None, meta.width, meta.height),
             };
             Some(Analyzed {
                 provenance,
                 phash,
                 sharpness: sharp,
+                light,
                 width: w,
                 height: h,
                 size_bytes: rec.size_bytes,
@@ -572,6 +577,7 @@ fn analyze_one(rec: &FileRecord, opts: &PipelineOptions, cancelled: &(dyn Fn() -
                 provenance,
                 phash: None,
                 sharpness: None,
+                light: None,
                 width: meta.width,
                 height: meta.height,
                 size_bytes: rec.size_bytes,
