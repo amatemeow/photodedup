@@ -14,9 +14,42 @@ use tokio::sync::watch;
 /// means the dialog was cancelled. Blocks until the user answers.
 pub type FolderPicker = Arc<dyn Fn() -> Option<PathBuf> + Send + Sync>;
 
-/// How many pictures are rendered at the same time. Each render is an ffmpeg process or a decode, so a
+/// How many photos are rendered at the same time. Each render is an ffmpeg process or a decode, so a
 /// handful keeps the machine usable; the rest wait in line.
 pub const RENDER_PERMITS: usize = 4;
+/// Video frames take far longer, so they have lanes of their own and never hold up a photo.
+pub const VIDEO_PERMITS: usize = 2;
+/// Files not yet downloaded from a cloud drive: the wait is the download, so these queue apart from
+/// everything that is already on the disk.
+pub const REMOTE_PERMITS: usize = 4;
+
+/// The lanes a picture waits in before it is rendered. A slow kind of picture fills only its own lane.
+#[derive(Clone)]
+pub struct RenderGates {
+    pub photos: Arc<tokio::sync::Semaphore>,
+    pub videos: Arc<tokio::sync::Semaphore>,
+    pub remote: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for RenderGates {
+    fn default() -> Self {
+        let lane = |n| Arc::new(tokio::sync::Semaphore::new(n));
+        RenderGates { photos: lane(RENDER_PERMITS), videos: lane(VIDEO_PERMITS), remote: lane(REMOTE_PERMITS) }
+    }
+}
+
+impl RenderGates {
+    /// The lane for a file: waiting on a download beats being a video beats being a photo.
+    pub fn lane(&self, is_video: bool, on_cloud: bool) -> &Arc<tokio::sync::Semaphore> {
+        if on_cloud {
+            &self.remote
+        } else if is_video {
+            &self.videos
+        } else {
+            &self.photos
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -46,7 +79,7 @@ pub struct AppState {
     pub media_addr: Arc<std::sync::OnceLock<std::net::SocketAddr>>,
     /// How many pictures may be rendered at once. The rest wait here, in the media server, so a flood
     /// of thumbnails is a queue of its own and never delays the app's other requests.
-    pub render_gate: Arc<tokio::sync::Semaphore>,
+    pub render_gate: RenderGates,
     /// Present only when running inside a shell that can show a native dialog.
     pub folder_picker: Option<FolderPicker>,
 }

@@ -211,7 +211,7 @@ mod tests {
             warm: Arc::default(),
             job: Arc::new(Mutex::new(None)),
             media_addr: Arc::default(),
-            render_gate: Arc::new(tokio::sync::Semaphore::new(crate::state::RENDER_PERMITS)),
+            render_gate: Default::default(),
             folder_picker: None,
         }
     }

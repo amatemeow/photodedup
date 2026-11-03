@@ -48,6 +48,20 @@ fn resolve(state: &AppState, file_id: &Uuid) -> Result<(PathBuf, MediaClassSerde
     Ok((path, class))
 }
 
+/// `resolve` for the async handlers: the lookups and the disk check run on a blocking thread (a file on
+/// a cloud drive can make them slow, and they must not hold up a worker that other requests need). Also
+/// says whether the file is still to be downloaded, which decides the lane it waits in.
+async fn resolve_off_runtime(state: &AppState, file_id: Uuid) -> Result<(PathBuf, MediaClassSerde, bool), StatusCode> {
+    let state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let (path, class) = resolve(&state, &file_id)?;
+        let on_cloud = photodedup_core::scan::is_placeholder_now(&path);
+        Ok((path, class, on_cloud))
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+}
+
 /// `GET /files/{id}/thumb?size=256` -- a small JPEG for the review grid.
 /// Cached on disk (content-addressed by file id + size), since repeated
 /// requests are the common case (re-rendering the grid on scroll/filter).
@@ -97,13 +111,19 @@ async fn serve_quarantined_jpeg(state: AppState, batch: Uuid, seq: i64, size: u3
         let store = state.store.lock().unwrap();
         photodedup_core::apply::quarantined_place(&store, &batch.to_string(), seq)
     };
-    let (path, class) = match place.and_then(|p| p.resolve()) {
-        Ok(v) => v,
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    let resolved = tokio::task::spawn_blocking(move || {
+        place.and_then(|p| p.resolve()).map(|(path, class)| {
+            let on_cloud = photodedup_core::scan::is_placeholder_now(&path);
+            (path, class, on_cloud)
+        })
+    })
+    .await;
+    let Ok(Ok((path, class, on_cloud))) = resolved else { return StatusCode::NOT_FOUND.into_response() };
+    // Rendering waits its turn in its lane, so a flood of thumbnails queues here and never crowds out
+    // the app's own requests, and a slow kind of file never holds up a quick one.
+    let Ok(_turn) = state.render_gate.lane(class == MediaClassSerde::Video, on_cloud).acquire().await else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    // Rendering waits its turn at the gate, so a flood of thumbnails queues here and never crowds out
-    // the app's own requests.
-    let _turn = state.render_gate.acquire().await;
     match tokio::task::spawn_blocking(move || generate(&path, class, size, SchedulingHint::Utility)).await {
         Ok(Ok(bytes)) => jpeg_response(bytes),
         _ => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
@@ -111,7 +131,7 @@ async fn serve_quarantined_jpeg(state: AppState, batch: Uuid, seq: i64, size: u3
 }
 
 async fn serve_generated_jpeg(state: AppState, file_id: Uuid, size: u32) -> Response {
-    let (path, media_class) = match resolve(&state, &file_id) {
+    let (path, media_class, on_cloud) = match resolve_off_runtime(&state, file_id).await {
         Ok(v) => v,
         Err(code) => return code.into_response(),
     };
@@ -122,8 +142,11 @@ async fn serve_generated_jpeg(state: AppState, file_id: Uuid, size: u32) -> Resp
 
     // Decode is real CPU work (HEIC via ffmpeg, video frame extraction) --
     // run it off the async runtime's worker thread via spawn_blocking so
-    // one slow thumbnail doesn't stall every other in-flight request.
-    let _turn = state.render_gate.acquire().await;
+    // one slow thumbnail doesn't stall every other in-flight request. It waits in the lane for its
+    // kind of file: a video or a download fills its own lane, never the one photos use.
+    let Ok(_turn) = state.render_gate.lane(media_class == MediaClassSerde::Video, on_cloud).acquire().await else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     let bytes = tokio::task::spawn_blocking(move || generate(&path, media_class, size, SchedulingHint::Utility)).await;
 
     match bytes {
@@ -188,7 +211,7 @@ pub async fn original(
     AxPath(file_id): AxPath<Uuid>,
     headers: HeaderMap,
 ) -> Response {
-    let (path, _) = match resolve(&state, &file_id) {
+    let (path, _, _) = match resolve_off_runtime(&state, file_id).await {
         Ok(v) => v,
         Err(code) => return code.into_response(),
     };

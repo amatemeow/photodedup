@@ -123,7 +123,7 @@ async fn build_parts(db_path: &std::path::Path, config: Config) -> anyhow::Resul
         warm: Arc::default(),
         job: Arc::new(Mutex::new(None)),
         media_addr: Arc::default(),
-        render_gate: Arc::new(tokio::sync::Semaphore::new(state::RENDER_PERMITS)),
+        render_gate: Default::default(),
         folder_picker,
     };
     // Pictures get their own connection to the database. One connection behind one lock is a single
@@ -672,7 +672,7 @@ mod tests {
         let id = library[0]["id"].as_str().expect("the file's id").to_string();
 
         // Every render slot is taken, as a page full of slow HEIC thumbnails would take them.
-        let held = parts.state.render_gate.clone().acquire_many_owned(state::RENDER_PERMITS as u32).await.unwrap();
+        let held = parts.state.render_gate.photos.clone().acquire_many_owned(state::RENDER_PERMITS as u32).await.unwrap();
 
         // A picture that needs rendering now waits in line ...
         let media = parts.media.clone();

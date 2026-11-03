@@ -156,6 +156,12 @@ fn group_siblings(files: &[(FileId, PathBuf, MediaClass)]) -> Vec<SiblingSet> {
         .collect()
 }
 
+/// Whether the file at `path` is a cloud placeholder right now (not yet downloaded): it may have been
+/// fetched, or evicted, since the scan. A cheap metadata read that does not trigger a download.
+pub fn is_placeholder_now(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| is_cloud_placeholder(path, &m))
+}
+
 #[cfg(unix)]
 fn is_cloud_placeholder(_path: &Path, meta: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;

@@ -4,6 +4,7 @@
   import Lightbox from './Lightbox.svelte';
   import Detail from './Detail.svelte';
   import Icon from './Icon.svelte';
+  import { ImageQueue } from './lib/imageQueue';
 
   let { review, onOpenGroup }: { review: Review; onOpenGroup: (g: Group) => void } = $props();
 
@@ -65,9 +66,57 @@
   const size = $derived((width - (cols - 1) * gap) / cols);
   const rowH = $derived(size + gap);
   const rows = $derived(Math.ceil(shown.length / cols));
-  const first = $derived(Math.max(0, Math.floor(top / rowH) - 2));
-  const last = $derived(Math.min(rows, Math.ceil((top + height) / rowH) + 2));
+  const first = $derived(Math.max(0, Math.floor(top / rowH) - 4));
+  const last = $derived(Math.min(rows, Math.ceil((top + height) / rowH) + 4));
   const visible = $derived(shown.slice(first * cols, last * cols));
+
+  // ---- which tile pictures are fetched first: the ones in view, then the ones about to be scrolled to ----
+  const queue = new ImageQueue();
+  let lastTop = 0;
+  let heading = 1; // 1 scrolling down, -1 up
+  function onScroll(e: Event) {
+    const t = (e.currentTarget as HTMLElement).scrollTop;
+    if (t !== lastTop) heading = t > lastTop ? 1 : -1;
+    lastTop = t;
+    top = t;
+  }
+  /** Rows between a tile and the screen: 0 on it, then growing; the side the user is heading to counts as nearer. */
+  function distance(idx: number): number {
+    const row = Math.floor(idx / cols);
+    const above = top / rowH - row;
+    const below = row - (top + height) / rowH;
+    if (above <= 0 && below <= 0) return (idx % cols) / 1000 + row / 1e6; // in view: reading order
+    return above > 0 ? above + (heading > 0 ? 0.5 : 0) : below + (heading < 0 ? 0.5 : 0);
+  }
+  /** Loads the tile's picture when the queue's turn comes, instead of the moment it is added to the page. */
+  function queued(img: HTMLImageElement, p: { url: string; idx: number; slow: boolean }) {
+    let now = p;
+    let finished = false;
+    const done = queue.add({
+      rank: () => distance(now.idx),
+      slow: p.slow,
+      start: () => {
+        img.src = now.url;
+      },
+    });
+    const end = () => {
+      finished = true;
+      done();
+    };
+    img.addEventListener('load', end);
+    img.addEventListener('error', end);
+    return {
+      update(next: typeof p) {
+        now = next;
+      },
+      destroy() {
+        img.removeEventListener('load', end);
+        img.removeEventListener('error', end);
+        if (!finished) img.removeAttribute('src'); // stop a fetch nobody is waiting for any more
+        done();
+      },
+    };
+  }
 
   $effect(() => {
     if (!scroller) return;
@@ -173,7 +222,7 @@
       <p class="hint">No file matches this filter.</p>
     </div>
   {:else}
-    <div class="scroller" bind:this={scroller} onscroll={(e) => (top = e.currentTarget.scrollTop)}>
+    <div class="scroller" bind:this={scroller} onscroll={onScroll}>
       <div class="space" style="height:{rows * rowH}px">
         {#each visible as f, i (f.id)}
           {@const idx = first * cols + i}
@@ -184,7 +233,7 @@
             style="left:{(idx % cols) * (size + gap)}px; top:{Math.floor(idx / cols) * rowH}px; width:{size}px; height:{size}px"
           >
             <button class="pic" onclick={() => (viewing = idx)} title="{f.file_name} · {formatBytes(f.size_bytes)}">
-              <img src={api.fileUrl(f.id, 'thumb')} alt={f.file_name} loading="lazy" decoding="async" />
+              <img use:queued={{ url: api.fileUrl(f.id, 'thumb'), idx, slow: isVideo(f) || f.is_placeholder }} alt={f.file_name} decoding="async" />
             </button>
             {#if isVideo(f)}<span class="badge overlay br" aria-label="Video"><Icon name="film" size={12} /></span>{/if}
             {#if gs.length > 0}

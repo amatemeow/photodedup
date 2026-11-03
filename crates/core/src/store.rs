@@ -234,6 +234,7 @@ pub struct LibraryRow {
     pub height: Option<u32>,
     /// `YYYY-MM-DD HH:MM:SS` from the file's own metadata, when it has any.
     pub captured_at: Option<String>,
+    pub is_placeholder: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1160,7 +1161,7 @@ impl Store {
     /// companion (a RAW's sidecar, a Live Photo's video) that travels with another file.
     pub fn load_library(&self, scan_id: &str) -> rusqlite::Result<Vec<LibraryRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT f.id, f.relative_path, f.file_name, f.media_class, f.size_bytes, f.mtime_unix, a.width, a.height, a.capture_time
+            "SELECT f.id, f.relative_path, f.file_name, f.media_class, f.size_bytes, f.mtime_unix, a.width, a.height, a.capture_time, f.is_placeholder
              FROM files f LEFT JOIN analysis a ON a.file_id = f.id
              WHERE f.scan_id = ?1 AND f.quarantined = 0 AND f.media_class != 'sidecar'
                AND f.id NOT IN (SELECT sibling_file_id FROM file_siblings WHERE scan_id = ?1)
@@ -1177,6 +1178,7 @@ impl Store {
                 width: r.get::<_, Option<i64>>(6)?.map(|v| v as u32),
                 height: r.get::<_, Option<i64>>(7)?.map(|v| v as u32),
                 captured_at: r.get(8)?,
+                is_placeholder: r.get::<_, i64>(9)? != 0,
             })
         })?;
         rows.collect()

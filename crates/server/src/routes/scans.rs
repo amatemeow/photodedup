@@ -370,6 +370,8 @@ pub struct LibraryFileDto {
     /// From the file's own metadata, `YYYY-MM-DD HH:MM:SS`, when it has any.
     pub captured_at: Option<String>,
     pub mtime_unix: i64,
+    /// Not downloaded from a cloud drive when scanned: showing it may take a download.
+    pub is_placeholder: bool,
 }
 
 /// `GET /api/scans/{id}/library` -- every photo and video of the scan that is in the library now
@@ -393,6 +395,7 @@ pub async fn list_library(State(state): State<AppState>, AxPath(scan_id): AxPath
                 height: r.height,
                 captured_at: r.captured_at,
                 mtime_unix: r.mtime_unix,
+                is_placeholder: r.is_placeholder,
             })
             .collect(),
     ))

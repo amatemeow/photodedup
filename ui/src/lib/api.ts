@@ -70,6 +70,8 @@ export interface LibraryFile {
   /** `YYYY-MM-DD HH:MM:SS` from the file's own metadata, when it has any. */
   captured_at: string | null;
   mtime_unix: number;
+  /** Was not downloaded from a cloud drive when scanned: showing it may need a download. */
+  is_placeholder: boolean;
 }
 
 export interface Cluster {
