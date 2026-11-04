@@ -61,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
+        "check-models" => check_models_cmd(&args[2..]),
         "batches" => batches_cmd(&db_arg(&args, 2)),
         "serve" => {
             // The address is printed; a browser is only opened if asked to.
@@ -74,6 +75,37 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The gate for every AI model we bundle: run from the repository root.
+fn check_models_cmd(rest: &[String]) {
+    let built = rest.iter().position(|a| a == "--built").map(|i| {
+        rest.get(i + 1).cloned().unwrap_or_else(|| {
+            eprintln!("usage: photodedup check-models [--built <dir>]");
+            std::process::exit(2);
+        })
+    });
+    let path = std::path::Path::new("models/manifest.json");
+    let manifest = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {} (run this from the repository root): {e}", path.display()))
+        .and_then(|json| photodedup_core::ai_models::Manifest::parse(&json))
+        .unwrap_or_else(|why| {
+            eprintln!("MODELS NOT CLEARED: {why}");
+            std::process::exit(1);
+        });
+    let mut problems = manifest.problems(std::path::Path::new("."), chrono::Local::now().date_naive());
+    if let Some(dir) = &built {
+        problems.extend(manifest.built_problems(std::path::Path::new(dir)));
+    }
+    if problems.is_empty() {
+        let shipped = manifest.models.iter().flat_map(|m| &m.artifacts).filter(|a| a.ships).count();
+        println!("ok: {} model(s) cleared; {shipped} shipping file(s){}", manifest.models.len(), if built.is_some() { ", built files match" } else { "" });
+    } else {
+        for p in &problems {
+            eprintln!("MODELS NOT CLEARED: {p}");
+        }
+        std::process::exit(1);
+    }
+}
+
 fn print_usage() {
     println!("photodedup — commands:");
     println!("  scan <path> [--mode efficient|default|performance|N] [--no-videos]   scan a folder, print a summary");
@@ -83,6 +115,7 @@ fn print_usage() {
     println!("    --mode N             an explicit worker count, no automatic scheduling hint");
     println!("    --no-videos          leave videos out of the scan entirely (not listed, hashed, probed or matched)");
     println!("  apply [db-path] [--commit]   show what applying your decisions would move (a dry run); with --commit, move it to quarantine");
+    println!("  check-models [--built <dir>]   check models/manifest.json (licences, pins, lock files); with --built, also the built model files");
     println!("  check-sidecar <binary>...    refuse a GPL/non-free ffmpeg or ffprobe (the gate for anything we bundle)");
     println!("  batches [db-path]            list what has been moved to quarantine");
     println!("  undo <batch-id> [db-path]    put a batch back where it came from");

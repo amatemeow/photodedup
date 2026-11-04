@@ -3,6 +3,8 @@
 /spikes/out/
 # Cargo.lock IS committed (this workspace ships binaries, not a library)
 node_modules/
+# build tools for the AI model export (models/README.md)
+.venv-siglip2/
 dist/
 .DS_Store
 *.log

@@ -1,0 +1,10 @@
+# Direct dependencies of scripts/export-siglip2.py. The requirements-*.txt files are hash-locked resolutions of
+# this file, one per platform (torch ships different wheels per platform; on Linux we take the CPU-only build so
+# CI does not download several GB of GPU libraries). Regenerate with scripts/siglip2/lock.sh.
+torch
+transformers
+safetensors
+onnx
+onnxconverter-common
+onnxruntime
+numpy

@@ -7,6 +7,7 @@
 //! classify -> cluster -> keeper pipeline, SQLite persistence) built and
 //! parity-tested against the reference dataset.
 
+pub mod ai_models;
 pub mod apply;
 pub mod classify;
 pub mod cluster;

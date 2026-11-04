@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "about": "Every AI model file the app ships or builds from. Read by `photodedup check-models` (the gate) and by scripts/export-siglip2.py (which takes its source pins from here, so there is one copy). Models are bundled; the app never goes online. See models/README.md.",
+  "models": [
+    {
+      "id": "siglip2-base-patch16-224-vision",
+      "purpose": "Image embedding: look-alike photos for the duplicate review, and zero-shot checks for possible defects (screenshots, documents, black or blown-out frames).",
+      "component": "core",
+      "licence": {
+        "spdx": "Apache-2.0",
+        "class": "permissive",
+        "evidence": "Model card of google/siglip2-base-patch16-224 at the pinned commit (front matter: license: apache-2.0), published by Google under its own account.",
+        "checked": "2026-11-04"
+      },
+      "training_data": {
+        "name": "WebLI",
+        "released": false,
+        "note": "Google's internal web-scale image-text set, named on the model card and not published, so it cannot be audited. The licence on the weights is permissive; the data is the part we cannot verify."
+      },
+      "source": {
+        "repo": "google/siglip2-base-patch16-224",
+        "host": "huggingface.co",
+        "commit": "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2",
+        "files": [
+          { "path": "config.json", "sha256": "fe8b5fe6d5734360678fd71c11c21e1ea3364bd8598d34295d9206335973ffd7", "size": 253 },
+          { "path": "preprocessor_config.json", "sha256": "9b36b57ebaf20f09bf4c22100ccc21877ea6bfe5aead0c00c59f8af8ccefacfc", "size": 394 },
+          { "path": "model.safetensors", "sha256": "612923381c76ec5a9bed335d1c48827e3f2e506ac31b044b63b2031fadee6a0b", "size": 1500800904 }
+        ]
+      },
+      "build": {
+        "script": "scripts/export-siglip2.py",
+        "locks": {
+          "linux": { "path": "scripts/siglip2/requirements-linux.txt", "sha256": "0b0b9453fa3308634cb5419c04f3a9adb790373ad0638afa85447604ad2baeaa" },
+          "macos": { "path": "scripts/siglip2/requirements-macos.txt", "sha256": "feacf66c0309f931da273ce28b8b80506107a7d56b13b8ad48c036debf9f0f58" }
+        },
+        "reproduced_on": ["macOS arm64", "Ubuntu 24.04 arm64 (Docker)", "Ubuntu 24.04 x86_64 (Docker, emulated)"]
+      },
+      "artifacts": [
+        { "name": "siglip2-vision-fp16.onnx", "sha256": "b32e31d9da9acb8382f5f165b36cf854dcd7178d599a6b88ef0b2b2aae9e3ebf", "size": 187226396, "ships": true },
+        { "name": "siglip2-vision-fp32.onnx", "sha256": "b7b03e468801c0cbe3fdddebe38aa87447b0a204e96606260b3fd1896d4c8d15", "size": 371734449, "ships": false }
+      ]
+    }
+  ]
+}
