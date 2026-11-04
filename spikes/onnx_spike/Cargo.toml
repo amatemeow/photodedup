@@ -1,0 +1,13 @@
+[package]
+name = "onnx_spike"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ort = { version = "=2.0.0-rc.15", features = ["half"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+walkdir = "2"
+half = "2"
+
+[profile.release]
+opt-level = 3
