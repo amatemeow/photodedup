@@ -25,6 +25,8 @@ dist/
 .mcp.json
 .env
 .env.*
+# Project-local Codex MCP credentials
+/.codex/config.toml
 
 # Additional local dir to work with agents
 .agents
