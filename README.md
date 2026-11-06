@@ -38,9 +38,11 @@ produced macOS DMGs (Apple Silicon and Intel), a Windows MSI, and Linux
 AppImage, deb and rpm packages, with bundled LGPL ffmpeg/ffprobe. Linux
 packages have also been tested in isolated containers.
 
-The current release candidate still needs a full installer dry run with
-public-repository attestations and installer smoke tests. The tag-only
-publish job has not yet been exercised. See [the release checklist](docs/RELEASING.md).
+The first release ships **Apple Silicon macOS only**. Its installer dry run
+passed with public provenance attestations, and the owner installed and
+launched the DMG successfully. Intel Mac, Windows and Linux installers are
+deferred to a future release. The tag-only publish job has not yet been
+exercised. See [the release checklist](docs/RELEASING.md).
 Paid-certificate signing/notarisation and package-manager distribution remain
 deferred; [installation notes](docs/INSTALL.md) explain first-launch warnings.
 AI model export tooling exists, but model inference and People are not part

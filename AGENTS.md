@@ -173,3 +173,10 @@ See `docs/RELEASING.md` for the release sequence and remaining checks, and
 `docs/releases/v0.1.0.md` for prepared release notes. The public attestation and
 tag-only publish paths still need verification. Do not treat the older private-
 repository status or October Actions quota as current.
+
+Update: Apple Silicon dry run `42241545356` at `0b163fd` passed, including
+public attestation. The user installed and launched the DMG successfully with
+the documented macOS Privacy & Security workaround. The user chose Apple
+Silicon only for the first release (0.1.0); other installer validation is
+deferred. Tag builds and default dry runs now select `macos-arm`; manual
+other-platform dry runs remain available. Publishing itself is still unverified.

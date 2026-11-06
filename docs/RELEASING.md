@@ -14,11 +14,17 @@ signing configuration. Release builds have no build cache.
   It predates the sidecar rename and Linux deb/rpm packages.
 - Dry run #5 (`41028261327`) passed Linux after those changes. The Linux
   packages were subsequently tested in isolated containers.
-- Windows and both Mac release legs need another run on the current candidate.
+- Public dry run #6 (`42241545356`, commit `0b163fd`) passed the Apple Silicon
+  build, sidecar checks, public attestation and artifact uploads. The owner
+  installed and launched its DMG successfully; macOS required the documented
+  Privacy & Security workaround. Apply/Undo and other smoke-test steps were
+  not explicitly reported.
+- The owner chose **Apple Silicon only for 0.1.0**. Intel Mac, Windows and
+  Linux installer validation is deferred to later releases.
 - The repository is public and has no tags or releases (verified through the
   GitHub API on November 6). The workflow enables
   provenance attestations automatically when `repository.private` is false;
-  the first public dry run must verify that step.
+  that step passed in the Apple Silicon dry run.
 - The tag-only publish job has never run. A manual dry run does not exercise it.
 
 `FIRST-CI-RUN.md` is the historical record of initial checks and failures;
@@ -27,14 +33,14 @@ its statements about workflows never having run are historical.
 ## Build and inspect the candidate
 
 1. Push the prepared release commit to `main` and confirm CI is green.
-2. In Actions, choose **release → Run workflow**, branch **main**, **legs: all**.
-   This builds six installers across four platform legs, computes checksums,
-   creates public-repository attestations, and uploads artifacts. It does not
+2. For another dry run, choose **release → Run workflow**, branch **main**,
+   **legs: macos-arm**. This builds the Apple Silicon DMG, computes checksums,
+   creates a public-repository attestation, and uploads artifacts. It does not
    publish a GitHub release.
-3. Inspect every build leg, attestation, artifact upload, checksum file and
-   Linux package-content check. Keep the no-cache and minimum-permissions
+3. Inspect the build, attestation, artifact uploads and checksum file.
+   Keep the no-cache and minimum-permissions
    design intact if a fix is needed.
-4. Smoke-test installers on the target systems with a synthetic library and
+4. Smoke-test the Apple Silicon installer with a synthetic library and
    disposable database: launch; confirm bundled ffmpeg/ffprobe are found;
    scan photos and video in Default mode; review and quarantine a file;
    Apply; Undo; quit and reopen to confirm the review resumes. HEIC coverage
@@ -57,17 +63,18 @@ git tag -v v0.1.0
 git push origin refs/tags/v0.1.0
 ```
 
-The tag triggers another complete build. Only after every build succeeds does
-the isolated `publish` job download that run's installers and checksum files
+The tag triggers another Apple Silicon build. Only after it succeeds does
+the isolated `publish` job download that run's installer and checksum file
 and attach them to the GitHub release. It publishes automatically; the current
 workflow does not create a draft or prerelease. Do not push a version tag just
 to test a build. Do not move a published tag to repair a release.
 
-Inspect the first publish run and confirm that the release contains both Mac
-DMGs, the Windows MSI, all three Linux formats, and four checksum files.
-Verify a downloaded release asset again. Use `releases/v0.1.0.md` as the release
-description; the current workflow uploads assets but does not populate that
-description from the file.
+Inspect the first publish run and confirm that the release contains
+`photodedup_0.1.0_aarch64.dmg` and `SHA256SUMS-macos-15.txt`.
+Verify a downloaded release asset again. The publish job reads the release
+description from `docs/releases/<tag>.md`; prepare a matching notes file before
+each future tag. Other platforms remain selectable for manual dry runs; expand
+the tag build matrix deliberately when their installers are ready to ship.
 
 ## Public repository follow-up from the original handoff
 

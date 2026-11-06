@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# Builds the installers when a version tag is pushed (`git tag v0.1.0 && git
-# push --tags`) and attaches them to a GitHub release with checksums and build
-# attestations.
+# Builds the Apple Silicon installer when a signed version tag is pushed and
+# attaches it to a GitHub release with checksums and build attestations.
 #
 # Hardening, because this workflow handles release artifacts:
 #  * every third-party action is pinned to a full commit SHA (the tag is in the
@@ -12,35 +11,30 @@
 #  * only the small publish job can write to the release, and all it does is
 #    upload files the build job already produced and attested.
 #
-# NOTE: first dry run 2026-10-29 (see docs/FIRST-CI-RUN.md): the Apple Silicon leg
-# built everything, then failed on the attestation step (private repository).
-# Before the first tag, run it by hand again (Actions tab, "Run workflow"). What
-# was verified locally is the
-# pieces it strings together, on macOS/arm64 only: building the LGPL ffmpeg
-# (scripts/build-sidecar.sh), the licence gate on it, and `tauri build`. The
-# Windows and Linux legs, and the x86-64 macOS leg, are untested.
+# First release: Apple Silicon only. Public dry run 42241545356 passed,
+# including attestations; the owner installed and launched its DMG successfully.
+# Other platform legs remain available for manual testing before future releases.
 name: release
 
 on:
   push:
     tags: ["v*"]
-  # A dry run from the Actions tab: builds every installer and keeps them as
+  # A dry run from the Actions tab: builds the selected installers and keeps them as
   # workflow artifacts, but publishes nothing (the publish job needs a tag).
-  # Private-repository minutes are billed per platform (macOS x10, Windows x2),
-  # so a dry run builds ONE leg unless told otherwise; a tag always builds all.
+  # Both dry runs and tags default to Apple Silicon for the initial release.
   workflow_dispatch:
     inputs:
       legs:
         description: "Which installer to build (macos-intel is the most expensive)"
         type: choice
-        default: linux
+        default: macos-arm
         options: [linux, windows, macos-arm, macos-intel, all]
 
 # Nothing by default; each job asks for exactly what it needs.
 permissions: {}
 
 jobs:
-  # Chooses the build matrix: every leg for a tag, the chosen one for a dry run.
+  # Tags publish Apple Silicon only; dry runs can still select other platforms.
   plan:
     runs-on: ubuntu-22.04
     outputs:
@@ -48,7 +42,7 @@ jobs:
     steps:
       - id: pick
         env:
-          LEGS: ${{ github.event_name == 'workflow_dispatch' && inputs.legs || 'all' }}
+          LEGS: ${{ github.event_name == 'workflow_dispatch' && inputs.legs || 'macos-arm' }}
         run: |
           # Labels checked against GitHub's runner docs on 2026-10-29: macos-14
           # is retired on 2026-11-02 and macos-13 no longer exists.
@@ -284,6 +278,10 @@ jobs:
     permissions:
       contents: write         # the only job that can touch the release
     steps:
+      # Read the reviewed release notes from this tag without retaining credentials.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # Every artifact of this run is an installer or a checksum file.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -291,4 +289,5 @@ jobs:
           path: dist
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
+          body_path: docs/releases/${{ github.ref_name }}.md
           files: dist/*
