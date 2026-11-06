@@ -12,7 +12,7 @@ exclude = ["spikes"]
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/REPLACE_ME/photodedup"
+repository = "https://github.com/amatemeow/photodedup"
 
 [workspace.dependencies]
 rayon = "1"

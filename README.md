@@ -27,16 +27,24 @@ It grew out of a working single-purpose script used on one trip's photos (see
   never overwrites.
 - **Is polite to your computer.** Three scan speeds (Efficient, Default,
   Performance) trade time for fans and heat.
+- **Helps review the whole library.** Browse every scanned file, manage
+  quarantine, and review possible defects detected by classical image checks.
 
 ## Status
 
-The engine, review UI, apply/undo, and options are built and tested. The
-desktop app (`src-tauri/`) builds and runs on macOS/arm64 with a bundled LGPL
-ffmpeg. **Not yet done:** Windows and Linux packaging, paid-certificate
-signing, a Homebrew cask, the installer workflows have never run on GitHub
-(`docs/FIRST-CI-RUN.md` says what to expect), and the interface still needs a
-design pass. See `ROADMAP.md` for what is deferred,
-and what is known to be rough, in detail.
+Preparing the first release, **0.1.0**. Engine tests pass on Linux, macOS and
+Windows; the UI and desktop shell compile in CI. Installer dry runs have
+produced macOS DMGs (Apple Silicon and Intel), a Windows MSI, and Linux
+AppImage, deb and rpm packages, with bundled LGPL ffmpeg/ffprobe. Linux
+packages have also been tested in isolated containers.
+
+The current release candidate still needs a full installer dry run with
+public-repository attestations and installer smoke tests. The tag-only
+publish job has not yet been exercised. See [the release checklist](docs/RELEASING.md).
+Paid-certificate signing/notarisation and package-manager distribution remain
+deferred; [installation notes](docs/INSTALL.md) explain first-launch warnings.
+AI model export tooling exists, but model inference and People are not part
+of 0.1.0. See `ROADMAP.md` for the remaining work and known limitations.
 
 ## Running it
 
@@ -87,20 +95,20 @@ cd ui && npm ci && npm run check && npm test
 `scripts/ui-audit/` has screenshot, accessibility (axe-core, WCAG 2.2 AA) and
 interaction-timing tools for the UI (see its README).
 
-A few regression tests run against a private reference photo set (a real
-library of several thousand HEIC, JPEG and video files the engine was validated
-on). It is personal data and is not distributed, so those tests are
-`#[ignore]`d and skip themselves. A maintainer who has the set runs them with
+Use a generated library and a temporary database for integration tests:
 
 ```
-PHOTODEDUP_REFERENCE_SET=/path/to/the/photos cargo test --workspace -- --ignored
+python3 scripts/make-fixture.py /tmp/photodedup-fixture
+PHOTODEDUP_FIXTURE=/tmp/photodedup-fixture cargo test --release -p photodedup-core --test fixture -- --ignored
 ```
 
-(they also need ffmpeg and ffprobe on `PATH`; two diagnostic examples,
-`dump_clusters` and `scan_check`, use the same variable). "The prototype" in the
-code comments means the earlier single-purpose Python version this engine
-replaces; it is not part of this repository. The desktop shell is a separate
-Cargo workspace so its large dependency tree stays out of engine builds.
+The generator needs ffmpeg/ffprobe; HEIC cases additionally need sample HEICs
+supplied with `--heic-from` (keep personal samples out of Git). A few legacy
+ignored tests still reference a private photo library; they are not the
+recommended test path. "The prototype" in code comments means the earlier
+single-purpose Python version, which is not part of this repository. The
+desktop shell is a separate Cargo workspace so its large dependency tree
+stays out of engine builds.
 
 Layout: `crates/core` (the engine, no I/O policy), `crates/server` (local HTTP
 API), `crates/cli`, `ui/` (Svelte, talks only HTTP), `src-tauri/` (the native

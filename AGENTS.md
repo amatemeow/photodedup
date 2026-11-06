@@ -162,3 +162,14 @@ the tag-only publish path, Windows scheduling, children surviving app exit,
 content-based resume/incremental or interrupted scans, and cloud-file behavior.
 Consult ROADMAP.md and `.agents/311026_ai_spike.md` for details rather than
 assuming old to-do lists still match the code.
+
+## First release preparation (November 6)
+
+The user prioritised the first release before AI runtime integration. The
+repository is public (verified through the GitHub API). CI at `56e0713` passed all seven jobs, including
+Windows; the models workflow at `66d10eb` reproduced the pinned artifacts.
+These complete the CI/model verification step in the older handoff above.
+See `docs/RELEASING.md` for the release sequence and remaining checks, and
+`docs/releases/v0.1.0.md` for prepared release notes. The public attestation and
+tag-only publish paths still need verification. Do not treat the older private-
+repository status or October Actions quota as current.
