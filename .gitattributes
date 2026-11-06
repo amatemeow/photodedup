@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+# Keep text identical on every platform, including SHA-256-pinned model locks.
+# Binary files are detected automatically and retain their original bytes.
+* text=auto eol=lf

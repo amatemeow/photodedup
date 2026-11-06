@@ -20,6 +20,9 @@ before acting. Do not resume implementation just because it is listed here.
 - Never push or force-push unless explicitly requested. The user normally
   pushes. History rewrites require explicit authorization and verified
   before/after snapshots.
+- Commit completed basic tasks and fixes without asking, after appropriate
+  verification and following the project's identity, signing, and message
+  conventions. Leave pushing to the user.
 - Use plain commit messages, without AI co-author or generated-by attribution.
   Write messages to a temporary file and use `git commit -F` to avoid shell
   substitution. Do not add `[skip ci]` (the November 2 decision supersedes old
