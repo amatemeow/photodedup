@@ -102,7 +102,7 @@ jobs:
       # documents. The licence gate then runs outside MSYS2 (see the script).
       - name: MSYS2 toolchain for the ffmpeg build
         if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        uses: msys2/setup-msys2@3c51bf698df1e37b2261f53cb67797b97761185c # v2.34.0
         with:
           msystem: MINGW64
           path-type: inherit     # keep rustc/cargo on the PATH
@@ -158,7 +158,7 @@ jobs:
 
       - name: Install cargo-about
         if: ${{ !(runner.os == 'macOS' && runner.arch == 'X64') }}
-        uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-about@0.9.3
       # There is no prebuilt cargo-about for Intel macOS. The action then builds
@@ -287,7 +287,7 @@ jobs:
         with:
           merge-multiple: true
           path: dist
-      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           body_path: docs/releases/${{ github.ref_name }}.md
           files: dist/*
